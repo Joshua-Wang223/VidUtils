@@ -392,7 +392,8 @@ def process_file(
         actual_width, actual_height = orig_width, orig_height
 
     t_file_start = time.perf_counter()
-    print(f"处理文件：{input_file} (原尺寸: {actual_width}x{actual_height})")
+    print(f"\n处理文件：{input_file}")
+    print(f"  原始尺寸: {actual_width}x{actual_height} → 目标裁剪尺寸: {out_width}x{out_height}")
 
     # 尺寸相同时跳过
     if actual_width == out_width and actual_height == out_height:

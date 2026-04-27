@@ -1,7 +1,7 @@
-git# VidUtils · 视频实用工具集
+# VidUtils · 视频实用工具集
 
 > 一组基于 **FFmpeg** 的命令行视频处理工具，聚焦 *批量、可复现、生产可用* 的视频工程任务。
-> 当前提供居中裁剪（CPU / 硬件加速双版本），后续将逐步扩展缩放、修复、增强等能力。
+> 当前提供居中裁剪（CPU 顺序版 / CPU 并发版 / 硬件加速版三个变体），后续将逐步扩展缩放、修复、增强等能力。
 
 ---
 
@@ -12,8 +12,9 @@ git# VidUtils · 视频实用工具集
 - [环境要求](#环境要求)
 - [安装](#安装)
 - [工具一览](#工具一览)
-  - [vidcrop_cpu.py — 纯 CPU 居中裁剪](#vidcrop_cpupy--纯-cpu-居中裁剪)
-  - [vidcrop_hwaccel.py — 硬件加速居中裁剪](#vidcrop_hwaccelpy--硬件加速居中裁剪)
+  - [vidcrop_cpu_v0.py — CPU 顺序裁剪](#vidcrop_cpu_v0py--cpu-顺序裁剪)
+  - [vidcrop_cpu_v1.py — CPU 并发裁剪](#vidcrop_cpu_v1py--cpu-并发裁剪)
+  - [vidcrop_hwaccel.py — 硬件加速裁剪](#vidcrop_hwaccelpy--硬件加速裁剪)
 - [快速上手](#快速上手)
 - [常见场景配方](#常见场景配方)
 - [硬件加速说明](#硬件加速说明)
@@ -40,32 +41,48 @@ git# VidUtils · 视频实用工具集
 
 ## 功能矩阵
 
-| 能力 | `vidcrop_cpu.py` | `vidcrop_hwaccel.py` |
-|---|---|---|
-| 居中裁剪 | ✅ | ✅ |
-| 单文件 / 目录批量 | ✅ | ✅ |
-| CPU 软件编码器（libx264/265、VP9、AV1、ProRes…） | ✅ | ✅ |
-| NVIDIA NVENC（h264 / hevc） | ❌ | ✅ |
-| 硬件解码（CUDA / Vulkan / VA-API / OpenCL） | ❌ | ✅ |
-| `crop_cuda` 全 GPU 流水线 | ❌ | ✅ |
-| 运行时硬件能力探测 | — | ✅ |
-| 策略自动降级 | — | ✅ |
-| 实时进度条（%/帧/fps/ETA） | ✅ | ✅ |
-| 文件级耗时与体积对比 | ✅ | ✅ |
-| 编码器别名归一化 | ❌ | ✅ |
-| preset 双向映射（NVENC ↔ x264） | ❌ | ✅ |
-| CQ → CRF 等效质量映射（降级场景） | ❌ | ✅ |
+| 能力 | `vidcrop_cpu_v0.py` | `vidcrop_cpu_v1.py` | `vidcrop_hwaccel.py` |
+|---|---|---|---|
+| 居中裁剪（crop 模式） | ✅ | ✅ | ✅ |
+| 等比缩放+居中裁剪（cover 模式） | ✅ | ✅ | ❌ |
+| 单文件 / 目录批量 | ✅ | ✅ | ✅ |
+| 递归扫描目录（`-r`） | ✅ | ✅ | ❌ |
+| CPU 软件编码器（libx264/265、VP9、AV1、ProRes、MJPEG…） | ✅ | ✅ | ✅ |
+| NVIDIA NVENC（h264 / hevc） | ❌ | ❌ | ✅ |
+| AMD AMF（h264 / hevc） | ❌ | ❌ | ✅ |
+| Intel QSV（h264 / hevc） | ❌ | ❌ | ✅（preset 映射） |
+| 硬件解码（CUDA / Vulkan / VA-API / OpenCL） | ❌ | ❌ | ✅ |
+| `crop_cuda` 全 GPU 流水线 | ❌ | ❌ | ✅ |
+| 运行时硬件能力探测 | — | — | ✅ |
+| 策略自动降级 | — | — | ✅ |
+| 多任务并行处理 | ❌ | ✅ | ❌ |
+| CPU / 内存自动探测与并发决策 | ❌ | ✅ | ❌ |
+| 音频重编码（aac / libopus…） | ❌ | ✅ | ❌ |
+| 同尺寸跳过优化 | ❌ | ✅ | ❌ |
+| Dry-run 命令预览 | ✅ | ✅ | ❌ |
+| 日志文件记录（`--log`） | ✅ | ✅ | ❌ |
+| `--extra-args` 自定义 FFmpeg 参数 | ✅ | ✅ | ❌ |
+| 实时进度条（%/帧/fps/ETA） | ✅ | ✅（并发时聚合面板） | ✅ |
+| 文件级耗时与体积对比 | ✅ | ✅ | ✅ |
+| 编码器别名归一化 | ❌ | ❌ | ✅ |
+| preset 双向映射（NVENC ↔ x264） | ❌ | ❌ | ✅ |
+| CQ → CRF 等效质量映射（降级场景） | ❌ | ❌ | ✅ |
 
-> 简而言之：**CPU 版**稳定、极简、零依赖；**硬件加速版**在 CPU 版基础上叠加了硬件加速、智能降级与可观测能力。两者可在同一 pipeline 中按需互换。
+> **如何选择？**
+> - 无 GPU、要 cover 模式、需要 dry-run 或日志 → **v0（顺序）** 或 **v1（并发）**
+> - 有多核 CPU、批量大、需要并行提速 → **v1**
+> - 有 NVIDIA / AMD / Intel GPU、追求吞吐量 → **hwaccel**
 
 ---
 
 ## 环境要求
 
 - **Python** ≥ 3.8（仅使用标准库，无需 `pip install`）
-- **FFmpeg** ≥ 4.4，且 `ffmpeg` / `ffprobe` 在 `PATH` 中可见（或通过 `--ffmpeg-bin` 指定）
+- **FFmpeg** ≥ 4.4，且 `ffmpeg` / `ffprobe` 在 `PATH` 中可见（或通过 `--ffmpeg-bin` 指定，仅 hwaccel 版支持）
 - **硬件加速版本额外需要**（可选，按需启用）：
   - NVIDIA CUDA：较新驱动 + 支持 NVENC 的显卡（Turing / Ampere / Ada 等）
+  - AMD AMF：支持 AMF 的 Radeon 显卡与驱动
+  - Intel QSV：集显或 Arc 系列 + 对应驱动
   - Vulkan：支持 Vulkan 1.1+ 的 GPU 与驱动
   - VA-API：Linux 下 Intel / AMD GPU 驱动
   - OpenCL：可用的 OpenCL 1.2+ 运行时
@@ -73,7 +90,7 @@ git# VidUtils · 视频实用工具集
 **检查 FFmpeg 是否具备硬件编译选项：**
 
 ```bash
-ffmpeg -hide_banner -encoders | grep -E 'nvenc|vaapi|qsv|amf|videotoolbox'
+ffmpeg -hide_banner -encoders | grep -E 'nvenc|amf|qsv|vaapi|videotoolbox'
 ffmpeg -hide_banner -hwaccels
 ```
 
@@ -88,10 +105,11 @@ git clone https://github.com/<your-org>/vidutils.git
 cd vidutils
 
 # 可选：赋予执行权限（类 Unix 系统）
-chmod +x vidcrop_cpu.py vidcrop_hwaccel.py
+chmod +x vidcrop_cpu_v0.py vidcrop_cpu_v1.py vidcrop_hwaccel.py
 
 # 快速自检
-python vidcrop_cpu.py --help
+python vidcrop_cpu_v0.py --help
+python vidcrop_cpu_v1.py --help
 python vidcrop_hwaccel.py --help
 ```
 
@@ -99,54 +117,121 @@ python vidcrop_hwaccel.py --help
 
 ## 工具一览
 
-### `vidcrop_cpu.py` — 纯 CPU 居中裁剪
+### `vidcrop_cpu_v0.py` — CPU 顺序裁剪
 
-- 零硬件依赖，跨平台行为完全一致
-- 支持 `libx264`, `libx265`, `libvpx`, `libvpx-vp9`, `libaom-av1`, `librav1e`, `prores(_ks)`, `mpeg4`, `libxvid`, `copy`
-- 根据编码器自动推断容器扩展名（`.mp4 / .webm / .mov / .avi`）
-- 不支持的参数（如给 `libvpx-vp9` 传 `--preset`）会被自动忽略并提示
+单进程顺序执行版，零硬件依赖，跨平台行为完全一致。每次处理一个文件并显示细粒度实时进度条。
 
-适用场景：服务器批处理、CI 流水线、无 GPU 环境、对结果可复现性要求高的归档任务。
+**支持的编码器：** `libx264`, `libx265`, `libvpx`, `libvpx-vp9`, `libaom-av1`, `librav1e`, `prores`, `prores_ks`, `mpeg4`, `libxvid`, `mjpeg`, `copy`
 
-### `vidcrop_hwaccel.py` — 硬件加速居中裁剪
+**主要参数：**
 
-- **运行时**探测硬件能力（非编译字符串匹配），逐项启动微型 FFmpeg 任务验证
-- 根据硬件能力自动生成 **5 级策略链** 并按优先级尝试：
-  1. CUDA 全流水线（硬解 + `crop_cuda` + NVENC 硬编）
-  2. 硬解（auto） + NVENC 硬编
-  3. 指定硬解（CUDA / Vulkan / VA-API / OpenCL） + CPU 编码
-  4. auto 模式下选择最佳硬解 + CPU 编码
-  5. 纯 CPU 兜底
-- 前一级失败自动降级到下一级，**不会因某个硬件问题导致整批失败**
-- 编码器别名自动归一化：`h265_nvenc → hevc_nvenc`、`x264 → libx264`、`x265 → libx265` …
-- preset 在 NVENC（`p1~p7`）与 libx264（`ultrafast~veryslow`）之间自动双向映射
-- 降级场景下 `--cq` 按等效视觉质量映射为 `--crf`（不盲目透传数值）：
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--input` | 必选 | 输入视频文件或目录 |
+| `--output` | 必选 | 输出文件或目录 |
+| `--output-width` | 必选 | 目标视频宽度 |
+| `--output-height` | 必选 | 目标视频高度 |
+| `--mode` | `crop` | `crop`=直接居中裁剪；`cover`=等比缩放至完全覆盖后居中裁剪 |
+| `--original-width/height` | 自动检测 | 手动指定源视频尺寸，可跳过 ffprobe 探测 |
+| `--codec` | `libx264` | 视频编码器 |
+| `--crf` | FFmpeg 内置默认 | CRF 质量值（0–63，越小质量越高） |
+| `--preset` | `slow` | 编码器预设，仅 libx264/libx265 生效 |
+| `--pix-fmt` | `auto` | 像素格式；ProRes 自动设为 `yuv422p10le`，其余多数为 `yuv420p` |
+| `--container` | 按编码器推断 | 手动指定容器扩展名，如 `.mp4` / `.mkv` |
+| `--overwrite` | 否 | 覆盖已存在的输出文件 |
+| `-r, --recursive` | 否 | 递归扫描输入目录 |
+| `--dry-run` | 否 | 仅生成并显示 FFmpeg 命令，不执行转码 |
+| `--log LOG_FILE` | 无 | 将所有输出同时记录到日志文件 |
+| `--extra-args` | 无 | 追加到 FFmpeg 命令末尾的自定义参数（必须放在命令最后） |
 
-  | 源编码器 | 目标编码器 | 映射公式 |
-  |---|---|---|
-  | `hevc_nvenc` | `libx265` | `crf = cq + 4` |
-  | `h264_nvenc` | `libx264` | `crf = cq + 1` |
+适用场景：服务器批处理、CI 流水线、无 GPU 环境、需要 dry-run 验证、需要日志归档的任务。
 
-适用场景：本地工作站、拥有 NVIDIA / Intel / AMD GPU 的环境、需要处理大量素材且对吞吐量敏感的任务。
+---
+
+### `vidcrop_cpu_v1.py` — CPU 并发裁剪
+
+多任务并发版，在 v0 基础上增加了并行处理、智能资源分配和音频重编码能力。
+
+**支持的编码器：** 同 v0（`libx264`, `libx265`, `libvpx`, `libvpx-vp9`, `libaom-av1`, `librav1e`, `prores`, `prores_ks`, `mpeg4`, `libxvid`, `mjpeg`, `copy`）
+
+**在 v0 基础上新增的参数：**
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--workers` | `0`（自动） | 并行任务数；0 表示根据 CPU 核数与可用内存自动决定 |
+| `--threads` | `0`（自动） | 每个 FFmpeg 任务的线程数；0 表示按编码器画像自动决定 |
+| `--mem-per-job` | `0`（按编码器画像） | 单任务估计内存占用（GB），用于并发上限计算 |
+| `--sequential` | 否 | 强制顺序执行，退化为 v0 行为（显示单文件细粒度进度条） |
+| `--audio-codec` | `copy` | 音频编码器；如需重编码可指定 `aac` / `libopus` 等 |
+| `--audio-bitrate` | `128k` | 音频重编码码率（仅在 `--audio-codec` 非 `copy` 时生效） |
+| `--no-skip-same-size` | 否 | 即使源尺寸等于目标尺寸也强制转码（默认会跳过） |
+
+**并发决策说明：**
+
+v1 启动时自动探测 CPU 核数（支持 cgroup v1/v2 限制感知）和可用内存，结合编码器画像（推荐线程数、单任务内存占用）计算最大并行任务数。并发时显示聚合进度面板；单文件或顺序模式下显示细粒度实时进度条。
+
+**编码器画像（推荐线程数 × 内存估算）：**
+
+| 编码器 | 推荐线程数 | 单任务内存估算 |
+|---|---|---|
+| libx264 / libx265 | 4 | 0.8 / 1.2 GB |
+| libvpx-vp9 / libaom-av1 | 4 | 1.0 / 1.5 GB |
+| librav1e | 4 | 1.2 GB |
+| mpeg4 / libxvid / mjpeg | 2 | 0.4 / 0.4 / 0.3 GB |
+| copy | 1 | 0.1 GB |
+
+适用场景：本地多核工作站、需要并行批量处理大量素材、或需要音频重编码的任务。
+
+---
+
+### `vidcrop_hwaccel.py` — 硬件加速裁剪
+
+硬件加速版，运行时探测 GPU 能力，按优先级依次尝试策略链，前一级失败自动降级。**仅支持居中裁剪（crop）模式，不支持 cover 模式。**
+
+**支持的编码器：** 所有 CPU 软件编码器 + `h264_nvenc`, `hevc_nvenc`, `h264_amf`, `hevc_amf`，以及通过别名归一化支持 `x264`→`libx264`、`h265_nvenc`→`hevc_nvenc` 等常见写法
+
+**主要参数：**
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--input` | 必选 | 输入视频文件或目录（**不支持 `-r` 递归**） |
+| `--output` | 必选 | 输出文件或目录 |
+| `--output-width` | 必选 | 目标视频宽度 |
+| `--output-height` | 必选 | 目标视频高度 |
+| `--original-width/height` | 自动检测 | 手动指定源视频尺寸 |
+| `--codec` | `libx264` | 视频编码器；支持 `auto` 自动选择与别名归一化 |
+| `--crf` | `17` | CPU 编码器质量值（0–51） |
+| `--cq` | `16` | GPU 编码器质量值（0–51，NVENC/AMF） |
+| `--preset` | `slow` | 编码器预设；NVENC（p1~p7）与 libx264 风格自动双向映射 |
+| `--hwaccel` | `auto` | 硬件加速模式（详见下方说明） |
+| `--overwrite` | 否 | 覆盖已存在的输出文件 |
+| `--container` | 按编码器推断 | 手动指定容器扩展名 |
+| `--ffmpeg-bin` | `ffmpeg` | 自定义 FFmpeg 可执行路径；ffprobe 自动从同目录推导 |
+
+> **注意：** hwaccel 版暂不支持 `--mode cover`、`-r/--recursive`、`--dry-run`、`--log`、`--extra-args`。如需这些功能请使用 CPU 版。
 
 ---
 
 ## 快速上手
 
-**最常见的两条命令：**
-
 ```bash
-# 把一个文件夹下的所有视频居中裁剪为 1280×720（自动选择最佳编码器）
+# CPU 顺序版：居中裁剪，libx264，CRF 20
+python vidcrop_cpu_v0.py \
+    --input video.mkv --output out.mp4 \
+    --output-width 1920 --output-height 1080 \
+    --codec libx264 --crf 20 --preset slow
+
+# CPU 并发版：等比填充+裁剪，批量，自动并行
+python vidcrop_cpu_v1.py \
+    --input ./videos --output ./cropped \
+    --output-width 1280 --output-height 720 \
+    --mode cover --codec libx265 --crf 18 --overwrite
+
+# 硬件加速版：整目录批量，自动选择最优路径
 python vidcrop_hwaccel.py \
     --input ./videos --output ./cropped \
     --output-width 1280 --output-height 720 \
     --codec auto --overwrite
-
-# 纯 CPU 环境 · libx265 高质量归档
-python vidcrop_cpu.py \
-    --input video.mkv --output out.mp4 \
-    --output-width 1920 --output-height 1080 \
-    --codec libx265 --crf 18 --preset slow
 ```
 
 ---
@@ -163,7 +248,16 @@ python vidcrop_hwaccel.py \
     --codec hevc_nvenc --cq 20 --preset p5
 ```
 
-### 2. Linux 服务器 + Intel 核显（VA-API 仅硬解，软件编码）
+### 2. 等比覆盖裁剪（cover 模式，CPU 并发）
+
+```bash
+python vidcrop_cpu_v1.py \
+    --input ./clips --output ./out \
+    --output-width 1280 --output-height 720 \
+    --mode cover --codec libx264 --crf 20 --workers 4
+```
+
+### 3. Linux 服务器 + Intel 核显（VA-API 仅硬解，软件编码）
 
 ```bash
 python vidcrop_hwaccel.py \
@@ -172,7 +266,7 @@ python vidcrop_hwaccel.py \
     --codec libx264 --crf 20 --hwaccel vaapi
 ```
 
-### 3. CI / 容器环境（强制禁用所有硬件加速）
+### 4. CI / 容器环境（强制禁用所有硬件加速）
 
 ```bash
 python vidcrop_hwaccel.py \
@@ -181,25 +275,61 @@ python vidcrop_hwaccel.py \
     --codec libx264 --crf 22 --hwaccel none
 ```
 
-### 4. 网页分发（VP9 / WebM）
+### 5. 干跑（Dry-run）预览命令，不转码
 
 ```bash
-python vidcrop_cpu.py \
+python vidcrop_cpu_v0.py \
+    --input ./videos --output ./out \
+    --output-width 1280 --output-height 720 --dry-run
+```
+
+### 6. 带日志归档的批量任务
+
+```bash
+python vidcrop_cpu_v1.py \
+    --input ./videos --output ./out \
+    --output-width 1280 --output-height 720 \
+    --recursive --log process.log
+```
+
+### 7. 网页分发（VP9 / WebM）
+
+```bash
+python vidcrop_cpu_v0.py \
     --input ./videos --output ./web \
     --output-width 854 --output-height 480 \
     --codec libvpx-vp9 --crf 32
 ```
 
-### 5. 长期归档（AV1，极致压缩率）
+### 8. 长期归档（AV1，极致压缩率）
 
 ```bash
-python vidcrop_cpu.py \
+python vidcrop_cpu_v1.py \
     --input ./videos --output ./archive \
     --output-width 1920 --output-height 1080 \
-    --codec libaom-av1 --crf 30
+    --codec libaom-av1 --crf 30 --sequential
 ```
 
-### 6. 自定义 FFmpeg 构建路径
+### 9. 音频重编码（视频 + 音频统一转码）
+
+```bash
+python vidcrop_cpu_v1.py \
+    --input ./videos --output ./out \
+    --output-width 1280 --output-height 720 \
+    --codec libx264 --crf 20 \
+    --audio-codec aac --audio-bitrate 192k
+```
+
+### 10. 手动并发策略（2 任务 × 4 线程）
+
+```bash
+python vidcrop_cpu_v1.py \
+    --input ./videos --output ./out \
+    --output-width 1920 --output-height 1080 \
+    --workers 2 --threads 4
+```
+
+### 11. 自定义 FFmpeg 构建路径
 
 ```bash
 python vidcrop_hwaccel.py \
@@ -209,7 +339,14 @@ python vidcrop_hwaccel.py \
     --ffmpeg-bin /opt/ffmpeg-7.0/bin/ffmpeg
 ```
 
-> `ffprobe` 会从 `--ffmpeg-bin` 所在目录推断，保证版本一致。
+### 12. 追加自定义 FFmpeg 参数
+
+```bash
+python vidcrop_cpu_v0.py \
+    --input video.mp4 --output out.mp4 \
+    --output-width 1280 --output-height 720 \
+    --extra-args -- -max_muxing_queue_size 4096
+```
 
 ---
 
@@ -238,6 +375,14 @@ python vidcrop_hwaccel.py \
 | `vulkan` / `vaapi` / `opencl` | 强制使用对应后端做硬解，编码走 CPU |
 | `none` | 禁用所有硬件加速，相当于退化为 CPU 版行为 |
 
+**5 级策略链（按优先级依次尝试）：**
+
+1. CUDA 全流水线（硬解 + `crop_cuda` + NVENC 硬编）
+2. auto 硬解 + NVENC 硬编（CPU 做 crop）
+3. 指定硬解（CUDA / Vulkan / VA-API / OpenCL）+ CPU 软件编码
+4. auto 模式下最佳硬解 + CPU 软件编码
+5. 纯 CPU 兜底
+
 **策略降级示例：**
 
 > 用户请求 `--codec hevc_nvenc --cq 20`，但 NVENC 驱动异常：
@@ -254,19 +399,33 @@ python vidcrop_hwaccel.py \
 CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率，51 = 最低质量
 ```
 
-| 用途 | 推荐 CRF（CPU） | 推荐 CQ（NVENC） |
+| 用途 | 推荐 CRF（CPU） | 推荐 CQ（NVENC/AMF） |
 |---|---|---|
 | 归档 / 母带 | 16–18 | 16–19 |
 | 通用发布 | 19–22 | 20–23 |
 | 网页分发 | 23–26 | 24–27 |
 | 极限压缩 | 27–30 | 28–32 |
 
+**各版本默认质量值：**
+
+| 版本 | CRF 默认值 | CQ 默认值 |
+|---|---|---|
+| `vidcrop_cpu_v0.py` | 不设默认（沿用 FFmpeg 内置） | — |
+| `vidcrop_cpu_v1.py` | 20（支持 CRF 的编码器自动填充） | — |
+| `vidcrop_hwaccel.py` | 17（CPU 路径） | 16（GPU 路径） |
+
 **关键规则：**
 
-- CPU 编码器用 `--crf`，GPU 编码器用 `--cq`
-- 两者都不指定时：CPU 默认 `--crf 17`，GPU 默认 `--cq 16`
-- 两者同时指定：按实际编码器族自动选用对应参数
+- CPU 编码器用 `--crf`，GPU 编码器（NVENC/AMF）用 `--cq`
+- hwaccel 版同时指定 `--crf` 和 `--cq` 时，根据实际落用的编码器自动选用对应参数
 - 降级发生时：`--cq` 会按等效质量映射为 `--crf`，不会直接透传
+
+**CQ → CRF 降级映射：**
+
+| 原编码器 | 降级目标 | 映射公式 |
+|---|---|---|
+| `hevc_nvenc` | `libx265` | `crf = cq + 4` |
+| `h264_nvenc` | `libx264` | `crf = cq + 1` |
 
 ---
 
@@ -276,8 +435,9 @@ VidUtils 规划作为一个**命令行优先 / Python 原生**的视频工程工
 
 | 模块 | 状态 | 说明 |
 |---|---|---|
-| `vidcrop_cpu.py` | ✅ 已发布 | 纯 CPU 居中裁剪 |
-| `vidcrop_hwaccel.py` | ✅ 已发布 | 硬件加速居中裁剪（CUDA/Vulkan/VA-API/OpenCL） |
+| `vidcrop_cpu_v0.py` | ✅ 已发布 | CPU 顺序裁剪（crop + cover） |
+| `vidcrop_cpu_v1.py` | ✅ 已发布 | CPU 并发裁剪（crop + cover，自动并行） |
+| `vidcrop_hwaccel.py` | ✅ 已发布 | 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL） |
 | `vidscale_*.py` | 🚧 规划中 | 视频缩放：双三次 / Lanczos / `scale_cuda` / `scale_npp`，支持按比例或目标分辨率 |
 | `vidrepair_*.py` | 🚧 规划中 | 视频修复：容器修复（`-c copy` 重封装）、损坏帧跳过、时间戳重建、丢帧补偿 |
 | `videnhance_*.py` | 🚧 规划中 | 视频增强：去噪（`hqdn3d` / `nlmeans`）、锐化（`unsharp` / `cas`）、去隔行、HDR→SDR、AI 超分接入 |
@@ -297,8 +457,9 @@ VidUtils 规划作为一个**命令行优先 / Python 原生**的视频工程工
 ```
 vidutils/
 ├── README.md                 # 本文件
-├── vidcrop_cpu.py            # 纯 CPU 居中裁剪
-├── vidcrop_hwaccel.py        # 硬件加速居中裁剪
+├── vidcrop_cpu_v0.py         # CPU 顺序裁剪（crop + cover，单进程）
+├── vidcrop_cpu_v1.py         # CPU 并发裁剪（crop + cover，多任务并行）
+├── vidcrop_hwaccel.py        # 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL，仅 crop）
 ├── docs/                     # （规划）设计文档与性能基准
 ├── examples/                 # （规划）示例素材与演示脚本
 └── tests/                    # （规划）单元测试与端到端测试
@@ -308,20 +469,37 @@ vidutils/
 
 ## 常见问题（FAQ）
 
-**Q1：为什么硬件加速版探测阶段要真的跑一遍 FFmpeg？**
+**Q1：v0 和 v1 如何选择？**
+
+文件数量少（< 10）或需要精确的单文件进度条时用 **v0**；文件多、系统有足够多核 CPU 时用 **v1** 获得并行加速。v1 的 `--sequential` 参数可强制退化为顺序模式，方便对比验证。
+
+**Q2：为什么 hwaccel 版不支持 cover 模式？**
+
+cover 模式需要先做等比缩放再裁剪，`scale_cuda` 的调用方式与 `crop_cuda` 的策略链集成尚在规划中，当前版本仅支持直接居中裁剪（crop）。
+
+**Q3：为什么硬件加速版探测阶段要真的跑一遍 FFmpeg？**
+
 因为 `ffmpeg -encoders` 只反映编译期选项，**不代表运行时可用**。显卡驱动缺失、容器内无设备映射、NVENC 会话耗尽等场景都会让"编译有、运行时没有"。VidUtils 选择启动一个 64×64 单帧的测试任务，捕获特征错误串，从根本上避免误判。
 
-**Q2：为何降级时要做 CQ → CRF 映射？**
+**Q4：为何降级时要做 CQ → CRF 映射？**
+
 libx265 的压缩效率高于 hevc_nvenc，**相同数值下软件编码质量偏高、文件偏大**。如果用户写了 `--cq 20` 却因 NVENC 故障落到 libx265，直接透传会生成远大于预期的文件。等效映射（`+4 / +1`）更接近用户的原始意图。
 
-**Q3：输出路径是文件还是目录？**
+**Q5：输出路径是文件还是目录？**
+
 规则：**输入是单文件且输出带扩展名 → 当作文件；否则当作目录**。批量模式下若输出误带扩展名会给出警告并自动去除扩展名当作目录。
 
-**Q4：ProRes / AV1 编码非常慢怎么办？**
-这是编码器本身的特性，VidUtils 不做额外猜测。可通过 `--preset` 调低（对 libx264/265），或改用 NVENC（硬件加速版）换取吞吐。
+**Q6：v1 的并发任务数怎么确定？**
 
-**Q5：源文件损坏怎么办？**
-两个脚本都启用了 `-err_detect ignore_err` 与 `-fflags +genpts+discardcorrupt`，损坏帧会被跳过并在日志中提示。完全无法解码的文件会被判失败，不会阻塞后续批次。
+v1 会读取 CPU 配额（cgroup v1/v2 / `sched_getaffinity` / `os.cpu_count` 按优先级依次尝试）和内存（cgroup v1/v2 / `/proc/meminfo`）。然后结合编码器画像中的"推荐线程数"和"单任务内存估算"，同时满足 CPU 槽数限制和内存预算，取两者中较小的值作为并行任务数上限。可通过 `--workers` / `--threads` / `--mem-per-job` 手动覆盖。
+
+**Q7：ProRes / AV1 编码非常慢怎么办？**
+
+这是编码器本身的特性，VidUtils 不做额外猜测。可通过 `--preset` 调低（对 libx264/265），或改用 hwaccel 版配合 NVENC（硬件加速版）换取吞吐。AV1 建议在 v1 中用 `--workers` 控制并发数，避免内存溢出。
+
+**Q8：源文件损坏怎么办？**
+
+三个脚本都启用了 `-err_detect ignore_err` 与 `-fflags +genpts+discardcorrupt`，损坏帧会被跳过并在日志中提示。完全无法解码的文件会被判失败，不会阻塞后续批次。
 
 ---
 

@@ -1,45 +1,97 @@
 #!/usr/bin/env python3
 """
-vidcrop.py - 基于 FFmpeg 的视频批量居中裁剪工具
-自动根据编码器选择容器、智能处理编码参数。
-支持 CPU (libx264/265) 和 GPU (h264_nvenc 等) 编码器质量控制。
-支持 NVIDIA CUDA 硬件加速（解码 + 滤镜 + 编码）及智能降级。
+vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量居中裁剪工具
 
-修复日志（相对 v1）：
-  1. 硬件检测：从编译时字符串匹配改为运行时实际探测（参考 ffmpeg_io.py）
-  2. 硬件解码：使用 -hwaccel auto 替代 -hwaccel cuda，避免强制加载失败的告警
-  3. 编码器别名：自动归一化 h265_nvenc → hevc_nvenc 等常见拼写
-  4. 质量参数：--crf 默认值改为 None，避免与 --cq 误判为"同时指定"
-  5. 策略生成：正确包含用户指定的编码器，不再全部硬编码为 libx264
-  6. 降级质量：编码器降级时不再丢弃用户的质量意图，使用合理的默认值并提示
-  7. CQ→CRF映射：NVENC降级到软件编码器时，将用户的 --cq 值通过 cq_to_crf() 映射
-     为等效视觉质量的 --crf 值，而非硬编码 DEFAULT_CRF（hevc_nvenc→libx265 偏移+4，
-     h264_nvenc→libx264 偏移+1），避免文件体积与用户预期严重偏离
+功能概述
+────────────────────────────────────────────────────────────────────
+  • 单文件 / 文件夹批量处理，自动收集常见视频格式
+  • 居中裁剪至指定分辨率，音频流直接复制不重编码
+  • 根据编码器自动选择容器扩展名并做兼容性校验
+  • 智能区分 CPU / GPU 编码器的质量控制参数（-crf / -cq）
+  • 实时进度条：百分比 / 已处理帧数 / 实时 fps / ETA
+  • 单文件耗时、输入输出体积对比、批量总耗时与均值统计
 
-修复日志（相对 v2）：
-  BUG-1 normalize_codec_name：CODEC_ALIASES.get(lower, codec) → get(lower, lower)，
-        修复非全小写编码器名（如 H264_NVENC）导致所有 set 查找 miss 的问题
-  BUG-2 _check_nvenc_available：超时时返回 False 而非 True，
-        64×64 单帧超时 15s 必然是驱动异常，不应假定可用
-  BUG-3 get_video_dimensions：新增 ffmpeg_bin 参数，通过 _get_ffprobe_bin()
-        推导同目录的 ffprobe，修复自定义 --ffmpeg-bin 时走系统 ffprobe 的问题
-  BUG-4 build_ffmpeg_cmd：删除内部重复的 normalize_preset() 调用，
-        直接使用调用方已归一化的 preset，避免降级场景下二次错误转换
-  WARN-2 FFmpeg 错误诊断：-loglevel error → warning；失败时捕获并打印 stderr
-         最后 20 行，让用户看到实际错误原因
-  OPT-1 实时进度条：通过 -progress pipe:1 -nostats 读取 FFmpeg 结构化进度，
-         显示百分比 / 帧数 / fps / ETA
-  OPT-2 耗时统计：每文件处理耗时 + 输入输出文件大小对比 + 批量总耗时与均值
+硬件加速
+────────────────────────────────────────────────────────────────────
+  • 运行时探测（非编译字符串匹配）下列能力：
+        CUDA 解码、h264_nvenc、hevc_nvenc、crop_cuda 滤镜、
+        Vulkan、VA-API、OpenCL
+  • 按优先级自动生成策略链并依次尝试，前一级失败自动降级：
+        1) CUDA 全流水线（硬解 + crop_cuda + NVENC 硬编）
+        2) 自动硬解 + NVENC 硬编（CPU 做 crop）
+        3) 指定硬解（cuda/vulkan/vaapi/opencl）+ 软件编码
+        4) auto 模式下的最佳硬解 + 软件编码
+        5) 纯 CPU 处理
+  • 失败时打印 FFmpeg stderr 末 20 行辅助诊断
 
-用法示例：
-    # CPU 编码（使用 -crf）
-    python vidcrop.py --input video.mp4 --output out_dir --output-width 640 --output-height 360 --codec libx265 --crf 18 --preset medium
+编码器智能处理
+────────────────────────────────────────────────────────────────────
+  • 名称别名自动归一化：
+        h265_nvenc → hevc_nvenc, x264 → libx264, x265 → libx265, …
+  • preset 在 NVENC 风格（p1~p7）与 libx264 风格
+    （ultrafast~veryslow）之间双向自动映射
+  • 质量参数按编码器族自动选用：
+        - CPU 编码器（libx264/265 等）使用 -crf（默认 17）
+        - GPU 编码器（*_nvenc/_amf/_qsv 等）使用 -cq（默认 16）
+  • 降级场景下若用户仅给了 --cq 而实际落到软件编码器，
+    通过 cq_to_crf() 做等效视觉质量映射而非直接透传：
+        hevc_nvenc → libx265 : crf = cq + 4
+        h264_nvenc → libx264 : crf = cq + 1
+  • 若 --ffmpeg-bin 指定了自定义路径，ffprobe 会从同目录推导，
+    保证版本一致
 
-    # GPU 编码（使用 -cq）
-    python vidcrop.py --input video.mp4 --output out_dir --output-width 640 --output-height 360 --codec h264_nvenc --cq 21 --preset p4
+用法示例
+────────────────────────────────────────────────────────────────────
+  # 1) 单文件 · CPU 编码（libx264 + CRF）
+  python vidcrop_hwaccel.py \
+      --input video.mp4 --output out.mp4 \
+      --output-width 1280 --output-height 720 \
+      --codec libx264 --crf 18 --preset slow
 
-    # 自动选择最佳编码器
-    python vidcrop.py --input ./videos --output ./cropped --output-width 640 --output-height 360 --codec auto
+  # 2) 单文件 · GPU 编码（NVENC H.265 + CQ）
+  python vidcrop_hwaccel.py \
+      --input video.mp4 --output out.mp4 \
+      --output-width 1280 --output-height 720 \
+      --codec hevc_nvenc --cq 20 --preset p5
+
+  # 3) 批量处理整个文件夹（自动选择最优编码器）
+  python vidcrop_hwaccel.py \
+      --input ./videos --output ./cropped \
+      --output-width 640 --output-height 360 \
+      --codec auto --overwrite
+
+  # 4) 强制禁用硬件加速（纯 CPU 环境 / 调试用）
+  python vidcrop_hwaccel.py \
+      --input ./videos --output ./cropped \
+      --output-width 1920 --output-height 1080 \
+      --codec libx265 --crf 22 --hwaccel none
+
+  # 5) 指定硬件加速后端（例如 Linux 上的 VA-API 仅做硬解）
+  python vidcrop_hwaccel.py \
+      --input clip.mkv --output clip_cropped.mp4 \
+      --output-width 1280 --output-height 720 \
+      --codec libx264 --crf 20 --hwaccel vaapi
+
+  # 6) 使用编码器别名（自动归一化为 hevc_nvenc）
+  python vidcrop_hwaccel.py \
+      --input clip.mp4 --output clip_out.mp4 \
+      --output-width 1920 --output-height 1080 \
+      --codec h265_nvenc --cq 19 --preset p6
+
+  # 7) 手动指定容器扩展名 + 自定义 FFmpeg 路径
+  python vidcrop_hwaccel.py \
+      --input ./raw --output ./out \
+      --output-width 1280 --output-height 720 \
+      --codec libx264 --crf 18 \
+      --container .mkv \
+      --ffmpeg-bin /opt/ffmpeg/bin/ffmpeg
+
+  # 8) 显式提供原始分辨率（跳过 ffprobe 探测，适合超大批量）
+  python vidcrop_hwaccel.py \
+      --input ./videos --output ./cropped \
+      --original-width 3840 --original-height 2160 \
+      --output-width 1920 --output-height 1080 \
+      --codec hevc_nvenc --cq 22
 """
 
 import argparse

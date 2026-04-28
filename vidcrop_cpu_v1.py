@@ -357,6 +357,35 @@ def _detect_memory_gb() -> Tuple[float, float, str]:
     except Exception:
         pass
 
+    # Windows：通过 ctypes 调用 GlobalMemoryStatusEx 读取物理内存
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            import ctypes.wintypes
+
+            class _MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength",                ctypes.c_ulong),
+                    ("dwMemoryLoad",             ctypes.c_ulong),
+                    ("ullTotalPhys",             ctypes.c_ulonglong),
+                    ("ullAvailPhys",             ctypes.c_ulonglong),
+                    ("ullTotalPageFile",         ctypes.c_ulonglong),
+                    ("ullAvailPageFile",         ctypes.c_ulonglong),
+                    ("ullTotalVirtual",          ctypes.c_ulonglong),
+                    ("ullAvailVirtual",          ctypes.c_ulonglong),
+                    ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = _MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(stat)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))  # type: ignore[attr-defined]
+            total = stat.ullTotalPhys / (1024 ** 3)
+            avail = stat.ullAvailPhys / (1024 ** 3)
+            if total > 0:
+                return total, avail, "GlobalMemoryStatusEx"
+        except Exception:
+            pass
+
     return 2.0, 1.6, "fallback default"
 
 
@@ -585,7 +614,7 @@ def ffprobe_info(
     ]
 
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', check=True)
         data = json.loads(res.stdout)
     except Exception as exc:
         if original_width and original_height:
@@ -701,6 +730,7 @@ class Job:
     status: str = "pending"   # pending / running / done / failed / skipped
     progress: float = 0.0
     fps: float = 0.0
+    peak_fps: float = 0.0
     speed: str = ""
     elapsed: float = 0.0
     error: str = ""
@@ -924,6 +954,8 @@ def run_ffmpeg_with_progress(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             bufsize=1,
         )
         _register_proc(proc)
@@ -968,6 +1000,8 @@ def run_ffmpeg_with_progress(
             elif key == "fps":
                 try:
                     job.fps = float(val)
+                    if job.fps > job.peak_fps:
+                        job.peak_fps = job.fps
                 except ValueError:
                     pass
 
@@ -1058,9 +1092,9 @@ class AggregatePanel:
         self._thread.join(timeout=1.0)
         self._render(final=True)
 
-    def _aggregate(self) -> Tuple[float, int, int, int, int, int]:
+    def _aggregate(self) -> Tuple[float, int, int, int, int, int, float]:
         done = failed = skipped = running = pending = 0
-        prog_sum = 0.0
+        prog_sum = fps_sum = 0.0
 
         for j in self.jobs:
             if j.status == "done":
@@ -1075,15 +1109,16 @@ class AggregatePanel:
             elif j.status == "running":
                 running += 1
                 prog_sum += j.progress
+                fps_sum += j.fps          # 累加各 worker 实时 fps
             else:
                 pending += 1
 
         overall = prog_sum / self.total if self.total else 1.0
-        return overall, done, failed, skipped, running, pending
+        return overall, done, failed, skipped, running, pending, fps_sum
 
     def _render(self, final: bool = False) -> None:
         with self.lock:
-            overall, done, failed, skipped, running, pending = self._aggregate()
+            overall, done, failed, skipped, running, pending, fps_total = self._aggregate()
             elapsed = time.time() - self.start_ts
             events = list(self._events)
 
@@ -1091,10 +1126,12 @@ class AggregatePanel:
             sys.stdout.write(f"\033[{self._last_lines}A")
             sys.stdout.write("\033[J")
 
+        fps_str = f"  {fps_total:.0f}fps" if running > 0 and fps_total > 0 else ""
         line1 = (
             f"  [{_bar(overall)}] {overall * 100:5.1f}%  "
             f"完成 {done}  失败 {failed}  跳过 {skipped}  "
             f"运行中 {running}  等待 {pending}  已用 {_fmt_time(elapsed)}"
+            f"{fps_str}"
         )
 
         sys.stdout.write(line1 + "\n")
@@ -1459,12 +1496,17 @@ def print_summary(jobs: List[Job]) -> int:
     done = sum(1 for j in jobs if j.status == "done")
     failed = sum(1 for j in jobs if j.status == "failed")
     skipped = sum(1 for j in jobs if j.status == "skipped")
-    total_time = sum(j.elapsed for j in jobs if j.status == "done")
+    done_jobs = [j for j in jobs if j.status == "done"]
+    total_time = sum(j.elapsed for j in done_jobs)
+    total_frames = sum(int(j.info.get("nb_frames", 0) or 0) for j in done_jobs)
+    avg_fps_str = f"  均速 {total_frames / total_time:.0f}fps" if total_time > 0 and total_frames > 0 else ""
+    peak_fps = max((j.peak_fps for j in done_jobs), default=0.0)
+    peak_fps_str = f"  峰值 {peak_fps:.0f}fps" if peak_fps > 0 else ""
 
     print("─" * 64)
     print(
         f"汇总        : 完成 {done}  失败 {failed}  跳过 {skipped}  "
-        f"累计编码用时 {_fmt_time(total_time)}"
+        f"累计编码用时 {_fmt_time(total_time)}{avg_fps_str}{peak_fps_str}"
     )
 
     if failed:

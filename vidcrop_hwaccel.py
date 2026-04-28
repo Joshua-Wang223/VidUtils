@@ -380,9 +380,19 @@ def _check_cuda_decoder_available(ffmpeg_bin: str = 'ffmpeg') -> bool:
         r2 = subprocess.run(test, capture_output=True, text=True, timeout=15)
         err = r2.stderr.lower()
         cuda_errors = [
+            # Linux 共享库
             'cannot load libnvcuvid', 'failed loading nvcuvid',
+            # Windows DLL（日志实证：Cannot load nvcuda.dll）
+            'cannot load nvcuda', 'failed to load nvcuda',
+            # 通用设备/驱动错误（与 _check_hwaccel_available 保持一致）
+            'device creation failed',          # 日志第 3 行
+            'hardware device setup failed',    # 日志第 5 行
+            'could not dynamically load cuda', # 日志第 2 行
+            'no device available for decoder', # 日志第 4 行
+            # 其他常见
             'hwaccel initialisation returned error', 'no cuda capable devices',
             'does not support device type cuda', 'cuda_error_no_device',
+            'operation not permitted',         # 日志最后一行也出现过
         ]
         return not any(e in err for e in cuda_errors)
     except Exception:
@@ -413,8 +423,12 @@ def _check_hwaccel_available(ffmpeg_bin: str = 'ffmpeg',
         test = [
             ffmpeg_bin, '-y', '-hide_banner',
             '-hwaccel', hwaccel_type,
-            '-i', tmp_path, '-frames:v', '1', '-f', 'null', '-',
         ]
+        # OpenCL 策略固定使用 -hwaccel_output_format nv12；探针必须带相同参数，
+        # 否则 "QSV to OpenCL mapping not usable" 等错误只会在实际转码时才暴露。
+        if hwaccel_type == 'opencl':
+            test += ['-hwaccel_output_format', 'nv12']
+        test += ['-i', tmp_path, '-frames:v', '1', '-f', 'null', '-']
         r2 = subprocess.run(test, capture_output=True, text=True, timeout=15)
         err = r2.stderr.lower()
         errors = [
@@ -426,6 +440,10 @@ def _check_hwaccel_available(ffmpeg_bin: str = 'ffmpeg',
             'no device available for decoder', 'hardware device setup failed',
             'error opening device', 'instance creation failure',
             'failed to initialize', 'unsupported device',
+            # OpenCL 特有：QSV-OpenCL 内存映射失败（实证）
+            'qsv to opencl mapping not usable',
+            'opencl mapping not usable',
+            'mapping not usable',
         ]
         return not any(e in err for e in errors)
     except Exception:
@@ -644,7 +662,7 @@ def get_video_dimensions(filepath: str, ffmpeg_bin: str = 'ffmpeg') -> Tuple[int
         '-show_entries', 'stream=width,height', '-of', 'json', filepath,
     ]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', check=True)
         if 'corrupt' in r.stderr or 'conceal' in r.stderr:
             print(f'  警告：源文件可能包含损坏数据。')
         data = json.loads(r.stdout)
@@ -1074,6 +1092,9 @@ def _run_with_progress(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding='utf-8',
+            errors='replace',
+            bufsize=1,
         )
         _register_proc(proc)
 

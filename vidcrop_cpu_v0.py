@@ -377,7 +377,7 @@ def get_video_dimensions(filepath: str) -> Tuple[int, int]:
         "-of", "json", filepath,
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', check=True)
         data = json.loads(result.stdout)
         stream = data["streams"][0]
         return int(stream["width"]), int(stream["height"])
@@ -558,6 +558,8 @@ def _run_with_progress(cmd: List[str], total_frames: Optional[int]) -> Tuple[int
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             bufsize=1,
         )
         _register_proc(proc)

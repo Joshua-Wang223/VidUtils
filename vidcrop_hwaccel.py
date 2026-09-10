@@ -2675,8 +2675,8 @@ def process_file(
         actual_width, actual_height = orig_width, orig_height
 
     t_file_start = time.perf_counter()
-    mode_label = 'cover（等比缩放+裁剪）' if mode == 'cover' else 'crop（居中裁剪）'
-    # 括号内不再嵌套括号，避免 "crop（居中裁剪）)" 这类观感
+    # 括号内不再嵌套括号，避免 "crop（居中裁剪）)" 这类观感，故用 mode_inline 而非
+    # 带全角括号的 mode_label（后者仅用于 main() 的概览输出）。
     mode_inline = 'crop 居中裁剪' if mode == 'crop' else 'cover 等比缩放+裁剪'
     idx_tag = f'[{file_index}/{file_total}] ' if file_total else ''
     print(f'\n{idx_tag}{input_file.name}')
@@ -3202,12 +3202,10 @@ def main() -> int:
                 return 1
 
         # 新增：保存探测结果到缓存（仅在非诊断模式下快速参考）
+        # ffmpeg_version_hint 只做记录、没有任何读取方，故不再为此 fork 一次
+        # `ffmpeg -version`；这里沿用原先写入的编码器路径。
         if args.hwaccel != 'none' and args.fallback_policy != 'cpu-only':
             try:
-                import subprocess
-                ff_version = subprocess.run(
-                    [ffmpeg_bin, '-version'], capture_output=True, text=True, timeout=5
-                ).stdout.splitlines()[0] if True else ''
                 _save_hw_cache(hw_caps, ffmpeg_version=ffmpeg_bin)
             except Exception:
                 pass  # 缓存写入失败不影响主流程

@@ -544,13 +544,6 @@ def check_tools() -> None:
             sys.exit(1)
 
 
-def _same_path(a: Path, b: Path) -> bool:
-    try:
-        return a.resolve() == b.resolve()
-    except Exception:
-        return os.path.abspath(str(a)) == os.path.abspath(str(b))
-
-
 def _fmt_time(sec: float) -> str:
     sec = max(0.0, sec)
     if sec < 60:

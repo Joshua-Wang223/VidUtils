@@ -44,6 +44,12 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
     libsvtav1 的 preset 是 0~13 整数（传 'medium' 会直接报错），自动换算
   • CPU 编码器使用 -crf（默认 21），GPU 编码器使用 -cq（默认 23）
   • 降级时 --cq 通过 cq_to_crf() 做等效视觉质量映射，而非直接透传
+  • 质量参数两种给法，二者互斥（混用拒绝执行）：
+      --crf / --cq     字面量原样下发给目标编码器，不换算
+      --crf-ref N      以 libx264 CRF 为统一基准，按等效表换算
+      --cq-ref N       以 h264_nvenc CQ 为统一基准，按等效表换算
+    等效表见同目录 convert_crf.py；例：--crf-ref 21 → libvpx-vp9 -crf 27、
+    libsvtav1 -crf 27、libx265 -crf 24、hevc_nvenc -cq 28
   • 默认值：h264_nvenc + --cq 23 + --preset p5；无 NVENC 自动降级为
     libx264 + --crf 21 + --preset medium（preset 按实际生效的编码器逐个策略取值）
   • 速度档位自动取值：libaom-av1 的 -cpu-used 与 libsvtav1 的 -preset 按 CPU 核数
@@ -83,6 +89,12 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
       --input video.mp4 --output out.webm \\
       --output-width 1280 --output-height 720 \\
       --codec vp9 --crf 32 --hwaccel cuda
+
+  # 2e) 统一质量基准：--crf-ref 以 libx264 CRF 为轴，按等效表换算到目标编码器
+  python vidcrop_hwaccel.py \\
+      --input ./raw --output ./out \\
+      --output-width 1920 --output-height 1080 \\
+      --codec libvpx-vp9 --crf-ref 21      # → -crf 27
 
   # 3) 递归扫描 + 音频重编码 + 追加参数
   python vidcrop_hwaccel.py \\
@@ -136,10 +148,10 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 # 只在"GPU 编码器降级为 CPU 编码器"这一条路径上使用；用户显式给出的同族参数
 # （CPU 的 --crf、GPU 的 --cq）一律原样下发。
 try:
-    from convert_crf import convert_quality
+    from convert_crf import convert_quality, from_x264_crf, to_x264_crf
 except ImportError:                       # 从其他工作目录启动时 sys.path 未必含本脚本所在目录
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from convert_crf import convert_quality
+    from convert_crf import convert_quality, from_x264_crf, to_x264_crf
 
 # ═══════════════════════════════════════════════════════════════════
 #  常量定义
@@ -2057,19 +2069,56 @@ def _resolve_quality_params(
     user_crf: Optional[int],
     user_cq: Optional[int],
     src_codec: Optional[str] = None,
+    crf_ref: Optional[int] = None,
+    cq_ref: Optional[int] = None,
 ) -> Tuple[Optional[int], Optional[int]]:
     """
     根据编码器类型确定最终 (crf, cq) 值，处理参数不匹配和降级映射。
 
-    语义：参数字面量原样下发——GPU 编码器用 --cq，CPU 编码器用 --crf，
-    都不做换算。只有"请求的是 GPU 编码器、实际降级到 CPU 软编"这一条路径
-    才按 convert_crf.py 的等效表换算（见 cq_to_crf）。
+    两种取值方式（由调用方保证互斥，混用会被拒绝执行）：
+      1. --crf / --cq：字面量原样下发——GPU 编码器用 --cq，CPU 编码器用 --crf，
+         都不换算；只有"请求 GPU 却降级到 CPU 软编"时才按等效表换算。
+      2. --crf-ref / --cq-ref：统一基准轴——先归一到 libx264 CRF，
+         再换算到目标编码器（见 convert_crf.py 的 QUALITY_MAP）。
 
     Args:
         codec: 实际要用的编码器
         user_crf / user_cq: 用户原始参数（None 表示未指定）
         src_codec: 用户原本请求的编码器，用于判断 --cq 的量纲
+        crf_ref: --crf-ref，以 libx264 CRF 为基准
+        cq_ref: --cq-ref，以 h264_nvenc CQ 为基准
     """
+    # ── 方式 2：统一基准轴换算 ────────────────────────────────────────────
+    if crf_ref is not None or cq_ref is not None:
+        if crf_ref is not None:
+            ref_x264: Optional[float] = float(crf_ref)
+            ref_desc = f'--crf-ref {crf_ref}（libx264 CRF 基准）'
+        else:
+            ref_x264 = to_x264_crf('h264_nvenc', cq_ref)
+            ref_desc = f'--cq-ref {cq_ref}（h264_nvenc CQ 基准）'
+            if ref_x264 is None:
+                ref_x264 = float(cq_ref or 0)
+        if codec == 'librav1e':
+            # librav1e 没有 -crf；其实测标定以 AV1(libaom) CRF 为输入，
+            # 故先落到 AV1 CRF 轴，再由命令构建处套 crf_to_rav1e_qp()。
+            _v = from_x264_crf('libaom-av1', ref_x264)
+            _out = int(round(_v)) if _v is not None else None
+            if _out is not None:
+                print(f'  提示：{ref_desc} → {codec} 的 -qp {crf_to_rav1e_qp(_out)}。')
+            return _out, None
+        _v2 = from_x264_crf(codec, ref_x264)
+        if _v2 is None:
+            print(f'  警告：{codec} 不在等效换算表中，{ref_desc} 无法换算，改用默认质量。')
+            return (None, DEFAULT_CQ) if encoder_supports_cq(codec) \
+                else (DEFAULT_CRF, None)
+        _val = int(round(_v2))
+        print(f'  提示：{ref_desc} → {codec} 的 '
+              f'{"-cq" if encoder_supports_cq(codec) else "-crf"} {_val}。')
+        if encoder_supports_cq(codec):
+            return None, _val
+        return _val, None
+
+    # ── 方式 1：字面量原样下发 ────────────────────────────────────────────
     if encoder_supports_cq(codec):
         if user_cq is not None:
             return None, user_cq
@@ -2580,6 +2629,8 @@ def process_file(
     input_root: Optional[Path],
     hw_mode: str,
     hw_caps: HardwareCapabilities,
+    crf_ref: Optional[int] = None,
+    cq_ref: Optional[int] = None,
     ffmpeg_bin: str = 'ffmpeg',
     mode: str = 'crop',
     audio_codec: str = 'copy',
@@ -2706,7 +2757,8 @@ def process_file(
             return _result('failed')
 
         current_crf, current_cq = _resolve_quality_params(
-            strategy['codec'], crf, cq, src_codec=codec
+            strategy['codec'], crf, cq, src_codec=codec,
+            crf_ref=crf_ref, cq_ref=cq_ref,
         )
         norm_preset = normalize_preset(
             preset or default_preset_for(strategy['codec']), strategy['codec'])
@@ -2753,7 +2805,8 @@ def process_file(
             return _result('failed')
 
         current_crf, current_cq = _resolve_quality_params(
-            current_codec, crf, cq, src_codec=codec)
+            current_codec, crf, cq, src_codec=codec,
+            crf_ref=crf_ref, cq_ref=cq_ref)
         # preset 为 None 表示用户没指定，按"当前策略实际使用的编码器"取默认值，
         # 从而 GPU 策略得到 p5、降级后的 CPU 策略得到 medium。
         norm_preset = normalize_preset(
@@ -2920,9 +2973,19 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                              'AV1：libsvtav1/libaom-av1/librav1e、av1_nvenc；'
                              'VP9：libvpx-vp9（NVENC 无 VP9 编码器，走硬解+CPU 编码）')
     parser.add_argument('--crf', type=int, default=None,
-                        help='CRF 质量值（CPU 编码器，0-51，不指定时默认 21）')
+                        help='CRF 质量值（CPU 编码器，0-51，不指定时默认 21）；'
+                             '字面量原样下发给目标编码器，不做换算')
     parser.add_argument('--cq',  type=int, default=None,
-                        help='CQ 质量值（GPU 编码器，0-51，不指定时默认 23）')
+                        help='CQ 质量值（GPU 编码器，0-51，不指定时默认 23）；'
+                             '字面量原样下发给目标编码器，不做换算')
+    parser.add_argument('--crf-ref', type=int, default=None, metavar='N',
+                        help='以 libx264 CRF 为统一基准给出质量值，按等效表换算到目标编码器。'
+                             '例：--codec libvpx-vp9 --crf-ref 21 → -crf 27。'
+                             '与 --crf / --cq 互斥')
+    parser.add_argument('--cq-ref', type=int, default=None, metavar='N',
+                        help='以 h264_nvenc CQ 为统一基准给出质量值，按等效表换算到目标编码器。'
+                             '例：--codec hevc_nvenc --cq-ref 26 → -cq 28。'
+                             '与 --crf / --cq 互斥')
     parser.add_argument('--preset', default=None,
                         help='编码器预设。默认：CPU 编码器 medium，GPU 编码器 p5；'
                              'NVENC（p1~p7）与 libx264 风格（ultrafast~veryslow）自动双向映射')
@@ -3016,6 +3079,20 @@ def main() -> int:
         print('[ERROR] 必须指定 --output-width/--output-height 或 --crop-ratio 其中之一。', file=sys.stderr)
         return 2
 
+    # -ref 系列与字面量 --crf/--cq 互斥：两者量纲不同，混用无法判断用户意图
+    _refs = [n for n, v in (('--crf-ref', args.crf_ref), ('--cq-ref', args.cq_ref))
+             if v is not None]
+    if len(_refs) > 1:
+        print('[ERROR] ' + ' 与 '.join(_refs) + ' 只能二选一（两者基准轴不同）。',
+              file=sys.stderr)
+        return 2
+    if _refs and (args.crf is not None or args.cq is not None):
+        _given = [n for n, v in (('--crf', args.crf), ('--cq', args.cq)) if v is not None]
+        print('[ERROR] ' + _refs[0] + ' 与 ' + ' / '.join(_given)
+              + ' 互斥：前者按统一基准轴换算，后者字面量原样下发，'
+                '混用无法确定以哪个为准。请只保留其中一种。', file=sys.stderr)
+        return 2
+
     # 验证显式尺寸（如果指定了）
     if has_explicit_size:
         if args.output_width <= 0 or args.output_height <= 0:
@@ -3039,6 +3116,15 @@ def main() -> int:
 
     if args.cq is not None and not (0 <= args.cq <= 63):
         print('[ERROR] --cq 建议范围为 0-63。', file=sys.stderr)
+        return 2
+
+    # -ref 的基准轴量程：libx264 CRF 与 h264_nvenc CQ 都是 0-51
+    if args.crf_ref is not None and not (0 <= args.crf_ref <= 51):
+        print('[ERROR] --crf-ref 范围为 0-51（libx264 CRF 量程）。', file=sys.stderr)
+        return 2
+
+    if args.cq_ref is not None and not (0 <= args.cq_ref <= 51):
+        print('[ERROR] --cq-ref 范围为 0-51（h264_nvenc CQ 量程）。', file=sys.stderr)
         return 2
 
     # 归一化编码器名称
@@ -3166,6 +3252,10 @@ def main() -> int:
         quality_parts.append(f'CRF: {args.crf}')
     if args.cq is not None:
         quality_parts.append(f'CQ: {args.cq}')
+    if args.crf_ref is not None:
+        quality_parts.append(f'CRF-ref: {args.crf_ref}（libx264 基准，按等效表换算）')
+    if args.cq_ref is not None:
+        quality_parts.append(f'CQ-ref: {args.cq_ref}（h264_nvenc 基准，按等效表换算）')
     if not quality_parts:
         # 与 vidcrop_cpu_v2.py 一致：直接展示将要生效的数值
         if encoder_supports_cq(args.codec):
@@ -3231,6 +3321,8 @@ def main() -> int:
                 input_root=input_root,
                 hw_mode=args.hwaccel,
                 hw_caps=hw_caps,
+                crf_ref=args.crf_ref,
+                cq_ref=args.cq_ref,
                 ffmpeg_bin=ffmpeg_bin,
                 mode=args.mode,
                 audio_codec=args.audio_codec,

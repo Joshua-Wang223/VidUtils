@@ -40,9 +40,13 @@ vidcrop_cpu_v2.py – 批量视频裁剪/覆盖缩放工具（CPU 多任务并�
 --crop-ratio           目标宽高比，如 16:9 或 1.777，启用后自动计算最大化裁剪尺寸
 --mode                 crop | cover（默认 crop）
 --codec                视频编码器（默认 libx264，支持别名自动归一化）
---crf                  CRF 质量值（默认 21，仅对支持 CRF 的编码器生效）
+--crf                  CRF 质量值（默认 21，仅对支持 CRF 的编码器生效；字面量原样下发）
 --cq                   CQ 质量值（默认 23，仅对 NVENC/AMF/QSV 等 GPU 编码器生效，
                        CPU 编码器下自动映射为等效 CRF）
+--crf-ref              N 以 libx264 CRF 为统一基准，按等效表换算到目标编码器
+                       （例：--codec vp9 --crf-ref 21 → -crf 27）；与 --crf/--cq 互斥
+--cq-ref               N 以 h264_nvenc CQ 为统一基准，按等效表换算到目标编码器
+                       （例：--codec hevc_nvenc --cq-ref 26 → -cq 28）；与 --crf/--cq 互斥
 --preset               编码器预设（默认：CPU 编码器 medium / GPU 编码器 p5，支持 NVENC p1~p7 双向映射）
 --pix-fmt              输出像素格式（auto / none / 具体格式）
 --audio-codec          音频编码器（默认 copy，可选 aac / libopus 等）
@@ -132,10 +136,10 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 # convert_crf.py，两个裁剪脚本共用同一套换算，避免各处硬编码偏移互相矛盾。
 # 只在"给的是 --cq 但落到 CPU 软编"这一条路径上使用；参数字面量本身不换算。
 try:
-    from convert_crf import convert_quality
+    from convert_crf import convert_quality, from_x264_crf, to_x264_crf
 except ImportError:                       # 从其他工作目录启动时 sys.path 未必含本脚本所在目录
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from convert_crf import convert_quality
+    from convert_crf import convert_quality, from_x264_crf, to_x264_crf
 
 VIDEO_EXTS = {
     ".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv",
@@ -869,14 +873,49 @@ def _resolve_quality_params(
     codec: str,
     user_crf: Optional[int],
     user_cq: Optional[int],
+    crf_ref: Optional[int] = None,
+    cq_ref: Optional[int] = None,
 ) -> Tuple[Optional[int], Optional[int]]:
     """
     根据编码器类型确定最终 (crf, cq) 值，处理参数不匹配和兼容性映射。
 
-    语义与 vidcrop_hwaccel.py 一致：参数字面量原样下发——GPU 编码器用 --cq，
-    CPU 编码器用 --crf，都不换算。只有"给的是 --cq 但落到 CPU 软编"时才按
-    convert_crf.py 的等效表换算（--cq 默认按 h264_nvenc 量纲解释）。
+    两种取值方式（调用方保证互斥，混用会被拒绝执行）：
+      1. --crf / --cq：字面量原样下发——GPU 编码器用 --cq，CPU 编码器用 --crf，
+         都不换算；只有"给的是 --cq 但落到 CPU 软编"时才按等效表换算
+         （--cq 默认按 h264_nvenc 量纲解释）。
+      2. --crf-ref / --cq-ref：统一基准轴——先归一到 libx264 CRF，再换算到目标编码器。
     """
+    # ── 方式 2：统一基准轴换算 ────────────────────────────────────────────
+    if crf_ref is not None or cq_ref is not None:
+        if crf_ref is not None:
+            ref_x264: Optional[float] = float(crf_ref)
+            ref_desc = f"--crf-ref {crf_ref} (libx264 CRF 基准)"
+        else:
+            ref_x264 = to_x264_crf("h264_nvenc", cq_ref)
+            ref_desc = f"--cq-ref {cq_ref} (h264_nvenc CQ 基准)"
+            if ref_x264 is None:
+                ref_x264 = float(cq_ref or 0)
+        if codec == "librav1e":
+            # librav1e 没有 -crf；其实测标定以 AV1(libaom) CRF 为输入，
+            # 故先落到 AV1 CRF 轴，再由命令构建处套 crf_to_rav1e_qp()。
+            _v = from_x264_crf("libaom-av1", ref_x264)
+            _out = int(round(_v)) if _v is not None else None
+            if _out is not None:
+                print(f"  提示：{ref_desc} → {codec} 的 -qp {crf_to_rav1e_qp(_out)}。")
+            return _out, None
+        _v2 = from_x264_crf(codec, ref_x264)
+        if _v2 is None:
+            print(f"  警告：{codec} 不在等效换算表中，{ref_desc} 无法换算，改用默认质量。")
+            return (None, DEFAULT_CQ) if encoder_supports_cq(codec) \
+                else (DEFAULT_CRF, None)
+        _val = int(round(_v2))
+        print(f"  提示：{ref_desc} → {codec} 的 "
+              f'{"-cq" if encoder_supports_cq(codec) else "-crf"} {_val}。')
+        if encoder_supports_cq(codec):
+            return None, _val
+        return _val, None
+
+    # ── 方式 1：字面量原样下发 ────────────────────────────────────────────
     if encoder_supports_cq(codec):
         if user_cq is not None:
             return None, user_cq
@@ -2795,13 +2834,30 @@ def parse_args() -> argparse.Namespace:
         "--crf",
         type=int,
         default=None,
-        help="CRF 质量值 (CPU 编码器)；默认 21，范围 0-51 越小质量越好",
+        help="CRF 质量值 (CPU 编码器)；默认 21，范围 0-51 越小质量越好。"
+             "字面量原样下发给目标编码器，不做换算",
     )
     ap.add_argument(
         "--cq",
         type=int,
         default=None,
         help="CQ 质量值 (GPU 编码器 NVENC/AMF/QSV)；默认 23，范围 0-51。CPU 编码器下自动映射为等效 CRF",
+    )
+    ap.add_argument(
+        "--crf-ref",
+        type=int,
+        default=None,
+        metavar="N",
+        help="以 libx264 CRF 为统一基准给出质量值，按等效表换算到目标编码器。"
+             "例：--codec vp9 --crf-ref 21 → -crf 27。与 --crf / --cq 互斥",
+    )
+    ap.add_argument(
+        "--cq-ref",
+        type=int,
+        default=None,
+        metavar="N",
+        help="以 h264_nvenc CQ 为统一基准给出质量值，按等效表换算到目标编码器。"
+             "例：--codec hevc_nvenc --cq-ref 26 → -cq 28。与 --crf / --cq 互斥",
     )
     ap.add_argument(
         "--preset",
@@ -2875,8 +2931,22 @@ def validate_and_finalize_args(args: argparse.Namespace) -> None:
     # 归一化 preset (NVENC <-> libx264 双向映射)
     args.preset = normalize_preset(args.preset, args.codec)
 
-    # 解析质量参数 (crf/cq 互斥与映射)
-    args.crf, args.cq = _resolve_quality_params(args.codec, args.crf, args.cq)
+    # -ref 系列与字面量 --crf/--cq 互斥：两者量纲不同，混用无法判断用户意图
+    _refs = [n for n, v in (("--crf-ref", args.crf_ref), ("--cq-ref", args.cq_ref))
+             if v is not None]
+    if len(_refs) > 1:
+        raise ValueError(" 与 ".join(_refs) + " 只能二选一（两者基准轴不同）")
+    if _refs and (args.crf is not None or args.cq is not None):
+        _given = [n for n, v in (("--crf", args.crf), ("--cq", args.cq))
+                  if v is not None]
+        raise ValueError(
+            _refs[0] + " 与 " + " / ".join(_given)
+            + " 互斥：前者按统一基准轴换算，后者字面量原样下发，"
+              "混用无法确定以哪个为准。请只保留其中一种")
+
+    # 解析质量参数 (crf/cq 与 -ref 换算)
+    args.crf, args.cq = _resolve_quality_params(
+        args.codec, args.crf, args.cq, crf_ref=args.crf_ref, cq_ref=args.cq_ref)
 
     # --crop-ratio 模式：输出宽高可选，但需要原始尺寸 (稍后由 ffprobe 或 --original-width/height 获取)
     has_crop_ratio = args.crop_ratio is not None
@@ -2897,6 +2967,12 @@ def validate_and_finalize_args(args: argparse.Namespace) -> None:
         raise ValueError("--crf 建议范围为 0-63")
     if args.cq is not None and not (0 <= args.cq <= 63):
         raise ValueError("--cq 建议范围为 0-63")
+
+    # -ref 的基准轴量程：libx264 CRF 与 h264_nvenc CQ 都是 0-51
+    if args.crf_ref is not None and not (0 <= args.crf_ref <= 51):
+        raise ValueError("--crf-ref 范围为 0-51 (libx264 CRF 量程)")
+    if args.cq_ref is not None and not (0 <= args.cq_ref <= 51):
+        raise ValueError("--cq-ref 范围为 0-51 (h264_nvenc CQ 量程)")
 
     if args.workers < 0:
         raise ValueError("--workers 不能为负数")
@@ -3019,6 +3095,10 @@ def main() -> int:
         quality_parts.append(f"CRF: {args.crf}")
     if args.cq is not None:
         quality_parts.append(f"CQ: {args.cq}")
+    if args.crf_ref is not None:
+        quality_parts.append(f"CRF-ref: {args.crf_ref}（libx264 基准，按等效表换算）")
+    if args.cq_ref is not None:
+        quality_parts.append(f"CQ-ref: {args.cq_ref}（h264_nvenc 基准，按等效表换算）")
     if not quality_parts:
         if encoder_supports_cq(args.codec):
             quality_parts.append(f"CQ: {DEFAULT_CQ}")

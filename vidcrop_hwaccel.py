@@ -1143,6 +1143,13 @@ def _fmt_duration(seconds: float) -> str:
 
 
 def _same_path(a: Path, b: Path) -> bool:
+    """比较两个路径是否指向同一位置（优先解析符号链接）。
+
+    resolve() 可能因权限不足、符号链接环等抛异常，此时一律返回 False 会
+    让调用方误判为"不同路径"从而放行——_same_path 用于拦"批量模式输入
+    输出同目录"与"原地覆盖"，漏判等于覆盖源文件。故回退到不解析链接的
+    abspath 比较：它更保守（可能误报相同，不会漏报）。
+    """
     try:
         return a.resolve() == b.resolve()
     except Exception:

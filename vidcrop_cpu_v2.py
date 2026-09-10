@@ -128,6 +128,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+# 各编码器之间的质量等效换算表（以 libx264 CRF 为基准轴）来自同目录的
+# convert_crf.py，两个裁剪脚本共用同一套换算，避免各处硬编码偏移互相矛盾。
+# 只在"给的是 --cq 但落到 CPU 软编"这一条路径上使用；参数字面量本身不换算。
+try:
+    from convert_crf import convert_quality
+except ImportError:                       # 从其他工作目录启动时 sys.path 未必含本脚本所在目录
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from convert_crf import convert_quality
+
 VIDEO_EXTS = {
     ".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv",
     ".m4v", ".ts", ".webm", ".mpg", ".mpeg"
@@ -178,9 +187,6 @@ CRF_SUPPORTED_CODECS = {
 
 # NVENC 家族：p1~p7 风格 preset + -cq 质量控制。AV1 与 H.264/HEVC 同属此族。
 NVENC_CODECS = {"h264_nvenc", "hevc_nvenc", "av1_nvenc"}
-
-# AV1 软件编码器（cq_to_crf 等处按族处理）
-AV1_SW_CODECS = {"libaom-av1", "libsvtav1", "librav1e"}
 
 # libsvtav1 的 -preset 是 0~13 的整数（越大越快、质量越低），**不接受**
 # ultrafast~veryslow 或 p1~p7 这类名字——实测传 'medium' 直接报
@@ -833,25 +839,19 @@ def encoder_supports_cq(codec: str) -> bool:
     return codec in CQ_SUPPORTED_CODECS
 
 
-def cq_to_crf(cq: int, target_codec: str) -> int:
+def cq_to_crf(cq: int, target_codec: str, src_codec: str = "h264_nvenc") -> int:
     """
-    将 NVENC CQ 值映射到软件编码器等效 CRF 值。
-    直接透传 CQ 会导致软件编码器质量偏高、文件偏大，因此做等效视觉质量修正：
-      hevc_nvenc -> libx265 : crf = cq + 4
-      h264_nvenc -> libx264 : crf = cq + 1
-      av1_nvenc  -> AV1 软编 : crf = cq + 6  （AV1 比 HEVC 更高效，且 CRF 量程是 0~63）
-      其他编码器            : 直接返回 cq (未知编码器，不做猜测)
+    硬件编码器的 CQ 值 → 目标软件编码器的等效 CRF 值。
 
-    实测（ffmpeg 6.1，640x480 testsrc2 2s）：libaom-av1 crf28 输出体积
-    （184 KB）≈ libx264 crf24（195 KB），即 AV1 在同体积下 CRF 比 x264 高约 4~5。
+    换算基准统一走同目录 convert_crf.py 的 QUALITY_MAP（以 libx264 CRF 为轴）：
+        src_codec(cq) ──to_x264_crf──▶ x264 CRF ──from_x264_crf──▶ target_codec(crf)
+    旧的硬编码偏移（libx264 +1 / libx265 +4 / AV1 +6）与本表方向相反，已废弃。
+
+    Returns:
+        等效 CRF；任一端无映射时原样返回 cq（未知编码器不做猜测）。
     """
-    if target_codec == "libx265":
-        return min(51, cq + 4)
-    elif target_codec == "libx264":
-        return min(51, cq + 1)
-    elif target_codec in AV1_SW_CODECS:
-        return min(63, cq + 6)
-    return cq
+    v = convert_quality(src_codec, cq, target_codec)
+    return int(round(v)) if v is not None else int(cq)
 
 
 def crf_to_rav1e_qp(crf: int) -> int:
@@ -872,8 +872,10 @@ def _resolve_quality_params(
 ) -> Tuple[Optional[int], Optional[int]]:
     """
     根据编码器类型确定最终 (crf, cq) 值，处理参数不匹配和兼容性映射。
-    GPU 编码器优先使用 user_cq，CPU 编码器优先使用 user_crf。
-    兼容场景：用户传了 --cq 但实际用的是 CPU 编码器，通过 cq_to_crf() 映射。
+
+    语义与 vidcrop_hwaccel.py 一致：参数字面量原样下发——GPU 编码器用 --cq，
+    CPU 编码器用 --crf，都不换算。只有"给的是 --cq 但落到 CPU 软编"时才按
+    convert_crf.py 的等效表换算（--cq 默认按 h264_nvenc 量纲解释）。
     """
     if encoder_supports_cq(codec):
         if user_cq is not None:
@@ -888,7 +890,7 @@ def _resolve_quality_params(
         if user_cq is not None:
             mapped_crf = cq_to_crf(user_cq, codec)
             print(f"  提示：编码器 {codec} 不支持 -cq，"
-                  f"已将 --cq {user_cq} 映射为 -crf {mapped_crf} (等效视觉质量)。")
+                  f"已将 --cq {user_cq} (h264_nvenc 量纲) 映射为 -crf {mapped_crf} (等效视觉质量)。")
             return mapped_crf, None
         return DEFAULT_CRF, None
 

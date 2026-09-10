@@ -72,7 +72,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 # ══════════════════ 常量 ══════════════════
 VIDEO_EXTENSIONS = {
@@ -433,6 +433,112 @@ def _get_total_frames(filepath: str) -> Optional[int]:
     return None
 
 
+# ══════════════════ [COLOR-FIX] 色彩元数据注入 ══════════════════
+
+def probe_color_metadata(video_file: Path) -> Optional[Dict[str, str]]:
+    """
+    用 ffprobe 读取视频第一个视频流的色彩元数据
+    （color_range / color_space / color_primaries / color_transfer）。
+
+    Args:
+        video_file: 视频文件路径。
+
+    Returns:
+        四项色彩值的字典（可能为 'unknown'）；无法探测时返回 None。
+    """
+    if not os.path.isfile(str(video_file)):
+        return None
+
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries",
+        "stream=color_range,color_space,color_primaries,color_transfer",
+        "-of", "default=noprint_wrappers=1",
+        str(video_file),
+    ]
+    try:
+        r = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=10, check=False,
+        )
+        if r.returncode != 0:
+            return None
+        meta: Dict[str, str] = {}
+        for line in r.stdout.strip().splitlines():
+            if "=" in line:
+                key, val = line.split("=", 1)
+                meta[key] = val
+        return meta or None
+    except Exception:
+        # 任何异常（超时/解析失败等）均容错返回 None，不阻断流程
+        return None
+
+
+def build_color_args(video_file: Path) -> List[str]:
+    """
+    检测源视频色彩元数据并构造 ffmpeg 输出端色彩参数列表。
+
+    有值则逐项透传（color_space→-colorspace 等）；unknown/缺失项
+    回退 BT.709 + Full Range(pc)：-colorspace bt709 -color_primaries bt709
+    -color_trc bt709 -color_range pc（0-255 全范围）。
+
+    Args:
+        video_file: 源视频路径，用于探测色彩元数据。
+
+    Returns:
+        ffmpeg 参数列表，可直接追加到输出命令（输出文件之前）。
+    """
+    meta = probe_color_metadata(video_file) or {}
+
+    def _pick(key: str, fallback: str) -> str:
+        val = meta.get(key, "")
+        if val and val.lower() not in ("unknown", "unspecified"):
+            return val
+        return fallback
+
+    return [
+        "-colorspace", _pick("color_space", "bt709"),
+        "-color_primaries", _pick("color_primaries", "bt709"),
+        "-color_trc", _pick("color_transfer", "bt709"),
+        "-color_range", _pick("color_range", "pc"),
+    ]
+
+
+def _setparams_from_color_args(extra_args: List[str]) -> Optional[str]:
+    """
+    从 build_color_args 生成的色彩参数列表中提取取值，构造 setparams 滤镜字符串。
+
+    原因：libx264 等编码器对输出端 -color_primaries/-color_trc 参数不写入 VUI，
+    需用 setparams 滤镜显式注入帧级色彩属性（GPU 编码器则靠输出端参数即可）。
+
+    Args:
+        extra_args: ffmpeg 输出端参数列表（含 -colorspace/-color_primaries 等）。
+
+    Returns:
+        setparams 滤镜字符串（如 'setparams=colorspace=bt709:color_primaries=bt709:...'），
+        无色彩参数时返回 None。
+    """
+    color_map = {
+        "-colorspace": "colorspace",
+        "-color_primaries": "color_primaries",
+        "-color_trc": "color_trc",
+        "-color_range": "range",
+    }
+    vals: Dict[str, str] = {}
+    i = 0
+    while i < len(extra_args) - 1:
+        key = extra_args[i]
+        if key in color_map:
+            vals[color_map[key]] = extra_args[i + 1]
+            i += 2
+        else:
+            i += 1
+    if not vals:
+        return None
+    return "setparams=" + ":".join(f"{k}={v}" for k, v in vals.items())
+
+
 # ══════════════════ 滤镜构建（支持 crop/cover） ══════════════════
 def build_crop_filter(src_w: int, src_h: int, dst_w: int, dst_h: int) -> str:
     if dst_w > src_w or dst_h > src_h:
@@ -728,6 +834,14 @@ def process_file(
     def warn(msg: str) -> None:
         print(f"  警告：{msg}", file=sys.stderr)
 
+    # [COLOR-FIX] 色彩元数据注入：检测源视频，有值透传，无值回退 BT.709+Full Range。
+    # libx264 等软件编码器对输出端 -color_primaries/-color_trc 不写 VUI，
+    # 需在滤镜链末尾追加 setparams 显式注入帧级色彩属性。
+    color_args = build_color_args(input_file)
+    _sp = _setparams_from_color_args(color_args)
+    if _sp:
+        vf_filter = f"{vf_filter},{_sp}"
+
     cmd: List[str] = [
         "ffmpeg",
         "-hide_banner",
@@ -750,6 +864,10 @@ def process_file(
 
     if extra_args:
         cmd += extra_args
+
+    # [COLOR-FIX] 输出端色彩参数（写入容器 colr box / 编码器 VUI）；
+    # 置于 extra_args 之后，与主项目合并注入行为一致。
+    cmd += color_args
 
     cmd.append(str(output_file))
 

@@ -1171,13 +1171,15 @@ _PIXFMT_10BIT_BY_ENCODER = {
     'h264_nvenc': 'p010le',
     'hevc_nvenc': 'p010le',
     'av1_nvenc': 'p010le',
+    'av1_qsv':   'p010le',
+    'av1_amf':   'p010le',
     'prores': 'yuv422p10le',
     'prores_ks': 'yuv422p10le',
 }
 # 不支持 10bit 的编码器。
 # h264_nvenc 在列：NVENC 的 H.264 编码器只做 8bit，实测喂 10bit 输入会以 rc=218 失败，
 # 导致整条 GPU 策略报废并退回 CPU。宁可降 8bit 也要保住硬件编码（见 build_ffmpeg_cmd）。
-# hevc_nvenc / av1_nvenc 支持 10bit（p010），不在此列。
+# hevc_nvenc / av1_nvenc / av1_qsv / av1_amf 支持 10bit（p010），不在此列。
 _ENCODERS_8BIT_ONLY = {'mpeg4', 'libvpx', 'mjpeg', 'vp8', 'h264_v4l2m2m',
                        'h264_nvenc'}
 

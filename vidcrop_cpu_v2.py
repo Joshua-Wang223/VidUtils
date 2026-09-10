@@ -1162,11 +1162,13 @@ _PIXFMT_10BIT_BY_ENCODER = {
     "h264_nvenc": "p010le",
     "hevc_nvenc": "p010le",
     "av1_nvenc": "p010le",
+    "av1_qsv": "p010le",
+    "av1_amf": "p010le",
     "prores": "yuv422p10le",
     "prores_ks": "yuv422p10le",
 }
 # h264_nvenc 在列：NVENC 的 H.264 编码器只做 8bit，喂 10bit 输入会直接失败，
-# 故 10bit 源落到它身上时降为 8bit 而不是让它硬撑（hevc_nvenc / av1_nvenc 支持 10bit）。
+# 故 10bit 源落到它身上时降为 8bit 而不是让它硬撑（hevc_nvenc / av1_nvenc / av1_qsv / av1_amf 支持 10bit）。
 _ENCODERS_8BIT_ONLY = {"mpeg4", "libvpx", "mjpeg", "vp8", "h264_v4l2m2m",
                        "h264_nvenc"}
 

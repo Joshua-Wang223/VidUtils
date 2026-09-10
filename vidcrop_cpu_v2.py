@@ -23,6 +23,10 @@ vidcrop_cpu_v2.py – 批量视频裁剪/覆盖缩放工具（CPU 多任务并�
 • 质量参数智能处理：CPU 编码器用 -crf (默认 21)，GPU 编码器用 -cq (默认 23)，
   降级/兼容时通过 cq_to_crf() 做等效视觉质量映射
 • 丰富的编码选项：CRF/CQ 质量控制、preset 预设、像素格式指定等
+• 默认值：libx264 + CRF 21 + preset medium
+• 速度档位自动取值（无需手工加 --extra-args）：
+  - libaom-av1 的 -cpu-used 与 libsvtav1 的 -preset 按 CPU 核数自动选档
+    （ffmpeg 给 libaom-av1 的默认 -cpu-used=1 慢到不可用，实测仅 1fps）
 • 提供聚合进度面板（并行模式）或单文件细粒度进度条（顺序模式）
 • 新增 --dry-run 仅预览命令不执行转码；--log 将所有输出记录到日志文件
 • 支持通过 --extra-args 传递额外 FFmpeg 参数
@@ -74,10 +78,9 @@ python vidcrop_cpu_v2.py --input ./videos --output ./out \
 python vidcrop_cpu_v2.py --input ./videos --output ./out \
     --output-width 1920 --output-height 1080 --codec svtav1 --crf 30 --preset medium
 
-# AV1（libaom-av1，兼容性最好但很慢；可用 --extra-args 提速）
+# AV1（libaom-av1；-cpu-used 已按 CPU 核数自动取值，无需再手工加 --extra-args）
 python vidcrop_cpu_v2.py --input ./videos --output ./out \
-    --output-width 1280 --output-height 720 --codec av1 --crf 30 \
-    --extra-args -- -cpu-used 8
+    --output-width 1280 --output-height 720 --codec av1 --crf 30
 
 # VP9（默认容器 .webm；源音轨非 Opus/Vorbis 时会自动转 Opus）
 python vidcrop_cpu_v2.py --input ./videos --output ./out \
@@ -715,11 +718,56 @@ DEFAULT_PRESET_GPU = "p5"
 DEFAULT_PRESET_SVTAV1 = "8"
 
 
+def detect_cpu_profile() -> Tuple[int, float]:
+    """返回 (逻辑 CPU 核数, 可用内存 GB)。探测失败时回退 (os.cpu_count() or 4, 0.0)。"""
+    try:
+        cpu = os.cpu_count() or 4
+    except Exception:
+        cpu = 4
+    try:
+        avail_gb = 0.0
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    avail_gb = int(line.split()[1]) / 1024.0 / 1024.0
+                    break
+    except Exception:
+        avail_gb = 0.0
+    return cpu, avail_gb
+
+
+# 按资源自动选"编码器速度档位"的档位表：(最小逻辑核数, libaom-av1 的 -cpu-used,
+#   libsvtav1 的 -preset)
+#
+# 背景：ffmpeg 给 libaom-av1 的默认 -cpu-used=1 慢到不可用（实测 320x240 只有 1fps，
+# 同一段素材 libsvtav1 是 35fps，差一个数量级）。过去只能让用户自己补
+# `--extra-args -- -cpu-used 8`，这里改为按核数自动取值：
+#   · 资源越少 → 档位越高（更偏速度），否则小机器上耗时不可接受；
+#   · 资源越多 → 档位略降（更偏压缩率），反正核多有时间做更精细的搜索。
+_AUTO_EFFORT_TIERS = (
+    (16, 4, 7),
+    (8, 5, 8),
+    (4, 6, 9),
+    (0, 8, 10),
+)
+
+
+def auto_effort(cpu_count: Optional[int] = None) -> Tuple[int, int]:
+    """按可用核数返回 (libaom-av1 的 -cpu-used, libsvtav1 的 -preset)。"""
+    if cpu_count is None:
+        cpu_count, _ = detect_cpu_profile()
+    for min_cores, aom_cpu_used, svtav1_preset in _AUTO_EFFORT_TIERS:
+        if cpu_count >= min_cores:
+            return aom_cpu_used, svtav1_preset
+    return 8, 10
+
+
 def default_preset_for(codec: str) -> str:
-    """按编码器类型给出默认预设：GPU 硬件编码器 p5，libsvtav1 为 8，其余 medium。"""
+    """按编码器类型给出默认预设：GPU 硬件编码器 p5，libsvtav1 按资源取档，其余 medium。"""
     c = codec.lower()
     if c == "libsvtav1":
-        return DEFAULT_PRESET_SVTAV1
+        # 0~13 整数，按 CPU 核数自动取值（见 auto_effort）
+        return str(auto_effort()[1])
     return DEFAULT_PRESET_GPU if c in CQ_SUPPORTED_CODECS else DEFAULT_PRESET_CPU
 
 
@@ -1033,6 +1081,12 @@ def build_encoder_options_v2(
     elif cq is not None:
         warn(f"编码器 {codec} 不支持 -cq，已忽略 --cq {cq}")
 
+    # libaom-av1 的速度档位：ffmpeg 默认 -cpu-used=1 慢到不可用（实测 320x240 仅 1fps，
+    # libsvtav1 同期 35fps），按资源自动取值。--extra-args 追加在编码器选项之后，
+    # 因此用户显式指定时以其为准。
+    if c == "libaom-av1":
+        opts += ["-cpu-used", str(auto_effort()[0])]
+
     if encoder_supports_preset(c):
         opts += ["-preset", preset]
     else:
@@ -1070,7 +1124,10 @@ _PIXFMT_10BIT_BY_ENCODER = {
     "prores": "yuv422p10le",
     "prores_ks": "yuv422p10le",
 }
-_ENCODERS_8BIT_ONLY = {"mpeg4", "libvpx", "mjpeg", "vp8", "h264_v4l2m2m"}
+# h264_nvenc 在列：NVENC 的 H.264 编码器只做 8bit，喂 10bit 输入会直接失败，
+# 故 10bit 源落到它身上时降为 8bit 而不是让它硬撑（hevc_nvenc / av1_nvenc 支持 10bit）。
+_ENCODERS_8BIT_ONLY = {"mpeg4", "libvpx", "mjpeg", "vp8", "h264_v4l2m2m",
+                       "h264_nvenc"}
 
 _BITMAP_SUBS = {"dvd_subtitle", "dvb_subtitle", "dvb_teletext",
                 "hdmv_pgs_subtitle", "xsub"}

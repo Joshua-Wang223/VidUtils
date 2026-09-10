@@ -44,6 +44,10 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
     libsvtav1 的 preset 是 0~13 整数（传 'medium' 会直接报错），自动换算
   • CPU 编码器使用 -crf（默认 21），GPU 编码器使用 -cq（默认 23）
   • 降级时 --cq 通过 cq_to_crf() 做等效视觉质量映射，而非直接透传
+  • 默认值：h264_nvenc + --cq 23 + --preset p5；无 NVENC 自动降级为
+    libx264 + --crf 21 + --preset medium（preset 按实际生效的编码器逐个策略取值）
+  • 速度档位自动取值：libaom-av1 的 -cpu-used 与 libsvtav1 的 -preset 按 CPU 核数
+    自动选档（ffmpeg 给 libaom-av1 的默认 -cpu-used=1 慢到不可用，实测仅 1fps）
   • librav1e 没有 -crf（实测传 -crf 只会被 ffmpeg 静默忽略），自动换算为等效 -qp
   • 输出为 .webm（VP9/AV1 默认容器）时，若源音轨是 AAC 等非 WebM 格式，
     自动改为 Opus 重编码——否则 ffmpeg 写头直接失败
@@ -961,10 +965,11 @@ def check_container_compatibility(ext: str, codec: str) -> bool:
 
 
 def default_preset_for(codec: str) -> str:
-    """按编码器类型给出默认预设：GPU 硬件编码器 p5，libsvtav1 为 8，其余 medium。"""
+    """按编码器类型给出默认预设：GPU 硬件编码器 p5，libsvtav1 按资源取档，其余 medium。"""
     c = codec.lower()
     if c == 'libsvtav1':
-        return DEFAULT_PRESET_SVTAV1
+        # 0~13 整数，按 CPU 核数自动取值（见 auto_effort）
+        return str(auto_effort()[1])
     return DEFAULT_PRESET_GPU if c in CQ_SUPPORTED_CODECS else DEFAULT_PRESET_CPU
 
 
@@ -1041,6 +1046,51 @@ def resolve_audio_codec_for_container(audio_codec: str,
     return audio_codec
 
 
+def detect_cpu_profile() -> Tuple[int, float]:
+    """返回 (逻辑 CPU 核数, 可用内存 GB)。探测失败时回退 (os.cpu_count() or 4, 0.0)。"""
+    try:
+        cpu = os.cpu_count() or 4
+    except Exception:
+        cpu = 4
+    try:
+        # psutil 未必安装；Linux 直接读 /proc/meminfo 的 MemAvailable
+        avail_gb = 0.0
+        with open('/proc/meminfo', 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    avail_gb = int(line.split()[1]) / 1024.0 / 1024.0
+                    break
+    except Exception:
+        avail_gb = 0.0
+    return cpu, avail_gb
+
+
+# 按资源自动选"编码器速度档位"的档位表：(最小逻辑核数, libaom-av1 的 -cpu-used,
+#   libsvtav1 的 -preset)
+#
+# 背景：ffmpeg 给 libaom-av1 的默认 -cpu-used=1 慢到不可用（实测 320x240 只有 1fps，
+# 同一段素材 libsvtav1 是 35fps，差一个数量级）。过去只能让用户自己补
+# `--extra-args -- -cpu-used 8`，这里改为按核数自动取值：
+#   · 资源越少 → 档位越高（更偏速度），否则小机器上耗时不可接受；
+#   · 资源越多 → 档位略降（更偏压缩率），反正核多有时间做更精细的搜索。
+_AUTO_EFFORT_TIERS = (
+    (16, 4, 7),
+    (8,  5, 8),
+    (4,  6, 9),
+    (0,  8, 10),
+)
+
+
+def auto_effort(cpu_count: Optional[int] = None) -> Tuple[int, int]:
+    """按可用核数返回 (libaom-av1 的 -cpu-used, libsvtav1 的 -preset)。"""
+    if cpu_count is None:
+        cpu_count, _ = detect_cpu_profile()
+    for min_cores, aom_cpu_used, svtav1_preset in _AUTO_EFFORT_TIERS:
+        if cpu_count >= min_cores:
+            return aom_cpu_used, svtav1_preset
+    return 8, 10
+
+
 def _get_ffprobe_bin(ffmpeg_bin: str) -> str:
     """从 ffmpeg 路径推导同目录的 ffprobe，保证版本一致。"""
     p = Path(ffmpeg_bin)
@@ -1105,7 +1155,12 @@ _PIXFMT_10BIT_BY_ENCODER = {
     'prores': 'yuv422p10le',
     'prores_ks': 'yuv422p10le',
 }
-_ENCODERS_8BIT_ONLY = {'mpeg4', 'libvpx', 'mjpeg', 'vp8', 'h264_v4l2m2m'}
+# 不支持 10bit 的编码器。
+# h264_nvenc 在列：NVENC 的 H.264 编码器只做 8bit，实测喂 10bit 输入会以 rc=218 失败，
+# 导致整条 GPU 策略报废并退回 CPU。宁可降 8bit 也要保住硬件编码（见 build_ffmpeg_cmd）。
+# hevc_nvenc / av1_nvenc 支持 10bit（p010），不在此列。
+_ENCODERS_8BIT_ONLY = {'mpeg4', 'libvpx', 'mjpeg', 'vp8', 'h264_v4l2m2m',
+                       'h264_nvenc'}
 
 _BITMAP_SUBS = {'dvd_subtitle', 'dvb_subtitle', 'dvb_teletext',
                 'hdmv_pgs_subtitle', 'xsub'}
@@ -2298,16 +2353,30 @@ def build_ffmpeg_cmd(
         else:
             cmd += ['-crf', str(crf)]
 
+    # libaom-av1 的速度档位：ffmpeg 默认 -cpu-used=1 慢到不可用（实测 320x240 仅 1fps），
+    # 按资源自动取值；用户若已在 --extra-args 显式给过则尊重用户。
+    if codec == 'libaom-av1' and '-cpu-used' not in extra_args:
+        cmd += ['-cpu-used', str(auto_effort()[0])]
+
     # 编码器预设（已由调用方 normalize_preset 归一化，此处直接使用）
     if encoder_supports_preset(codec):
         cmd += ['-preset', preset]
 
     # [META-KEEP] 位深继承：10bit 源不再被降为 8bit。
-    # NVENC + cuda 全 GPU 链路不传 -pix_fmt，让 hw_frames_ctx 自行协商 p010le。
-    if meta is not None and src_bits >= 10 and not codec.lower().endswith('_nvenc'):
-        _pf = resolve_pix_fmt_for_source(codec, src_bits, warn=_warn)
-        if _pf:
-            cmd += ['-pix_fmt', _pf]
+    if meta is not None and src_bits >= 10:
+        if codec.lower().endswith('_nvenc'):
+            # NVENC 链路原先完全不传 -pix_fmt，交给 hw_frames_ctx 协商。但
+            # h264_nvenc 只支持 8bit，喂 10bit 输入会让整条 GPU 策略以 rc=218 失败，
+            # 结果退回 CPU 编码只为保住 10bit——得不偿失。故这里显式降 8bit 保住硬件加速。
+            if codec.lower() in _ENCODERS_8BIT_ONLY:
+                _warn(f'{codec} 不支持 10bit 编码，已降级为 8bit 输出以保住硬件加速'
+                      f'（如需 10bit 请用 hevc_nvenc / av1_nvenc 或 CPU 编码器）')
+                cmd += ['-pix_fmt', 'yuv420p']
+            # hevc_nvenc / av1_nvenc 支持 10bit：继续让 hw_frames_ctx 自行协商 p010le
+        else:
+            _pf = resolve_pix_fmt_for_source(codec, src_bits, warn=_warn)
+            if _pf:
+                cmd += ['-pix_fmt', _pf]
 
     cmd += pres['post']                  # 封面/字幕逐流 codec，需覆盖上面的 -c:v
 
@@ -2621,7 +2690,8 @@ def process_file(
         current_crf, current_cq = _resolve_quality_params(
             strategy['codec'], crf, cq
         )
-        norm_preset = normalize_preset(preset, strategy['codec'])
+        norm_preset = normalize_preset(
+            preset or default_preset_for(strategy['codec']), strategy['codec'])
         cmd = build_ffmpeg_cmd(
             input_file=input_file,
             output_file=output_file,
@@ -2665,7 +2735,10 @@ def process_file(
             return _result('failed')
 
         current_crf, current_cq = _resolve_quality_params(current_codec, crf, cq)
-        norm_preset = normalize_preset(preset, current_codec)
+        # preset 为 None 表示用户没指定，按"当前策略实际使用的编码器"取默认值，
+        # 从而 GPU 策略得到 p5、降级后的 CPU 策略得到 medium。
+        norm_preset = normalize_preset(
+            preset or default_preset_for(current_codec), current_codec)
 
         # [META-KEEP] 10bit 源 + hof=cuda 时 hwdownload 先试 p010；旧驱动或不支持
         # 10bit 下载的设备会失败，此时同一策略回退 nv12 再试一次（代价：降为 8bit、
@@ -2820,8 +2893,10 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                         help='处理模式：crop=居中裁剪（默认），cover=等比缩放+居中裁剪')
 
     # 视频编码
-    parser.add_argument('--codec', default='libx264',
-                        help='视频编码器（默认 libx264，可用 auto；支持别名）。'
+    parser.add_argument('--codec', default='h264_nvenc',
+                        help='视频编码器（默认 h264_nvenc + --cq 23 + --preset p5；'
+                             '无 NVENC 时自动降级为 libx264 + --crf 21 + --preset medium。'
+                             '可用 auto；支持别名）。'
                              'H.264/HEVC：libx264/libx265、h264_nvenc/hevc_nvenc；'
                              'AV1：libsvtav1/libaom-av1/librav1e、av1_nvenc；'
                              'VP9：libvpx-vp9（NVENC 无 VP9 编码器，走硬解+CPU 编码）')
@@ -2950,9 +3025,9 @@ def main() -> int:
     # 归一化编码器名称
     args.codec = normalize_codec_name(args.codec)
 
-    # 未指定 --preset 时按编码器类型取默认：GPU 编码器 p5，CPU 编码器 medium
-    if not args.preset:
-        args.preset = default_preset_for(args.codec)
+    # --preset 未指定时保持 None，由 process_file 按"实际生效的编码器"逐个策略取默认值：
+    # 这样 GPU 策略拿到 p5，降级到 CPU 策略时自动变成 medium，而不是把 GPU 的 p5
+    # 映射成 libx264 的 slow（用户预期是 medium）。
 
     # 归一化容器扩展名
     container_ext = args.container
@@ -3078,8 +3153,10 @@ def main() -> int:
             quality_parts.append(f'CQ: {DEFAULT_CQ}')
         elif encoder_supports_crf(args.codec):
             quality_parts.append(f'CRF: {DEFAULT_CRF}')
+    # preset 未指定时展示"按当前编码器取到的默认值"，降级后仍以策略级取值为准
+    _shown_preset = args.preset or default_preset_for(args.codec)
     print(_label('编码器')
-          + f'{args.codec}   preset: {args.preset}   ' + '   '.join(quality_parts))
+          + f'{args.codec}   preset: {_shown_preset}   ' + '   '.join(quality_parts))
     print(_label('音频') + args.audio_codec
           + (f' @ {args.audio_bitrate}' if args.audio_codec.lower() != 'copy' else ''))
     if args.color_range != 'auto':

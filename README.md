@@ -1,7 +1,9 @@
 # VidUtils · 视频实用工具集
 
 > 一组基于 **FFmpeg** 的命令行视频处理工具，聚焦 *批量、可复现、生产可用* 的视频工程任务。
-> 当前提供居中裁剪（CPU 顺序版 / CPU 并发版 / CPU 并发增强版 / 硬件加速版四个变体），后续将逐步扩展缩放、修复、增强等能力。
+> 当前提供居中裁剪（CPU 顺序版 / CPU 并发版 / CPU 并发增强版 / 硬件加速版四个变体），
+> 以及基于 NVIDIA 光流硬件的光流插帧 2x 工具（`interp_2x_safe.sh`，含配套回归测试）；
+> 后续将逐步扩展缩放、修复、增强等能力。
 
 ---
 
@@ -17,14 +19,18 @@
   - [vidcrop_cpu_v2.py — CPU 并发裁剪（推荐）](#vidcrop_cpu_v2py--cpu-并发裁剪推荐)
   - [vidcrop_hwaccel.py — 硬件加速裁剪](#vidcrop_hwaccelpy--硬件加速裁剪)
   - [convert_crf.py — 质量换算表（被上面两个脚本依赖）](#convert_crfpy--质量换算表被上面两个脚本依赖)
+  - [interp_2x_safe.sh — 光流插帧 2x（崩溃安全版）](#interp_2x_safesh--光流插帧-2x崩溃安全版)
+  - [test_interp_2x_lock.sh — 回归测试（并发与锁）](#test_interp_2x_locksh--回归测试并发与锁)
 - [快速上手](#快速上手)
 - [常见场景配方](#常见场景配方)
 - [硬件加速说明](#硬件加速说明)
+- [进度显示](#进度显示)
 - [AV1 / VP9 编码支持](#av1--vp9-编码支持)
 - [质量参数指南](#质量参数指南)
 - [已知限制](#已知限制)
 - [路线图（Roadmap）](#路线图roadmap)
 - [目录结构](#目录结构)
+- [工程记忆（memory/）](#工程记忆memory)
 - [常见问题（FAQ）](#常见问题faq)
 - [贡献指南](#贡献指南)
 - [许可证](#许可证)
@@ -40,6 +46,7 @@
 - **可复现**：打印出完整的 FFmpeg 调用命令，便于审计、回放与手工调优。
 - **智能但不黑盒**：自动推断容器、编码器、preset 与加速策略，但每一步都会显式提示，用户随时可以接管。
 - **生产可观测**：实时进度条、耗时统计、输入输出体积对比、失败时打印 FFmpeg stderr 末 N 行。
+- **进度两层可见**：单任务进度条（%/帧/fps/speed/已用/剩余）+ 整批队列进度与剩余时间预测，跑的过程中就知道"这批还要多久"。
 
 ---
 
@@ -73,6 +80,7 @@
 | 日志文件记录（`--log`） | ✅ | ✅ | ✅ | ✅ |
 | `--extra-args` 自定义 FFmpeg 参数 | ✅ | ✅ | ✅ | ✅ |
 | 实时进度条（%/帧/fps/ETA） | ✅ | ✅（并发时聚合面板） | ✅（并发时聚合面板） | ✅ |
+| 整批队列进度 + 整批剩余 ETA | ❌ | ❌ | ✅（并发面板实时；顺序模式每个文件结束后刷新） | ✅（常驻在进度条尾部） |
 | 文件级耗时与体积对比 | ✅ | ✅ | ✅ | ✅ |
 | 编码器别名归一化 | ❌ | ❌ | ✅ | ✅ |
 | preset 双向映射（NVENC ↔ x264 ↔ SVT-AV1） | ❌ | ❌ | ✅ | ✅ |
@@ -108,6 +116,16 @@ ffmpeg -hide_banner -encoders 2>/dev/null | grep -E 'libsvtav1|libaom-av1|librav
   - Vulkan：支持 Vulkan 1.1+ 的 GPU 与驱动
   - VA-API：Linux 下 Intel / AMD GPU 驱动
   - OpenCL：可用的 OpenCL 1.2+ 运行时
+
+- **`interp_2x_safe.sh` 额外需要**（光流插帧，条件比上面严）：
+  - FFmpeg 编译时带 `nvinterpolate` 滤镜 —— **发行版官方包一般没有**，需自行构建（本机 `/usr/local/bin/ffmpeg` 7.1 已含）
+  - NVIDIA GPU 为 **Turing（CC 7.5）或更新**，驱动 ≥ 525（光流跑在 NVOFA 硬件上，不是 NVENC/NVDEC）
+  - Bash ≥ 4.4 与 `flock`（util-linux）—— 单实例锁用它
+
+```bash
+ffmpeg -hide_banner -filters | grep nvinterpolate
+nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
+```
 
 **检查 FFmpeg 是否具备硬件编译选项：**
 
@@ -310,6 +328,154 @@ convert_quality('h264_nvenc', 23, 'libx264')  # → 18
 
 ---
 
+### `interp_2x_safe.sh` — 光流插帧 2x（崩溃安全版）
+
+用 NVIDIA **NVOFA 光流硬件**（FFmpeg 的 `nvinterpolate` 滤镜）把帧率**翻倍**：目标帧率 = 源帧率 × 2，
+**时长不变**，音轨原样 `-c copy`。例如 4K `24000/1001`（23.976fps）→ `48000/1001`（47.952fps）。
+
+与裁剪工具不同，这不是"换个参数跑 ffmpeg"，而是**把长任务做成一堆可恢复的分片** ——
+因为 4K 2x 的真实耗时是"约 50 分钟 / 半小时素材"，中途挂一次就是全损。
+
+```bash
+# 正式跑：脱离会话后台执行（务必这样起，理由见下）
+setsid bash interp_2x_safe.sh /path/in.mp4 -w /tmp/work \
+    > /tmp/work/run.log 2>&1 < /dev/null &
+
+# 看进度：分片数就是进度
+tail -f /tmp/work/run.log
+ls /tmp/work/parts/
+
+# 中断后恢复：原样再执行同一条命令，已完成的分片秒过
+```
+
+**位置参数**
+
+| 参数 | 必需 | 说明 |
+|---|---|---|
+| `<输入视频>` | 是 | 分片目录与默认输出名由它推导 |
+| `[输出路径]` | 否 | 可以是**目录**（以 `/` 结尾，或本身就是已存在的目录 → 自动起名 `<输入名>_2x.mp4`），也可以是**文件**（带扩展名，支持 `mp4` / `mov` / `mkv`）。默认 `<WORKDIR>/<输入名>_2x.mp4` |
+
+**选项**
+
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `-w, --workdir DIR` | `/workspace/interp_2x/<输入名>` | 分片与输出的目录；**每个输入一个目录**，换输入自动分家 |
+| `-p, --preset NAME` | `p5` | `hevc_nvenc` 预设，越大越慢、同码率画质越好 |
+| `-c, --cq N` | `25` | 恒定质量，越大越省码率 |
+| `-L, --seg-len SEC` | `300` | 每片秒数。越大接缝越少但崩一次损失越多；越小损失窗口小但每片开头都要重跑一次光流预热 |
+| `--cap SEC` | 关 | 只处理前 N 秒，可小数（试跑验证 / 只要前一段）。负数或非数字直接报错；超过源总长等于不设置 |
+| `--overwrite` | 关 | 允许覆盖已存在的目标文件。**默认拒绝**，且在任何编码开始前就退出 |
+
+`L` / `TOTAL_CAP` / `WORKDIR` / `PRESET` / `CQ` 也认同名环境变量，命令行优先。
+
+**前置条件**
+
+- FFmpeg **带 `nvinterpolate` 滤镜**（本机 `/usr/local/bin/ffmpeg` 7.1 已含）
+- NVIDIA GPU，**Turing（CC 7.5）或更新**；驱动 ≥ 525
+- 源视频有**明确的帧率元数据**（目标帧率是拿它 ×2 算出来的，VFR / 0 不行）
+
+**只支持 2 倍**：滤镜串里的 `fps=source_fps*2` 与片头要去掉的重复帧数都按 2x 写死。
+1.25x / 2.5x 的预热帧数不同，要用得改源码里这两处。
+
+**为什么不是一条 `ffmpeg ... out.mp4`**
+
+2026-09-14 有一次 4K 2x 跑到第 34 分钟被中断（代码宿主自己崩了，把同进程组的 ffmpeg 一起带走），
+产物 2.1GB 但**没有 moov** → `ffprobe` 报 `moov atom not found`，0 字节可用，也没有可续传的点。
+所以这条链做了三件事：
+
+1. **`setsid` 脱离会话** —— 宿主 / 终端死掉不影响本任务；
+2. **每 `L` 秒一片写 TS** —— TS 没有全局索引，被杀时已完成的分片原样可用；
+3. **已存在的分片自动跳过** —— 重跑同一条命令就是"断点恢复"。
+
+收尾再把分片 `concat` 成 MP4，音轨从原片一次性 `-c copy`（音频本来没改，也避开 AAC 切点问题）。
+
+**产出**
+
+| 路径 | 说明 |
+|---|---|
+| `parts/p00000.ts …` | 已完成的分片 —— **分片数就是进度** |
+| `parts/p00000.meta …` | 该片的切法（`ss dt`），决定它能不能被复用 |
+| `parts.txt` | concat 清单（只列本次要用的片） |
+| `recipe.txt` | 「输入 + 参数」指纹；不匹配会**拒绝启动** |
+| `<输入名>_2x.mp4` | 成片 |
+
+**防呆（两层，目的都是"绝不静默产出错内容"）**
+
+- **第一层 `recipe.txt`**：记 `slice|in|L|preset|cq|trim`。这些一变，目录里**每一片**的内容都会不同
+  （帧边界变了 / 画质档变了 / 换了视频）→ 整体拒绝，并打印新旧差异。
+- **第二层 每片 `.meta`**：记该片的 `ss dt`。总时长只影响**末尾那一片**的切法，所以改 `--cap`
+  不再整体拒绝，而是逐片比对、**只重编边界那一片**。
+
+**并发：同一个 `-w` 只允许一个实例**
+
+`$WORKDIR/.lock` 上有 `flock`，第二个实例会立刻退出并提示。原因是两个实例共用一个分片目录时，
+循环开头的 `rm -f` 会删掉对方正在写的临时文件（ffmpeg 仍在往已被 unlink 的 inode 写），
+先跑完的把临时文件 `mv` 走、后跑完的就报
+`mv: cannot stat '.../p00002.ts.part': No such file or directory`，**而且两边都白跑**。
+锁是内核级的，进程被 kill 会自动释放，不会留死锁；临时文件名另带 PID 作纵深防御。
+
+**失败时的样子**
+
+| 情况 | 表现 |
+|---|---|
+| 某片失败 | 打印 `FAIL` 并非 0 退出；半成品留在 `pXXXXX.ts.part.<pid>`。它不是 `.ts`，不会被误判成"已完成"；持锁启动时会自动清掉，重跑也会重做该片 |
+| 拼接失败 | 分片都还在，可手工重拼，或直接重跑 |
+| 被杀 / 断电 | 已成名的 `.ts` 分片保留；临时文件下次持锁启动时自动清理 |
+
+**注意**
+
+- 所有 ffmpeg 调用都带 `-nostdin`：非前台进程组且 stdin 指向终端时，会被 SIGTTIN 停住而永久挂起。
+- 每片开头会重复约 3 帧（光流拿不到"前一帧"），脚本已用 `trim=start_frame=3,setpts=PTS-STARTPTS` 裁掉。
+
+---
+
+### `test_interp_2x_lock.sh` — 回归测试（并发与锁）
+
+守住 `interp_2x_safe.sh` 的**单实例锁与并发安全**，也就是上面那个"两边都白跑"的原始 bug；
+同时把分片复用、残留清理、`--overwrite` 早退、检查顺序等不变量一起钉住。
+
+```bash
+bash test_interp_2x_lock.sh                                  # 自动找小素材，约 43s
+SUT=./interp_2x_safe.sh bash test_interp_2x_lock.sh
+TEST_INPUT=/path/small.mp4 bash test_interp_2x_lock.sh
+```
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `TEST_INPUT` | 自动在 `<本脚本目录>/input_videos/` 与 `/workspace/input_videos/` 找 `new5_10s.mp4` | 测试输入，小素材即可（要反复编解码） |
+| `SUT` | 同目录的 `interp_2x_safe.sh` | 被测脚本。**指向变异版可以验证测试本身是否真能抓到问题** |
+| `SEG` | `2` | 分片长度，越小片越多、并发窗口越大 |
+
+**退出码**：`0` 全部通过 / `1` 有用例失败 / `2` 环境不具备（无 GPU、无 `nvinterpolate`、无 `flock`、找不到素材）→ 跳过。
+
+**覆盖的用例**
+
+| 用例 | 守什么 |
+|---|---|
+| 1 顺序跑两次 | 锁在第一次结束后释放；`.lock` 文件留在盘上也不误挡；分片被**真的复用**（指纹未变） |
+| 2 外部持锁 | 必须被拒、零编码动作、**不得碰已有分片**；报的是锁冲突而不是"目标文件已存在"（回归检查顺序） |
+| 3 真并发 | A 在跑时 B 被拒；B 没碰过 A 已有的分片（局部指纹） |
+| 4 零延迟同时启动 | **恰好一个成功**；分片/meta 配对且切法正确；成片没被写坏 |
+| 5 持锁进程被 SIGKILL | 锁必须释放（不死锁）；真实残片被清掉；残缺数据没被提升成正式分片 |
+| 5b 残留临时文件 | 不该连累已完成分片被重做；日志说"已清"之后文件要真从盘上消失 |
+| 全局 | 所有日志都不该出现 `mv: cannot stat` |
+
+**断言分两类，两类都要有**
+
+- **日志断言**：看脚本打印了什么（`skip` / `redo` / `run` 行、报错文案）。
+- **事实断言**：分片 + meta 的**指纹**（名字 / 大小 / 纳秒 mtime 的 md5）、文件是否真的从盘上消失、
+  成片帧数。这类**不依赖脚本的自我报告** —— 实测把"删残留"改成"只打日志不删文件"，
+  五项日志断言全绿，只有事实断言抓到了。
+
+环境满足不了某条断言的前提时记 `SKIP`（黄字，计入统计），**绝不静默跳过** ——
+典型例子：并发用例需要 A 先产出至少一片，否则"未触碰已有分片"的指纹对比会变成拿空对空（假通过）。
+
+测试只用自己 `mktemp` 出来的 `-w` 目录，**不碰默认的 `/workspace/interp_2x`**，
+所以可以在正式任务跑着的时候执行（只是会抢一点 GPU）；清理只 kill 自己记录过的 PID，
+不做任何按模式的 `pkill`。
+
+---
+
 ## 快速上手
 
 ```bash
@@ -343,6 +509,19 @@ python vidcrop_cpu_v2.py \
 python vidcrop_hwaccel.py \
     --input ./videos --output ./out \
     --output-width 1280 --output-height 720 --dry-run
+
+# 光流插帧 2x：脱离会话后台跑，日志落盘（4K 素材约 50 分钟 / 半小时）
+setsid bash interp_2x_safe.sh /path/in.mp4 -w /tmp/work \
+    > /tmp/work/run.log 2>&1 < /dev/null &
+
+# 先小规模验证：4 秒一片、只跑前 12 秒，产物扔 /tmp
+bash interp_2x_safe.sh /path/in.mp4 -w /tmp/demo -L 4 --cap 12
+
+# 只处理前 10 分钟；之后想补全片，把 --cap 去掉用同一个 -w 重跑即可
+bash interp_2x_safe.sh /path/in.mp4 /tmp/head.mp4 --cap 600
+
+# 锁与并发安全的回归测试（约 43s，退出码 0/1/2）
+bash test_interp_2x_lock.sh
 ```
 
 ---
@@ -549,6 +728,48 @@ python vidcrop_cpu_v2.py \
 
 ---
 
+## 进度显示
+
+进度分两层：**当前任务做到哪儿**与**整批还要多久**，两者同时可见。
+
+### 单任务进度条
+
+```text
+  [███████████████████░░░░░]  81.2%  487/600帧  fps=245.5  speed=  13x  已用 2.0s  剩余 0.5s     整批剩余 4.0s
+```
+
+| 字段 | 含义 |
+|---|---|
+| `%` / `帧` | 已编码帧数 ÷ 预探测总帧数；FFmpeg 上报帧数超过预估值时按实际值上修，进度不会提前钉死在 100% |
+| `fps` | 已耗时内的平均帧率；部分编码器（如 `libx265`）不通过 `-progress` 上报 fps，退化为帧数 ÷ 耗时 |
+| `speed` | FFmpeg 上报的处理倍速（`-progress` 的 `speed`） |
+| `已用` | 本任务已耗时 |
+| `剩余` / `预计中...` / `收尾中...` | 剩余帧数 ÷ 平均帧率。**还没收到第一帧**（无从算速率）显示 `预计中...`；**帧数已满但 FFmpeg 未退出**（编码器 flush、`-movflags +faststart` 重写 moov）显示 `收尾中...` —— 这两种状态套公式必然得到 0，故用具名文案而不是假的 `0.0s` |
+| `整批剩余` | 整批还要多久，仅批量模式（>1 个文件）出现 |
+
+### 整批队列 ETA
+
+| 场景 | 呈现方式 |
+|---|---|
+| hwaccel（顺序） | 每个文件结束后打印一行队列摘要；同时把 `整批剩余` 挂在该任务进度条尾部，每次刷新都可见 |
+| v2 顺序模式（`--sequential`） | 同上，与 hwaccel 行为对齐 |
+| v2 并发模式 | 聚合面板首行实时显示 `预计剩余`，与 `完成 / 失败 / 跳过 / 运行中 / 等待 / 已用 / fps` 同帧刷新 |
+
+队列摘要样例：
+
+```text
+  队列进度    : [██████████░░░░░░░░░░] 2/4(50.0%)  完成 2  失败 0  跳过 0  累计 6.5s  预计剩余 6.5s
+```
+
+估算口径：**吞吐率 = 已处理字节 ÷ 已耗时**，整批剩余 = 剩余文件字节 ÷ 吞吐率。
+
+- 按字节加权，而非「平均单文件耗时 × 剩余个数」——同一批素材分辨率/帧率/画质一致时耗时近似正比于输入体积，长短片混杂也能算准
+- 不需要为未处理文件预先 ffprobe，每个输入只多用一次 `stat()`
+- 跳过 / 失败的文件从剩余里出列，但不计入吞吐率样本，否则大量跳过会把速率拉低到失真
+- 尚无样本（首个文件未跑完、或全部跳过）时显示 `--`，不输出离谱预测；最后一个文件由末尾「汇总」收尾，不再重复打印
+
+---
+
 ## AV1 / VP9 编码支持
 
 ### 编码器与默认容器
@@ -649,10 +870,16 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 |---|---|---|
 | 无 VP9 硬件编码 | FFmpeg 从未提供 `vp9_nvenc`；VP9 硬编只有 `vp9_qsv` / VA-API | VP9 走 CPU 编码（可配硬解） |
 | `av1_nvenc` 需新卡 | 第 8 代 NVENC（Ada / RTX 40 / L40+）才有；Turing / Ampere 没有 | 自动降级 `libsvtav1` |
-| `crop_cuda` 缺失 | FFmpeg 6.1 未编译该滤镜，全 GPU 流水线（策略 1）始终跳过 | 仍走"硬解 + CPU 裁剪 + NVENC 硬编" |
+| `crop_cuda` 缺失 | FFmpeg 6.1 未编译该滤镜，全 GPU 流水线（策略 1）始终跳过 | 仍走"硬解 + CPU 裁剪 + NVENC 硬编"；代价是**吞吐对 CPU 敏感**，见 [FAQ Q13](#常见问题faq) |
 | `librav1e` 无 `-crf` | 编码器本身只支持 `-qp` | 脚本自动换算（实测标定） |
 | `h264_nvenc` 无 10bit | NVENC H.264 只做 8bit | 自动降 8bit 保硬件；需 10bit 用 `hevc_nvenc` / `av1_nvenc` |
 | 脚本依赖 `convert_crf.py` | 两个裁剪脚本运行时 import 同目录该文件 | 拷贝时一并带上 |
+| `interp_2x_safe.sh` 只做 **2 倍** | `fps=source_fps*2` 与片头去重帧数都按 2x 写死 | 要 1.25x / 2.5x 需改源码里这两处 |
+| 光流插帧需要**自建 FFmpeg** | 发行版官方包不含 `nvinterpolate`；且要求 Turing（CC 7.5）或更新、驱动 ≥ 525 | 用带该滤镜的 ffmpeg；显卡不满足只能退到 `minterpolate`（慢很多、质量更差） |
+| 4K 2x 很慢 | 实测约 **0.6× 实时**（半小时素材约 50 分钟），且会与其它 GPU 任务争用 | 用 `setsid` 起 + 分片；`-L` 调小以缩小单次损失 |
+| 每个分片开头重复约 3 帧 | 光流拿不到"前一帧"，每个新起的滤镜实例都要预热 | 脚本已用 `trim=start_frame=3,setpts=PTS-STARTPTS` 裁掉；**不要**再手工加 ±offset 补偿 |
+| 同一个 `-w` 只允许一个实例 | `flock` 单实例锁会立刻拒绝第二个实例 | 换 `-w`；或等前一个结束再原样重跑（已完成分片会自动跳过） |
+| `nvinterpolate` 会往 CWD 写日志 | 滤镜在**当前工作目录**下创建 `NvOFFRUC/logFRUCError.txt`（在哪个目录里跑就落在哪个目录） | 已加入 `.gitignore`；`test_interp_2x_lock.sh` 会先 `cd` 到自己的临时目录再跑。手工跑正式任务时建议也在专门目录里起 |
 
 ---
 
@@ -667,6 +894,8 @@ VidUtils 规划作为一个**命令行优先 / Python 原生**的视频工程工
 | `vidcrop_cpu_v2.py` | ✅ 已发布 | CPU 并发裁剪增强版（AV1/VP9、别名、preset 映射、`-ref` 基准、crop-ratio、color-range） |
 | `vidcrop_hwaccel.py` | ✅ 已发布 | 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL，5 级策略链） |
 | `convert_crf.py` | ✅ 已发布 | 质量换算单一事实来源 |
+| `interp_2x_safe.sh` | ✅ 已发布 | 光流插帧 2x（NVOFA / `nvinterpolate`；`setsid` + TS 分片 + 断点恢复 + 单实例锁） |
+| `test_interp_2x_lock.sh` | ✅ 已发布 | `interp_2x_safe.sh` 的回归测试（单实例锁 / 并发安全，退出码 0/1/2） |
 | `vidscale_*.py` | 🚧 规划中 | 视频缩放：双三次 / Lanczos / `scale_cuda` / `scale_npp` |
 | `vidrepair_*.py` | 🚧 规划中 | 视频修复：容器修复、损坏帧跳过、时间戳重建、丢帧补偿 |
 | `videnhance_*.py` | 🚧 规划中 | 视频增强：去噪、锐化、去隔行、HDR→SDR、AI 超分接入 |
@@ -677,8 +906,12 @@ VidUtils 规划作为一个**命令行优先 / Python 原生**的视频工程工
 - 参数命名风格一致（`--input / --output / --overwrite / --hwaccel / --ffmpeg-bin`）
 - 批量语义一致（文件或目录均可作为 `--input`）
 - 失败诊断一致（打印命令 + FFmpeg stderr 末 N 行）
-- 进度与统计一致（实时进度条 + 文件级耗时 + 批量汇总）
+- 进度与统计一致（实时进度条 + 文件级耗时 + 批量汇总 + 整批剩余 ETA）
 - 质量换算统一走 `convert_crf.py`，不在各脚本里硬编码偏移
+
+> **已知例外**：`interp_2x_safe.sh` 早于这套约定，输入/输出走**位置参数**（`<输入视频> [输出路径]`）
+> 而不是 `--input / --output`；与位置参数无关的其余约定它都遵守（有 `--overwrite`、失败时给出
+> 可诊断信息、失败非 0 退出）。将来若要并入 `vidutils-cli`，需要先统一它的参数风格。
 
 ---
 
@@ -692,11 +925,35 @@ vidutils/
 ├── vidcrop_cpu_v2.py         # CPU 并发裁剪增强版（推荐；AV1/VP9、别名、preset 映射、-ref 基准）
 ├── vidcrop_hwaccel.py        # 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL，5 级策略链）
 ├── convert_crf.py            # 质量换算表（被 v2 / hwaccel 依赖，单一事实来源）
+├── interp_2x_safe.sh         # 光流插帧 2x（NVOFA/nvinterpolate；setsid + TS 分片 + 断点恢复）
+├── test_interp_2x_lock.sh    # 上面这个脚本的回归测试（单实例锁 / 并发安全）
+├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
 ├── AV1_VP9_UPGRADE_PLAN_v2.md # AV1/VP9 升级方案归档
 ├── docs/                     # （规划）设计文档与性能基准
 ├── examples/                 # （规划）示例素材与演示脚本
-└── tests/                    # （规划）单元测试与端到端测试
+└── tests/                    # （规划）单元测试与端到端测试；test_interp_2x_lock.sh 暂放根目录
 ```
+
+---
+
+## 工程记忆（memory/）
+
+`memory/` 放的是**工具背后的事实与踩坑**，不是 API 文档 —— 用法看本文件，为什么这么做、踩过什么坑看那里。
+索引在 [`memory/MEMORY.md`](memory/MEMORY.md)。当前条目：
+
+- [长时 ffmpeg 任务必须 setsid 分离 + 别直接写 MP4](memory/project_long_ffmpeg_jobs.md)
+  —— 宿主崩溃会带走同进程组的 ffmpeg；MP4 缺 moov 整份作废（已发生过一次，34 分钟算力白跑）；
+  并发实例互删临时文件；以及 `interp_2x_safe.sh` 里那套防呆（锁 / 两层复用校验 / PID 临时名）
+- [FFmpeg 7.1 已合并 nvinterpolate 与 libvmaf](memory/project_nvinterpolate_build.md)
+  —— 单一 ffmpeg、无需环境文件；`nvinterpolate` 必须放滤镜链末尾否则段错误；移植补丁位置
+- [ffmpeg 挂起的两个根因](memory/project_ffmpeg_stdin_hang.md)
+  —— SIGTTIN（状态 T，`-nostdin` 能修）vs 输出管道反压（状态 S 且 CPU 冻结，`-nostdin` 没用）
+- [T4 能力边界 + 测性能前先查并发流水线](memory/project_t4_gpu_capabilities.md)
+  —— 别的流水线会抢 CPU/GPU 导致基准不可信；T4 无 AV1 编码器；零拷贝管线里 `-pix_fmt` 无效
+
+写法沿用本机 codebuddy 自动记忆的约定：frontmatter 带 `name` / `description` / `type`，
+正文对 project / feedback 类用「事实 → **Why:** → **How to apply:**」的结构，
+方便日后判断这条记忆是不是还成立。
 
 ---
 
@@ -749,6 +1006,19 @@ cover 模式使用 `scale,crop` 组合滤镜，该滤镜在 CPU 侧执行（`cro
 **Q12：为什么脚本会卡在"正在检测硬件加速能力..."？**
 
 旧版本有此问题：FFmpeg 会继承 stdin 并阻塞读，Python 的 `timeout` 也救不回来。当前版本已对所有 FFmpeg 调用加 `-nostdin` 与 `stdin=DEVNULL`，探测耗时约 5 秒。若仍卡住请提交 Issue 并附 `ffmpeg -version`。
+
+**Q13：同样的命令，这次比上次慢了一倍？**
+
+先看 ffmpeg 自己上报的 `speed=`：它由 ffmpeg 按自身吞吐算出，Python 侧的打印开销改不了它。`speed` 真的掉了，基本是**资源争用**（见 [进度显示](#进度显示) 里那行样例的任务字段）：
+
+```bash
+uptime                                                              # load 是否远超核数
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv   # 是否有其它 NVENC 会话
+```
+
+本环境（`crop_cuda` 不可用）的实际流水线是 `CUDA 硬解 → hwdownload → CPU 侧 crop → 回传显存 → NVENC 硬编`，CPU 段在关键路径上；NVENC 跑到 1300+ fps 时每帧只摊到约 0.7 ms CPU 预算。8 核机器上任何一个吃满 CPU 的并发作业（典型：算 SSIM/PSNR 的 `-lavfi ssim` 质量对比、另一个转码任务）就会把它从约 47x 拖到约 20x。
+
+实测对照（同一文件、同一条命令、`vidcrop_hwaccel.py`）：并发 SSIM 作业运行时 **1m11s（610 fps / 20.5x）**，该作业结束后同样命令 **32s（1378 fps / 46.7x）**。所以排查顺序是：先看 `speed`，再查并发作业，最后才怀疑脚本；批量任务与质量对比任务请错开运行。
 
 ---
 

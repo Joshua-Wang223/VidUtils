@@ -2307,6 +2307,11 @@ def run_ffmpeg_with_progress(
                     f = int(val)
                     job.frame = max(job.frame, f)
                     if total_frames > 0:
+                        # 预探测帧数偏小时 ffmpeg 报出的帧数会超出它；不上修则进度
+                        # 会被钉在 100%、剩余恒为 0，而实际还在编码。
+                        if f > total_frames:
+                            total_frames = f
+                            job.total_frames = f
                         job.progress = min(1.0, max(job.progress, f / total_frames))
                 except ValueError:
                     pass
@@ -2381,6 +2386,80 @@ def run_ffmpeg_with_progress(
             job.elapsed = job.finished_at - job.started_at
 
 
+def _file_bytes(src: Path) -> int:
+    """读取输入文件字节数；stat 失败按 0 处理（不参与吞吐量统计）。"""
+    try:
+        return src.stat().st_size
+    except OSError:
+        return 0
+
+
+class QueueETA:
+    """整批队列的剩余时间预测（单线程顺序执行时的「整批还要多久」）。
+
+    口径：以「已处理字节 / 已耗时」作为吞吐率，外推剩余未开始文件的字节数。
+    按字节加权而非「平均单文件耗时 × 剩余个数」，是因为同一批素材的分辨率、
+    帧率与画质参数一致时耗时近似正比于输入体积，文件大小差异能被反映出来；
+    且无需为未处理文件预先 ffprobe。
+    """
+
+    BAR_WIDTH = 20
+
+    def __init__(self, sizes: List[int]) -> None:
+        self.total = len(sizes)
+        self._remaining = sum(sizes)
+        self._timed_bytes = 0
+        self._timed_seconds = 0.0
+
+    def add(self, size: int, elapsed: float) -> None:
+        """登记一个已结束的文件。
+
+        失败/跳过同样出列（不会再被处理），但只有实际耗时 > 0 的文件计入
+        吞吐率样本，否则跳过文件会把速率拉低到失真。
+        """
+        size = max(0, min(size, self._remaining))
+        self._remaining -= size
+        if elapsed > 0:
+            self._timed_bytes += size
+            self._timed_seconds += elapsed
+
+    def eta(self) -> Optional[float]:
+        """剩余整批预计秒数；无样本或已无剩余时返回 None。"""
+        if self._remaining <= 0 or self._timed_bytes <= 0 or self._timed_seconds <= 0:
+            return None
+        return self._remaining / (self._timed_bytes / self._timed_seconds)
+
+    def rate(self) -> Optional[float]:
+        """当前吞吐率（字节/秒）；尚无样本返回 None。"""
+        if self._timed_bytes <= 0 or self._timed_seconds <= 0:
+            return None
+        return self._timed_bytes / self._timed_seconds
+
+    def split(self, size: int) -> Tuple[Optional[float], Optional[float]]:
+        """把队列剩余拆成「当前文件之后的剩余」与「当前文件的字节估算」。
+
+        供进度条使用：当前文件的剩余随任务实际进度实时倒数，避免整批剩余在
+        整个任务期间纹丝不动。
+        """
+        rate = self.rate()
+        if rate is None:
+            return None, None
+        return max(0, self._remaining - size) / rate, size / rate
+
+    def line(self, handled: int, elapsed: float,
+             done: int, failed: int, skipped: int) -> str:
+        pct = handled / self.total if self.total else 1.0
+        filled = int(round(self.BAR_WIDTH * pct))
+        bar = "█" * filled + "░" * (self.BAR_WIDTH - filled)
+        eta = self.eta()
+        eta_s = _fmt_time(eta) if eta is not None else "--"
+        return (
+            f"[{bar}] {handled}/{self.total}({pct * 100:.1f}%)  "
+            f"完成 {done}  失败 {failed}  跳过 {skipped}  "
+            f"累计 {_fmt_time(elapsed)}  预计剩余 {eta_s}"
+        )
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  进度显示
 # ═══════════════════════════════════════════════════════════════════
@@ -2398,6 +2477,7 @@ class AggregatePanel:
     def __init__(self, jobs: List[Job]):
         self.jobs = jobs
         self.total = len(jobs)
+        self.sizes = [_file_bytes(j.src) for j in jobs]
         self.lock = threading.Lock()
         self.start_ts = time.time()
         self._stop = threading.Event()
@@ -2443,10 +2523,30 @@ class AggregatePanel:
         overall = prog_sum / self.total if self.total else 1.0
         return overall, done, failed, skipped, running, pending, fps_sum
 
+    def _queue_eta(self, elapsed: float) -> Optional[float]:
+        """整批剩余时间：以「已完成字节 / 已用时」外推剩余字节。
+
+        运行中任务的剩余部分按其 progress 折算；跳过任务不消耗时间，连同
+        字节一并剔除，避免拉高吞吐率的假象。
+        """
+        done_bytes = remain_bytes = 0.0
+        for job, size in zip(self.jobs, self.sizes):
+            if job.status == "skipped":
+                continue
+            p = min(1.0, max(0.0, job.progress))
+            done_bytes += size * p
+            remain_bytes += size * (1.0 - p)
+        # 开跑头几秒样本太薄（进度几乎为 0，除法会被放大成离谱数字），
+        # 宁可暂不显示；实测 3 秒后已收敛到可用精度。
+        if elapsed <= 3.0 or done_bytes <= 0 or remain_bytes <= 0:
+            return None
+        return remain_bytes / (done_bytes / elapsed)
+
     def _render(self, final: bool = False) -> None:
         with self.lock:
             overall, done, failed, skipped, running, pending, fps_total = self._aggregate()
             elapsed = time.time() - self.start_ts
+            eta = self._queue_eta(elapsed)
             events = list(self._events)
 
         if self._last_lines > 0:
@@ -2454,11 +2554,12 @@ class AggregatePanel:
             sys.stdout.write("\033[J")
 
         fps_str = f"  {fps_total:.0f}fps" if running > 0 and fps_total > 0 else ""
+        eta_str = f"  预计剩余 {_fmt_time(eta)}" if eta is not None else ""
         line1 = (
             f"  [{_bar(overall)}] {overall * 100:5.1f}%  "
             f"完成 {done}  失败 {failed}  跳过 {skipped}  "
             f"运行中 {running}  等待 {pending}  已用 {_fmt_time(elapsed)}"
-            f"{fps_str}"
+            f"{eta_str}{fps_str}"
         )
 
         sys.stdout.write(line1 + "\n")
@@ -2479,26 +2580,52 @@ class AggregatePanel:
 
 
 class SingleProgress:
-    def __init__(self, job: Job):
+    def __init__(self, job: Job, queue_rest: Optional[float] = None,
+                 queue_cur: Optional[float] = None):
         self.job = job
         self.start_ts = time.time()
+        # 整批剩余时间的两个构件（批量顺序模式才有）：
+        # queue_rest = 当前文件之后的批次剩余，queue_cur = 当前文件的字节估算
+        self.queue_rest = queue_rest
+        self.queue_cur = queue_cur
+
+    def _queue_tail(self, progress: float, elapsed: float) -> str:
+        """「整批剩余」字段：当前文件的剩余按实时进度倒数，之后的文件按字节估算。"""
+        if self.queue_rest is None or self.queue_cur is None:
+            return ""
+        if 0 < progress < 1.0:
+            cur_left = elapsed * (1 - progress) / progress
+        elif progress <= 0:
+            cur_left = self.queue_cur
+        else:
+            cur_left = 0.0
+        return f'  整批剩余 {_fmt_time(self.queue_rest + cur_left)}'
 
     def update(self, j: Job) -> None:
         elapsed = time.time() - self.start_ts
-        eta = 0.0
-        if j.progress > 0.001:
+
+        # 同 vidcrop_hwaccel.py：还没起步（无速率）或帧数已满但 FFmpeg 未退出
+        # （flush / faststart 重写 moov）时，公式必然给出 0，显示为 0.0s 会被
+        # 当成算错，按状态给出明确文案。
+        if j.progress <= 0.001:
+            tail = '  预计中...  '
+        elif j.progress < 1.0:
             eta = elapsed * (1 - j.progress) / j.progress
+            tail = f'  剩余 {_fmt_time(eta)}   '
+        else:
+            tail = '  收尾中...  '
 
         # 与 vidcrop_hwaccel.py 对齐：帧数 / fps / 倍速 / 已用 / 剩余
         frames = f"{j.frame}/{j.total_frames}帧" if j.total_frames else f"{j.frame}帧"
         # 部分编码器（如 libx265）未通过 -progress 上报 fps，退化为 帧数/耗时，
         # 与 vidcrop_hwaccel.py 的算法保持一致。
         fps = j.fps if j.fps > 0 else (j.frame / elapsed if elapsed > 0 else 0.0)
+        q_tail = self._queue_tail(j.progress, elapsed)
         line = (
             f"\r  [{_bar(j.progress)}] {j.progress * 100:5.1f}%  "
             f"{frames}  "
             f"fps={fps:5.1f}  speed={j.speed or '-':>6}  "
-            f"已用 {_fmt_time(elapsed)}  剩余 {_fmt_time(eta)}   "
+            f"已用 {_fmt_time(elapsed)}{tail}{q_tail}   "
         )
         sys.stdout.write(line)
         sys.stdout.flush()
@@ -2701,9 +2828,25 @@ def run_parallel(jobs: List[Job], args: argparse.Namespace, workers: int, thread
 
 def run_sequential(jobs: List[Job], args: argparse.Namespace, threads: int) -> None:
     has_crop_ratio = args.crop_ratio is not None
+    sizes = [_file_bytes(j.src) for j in jobs]
+    queue = QueueETA(sizes) if len(jobs) > 1 else None
+
     for idx, job in enumerate(jobs, 1):
         if _STOP_REQUESTED.is_set():
             break
+
+        # 上一个文件已收尾，刷新整批队列进度（与 vidcrop_hwaccel.py 对齐）
+        if queue is not None and idx > 1:
+            prev = jobs[idx - 2]
+            queue.add(sizes[idx - 2], prev.elapsed)
+            finished = jobs[:idx - 1]
+            print("  " + _label("队列进度") + queue.line(
+                idx - 1,
+                sum(j.elapsed for j in finished),
+                sum(1 for j in finished if j.status == "done"),
+                sum(1 for j in finished if j.status == "failed"),
+                sum(1 for j in finished if j.status == "skipped"),
+            ))
 
         print(f"\n[{idx}/{len(jobs)}] {job.name}")
 
@@ -2744,7 +2887,11 @@ def run_sequential(jobs: List[Job], args: argparse.Namespace, threads: int) -> N
 
         print(f"  {_label('执行命令')}{shlex.join(cmd)}")
 
-        progress = SingleProgress(job)
+        # 本 job 尚未出列，故此预测覆盖「当前文件剩余 + 后续全部」
+        q_rest = q_cur = None
+        if queue is not None:
+            q_rest, q_cur = queue.split(sizes[idx - 1])
+        progress = SingleProgress(job, q_rest, q_cur)
         job.status = "running"
         rc, tail = run_ffmpeg_with_progress(cmd, job, on_update=progress.update)
         progress.finish()

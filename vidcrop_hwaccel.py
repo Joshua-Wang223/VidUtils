@@ -1142,6 +1142,40 @@ def _fmt_duration(seconds: float) -> str:
     return f'{minutes}m {sec:02d}s'
 
 
+def _eta_tail(frame: int, total_frames: int, fps: float) -> str:
+    """进度条尾部的「剩余」字段。
+
+    两种情况下 (total-frame)/fps 会恒等于 0 或不可用，套公式只会显示误导性的
+    0.0s：① 还没收到第一帧，fps 为 0；② 帧数已满但 FFmpeg 尚未退出（编码器
+    flush、-movflags +faststart 重写 moov），剩余帧数是 0 但进程还在跑。
+    故按状态给出明确文案，而不是一个假的 0.0s。
+    """
+    if frame <= 0:
+        return '  预计中...  '
+    if frame < total_frames and fps > 0:
+        return f'  剩余 {_fmt_duration((total_frames - frame) / fps)}   '
+    return '  收尾中...  '
+
+
+def _queue_tail(queue_rest: Optional[float], queue_cur: Optional[float],
+                frame: int, total_frames: Optional[int], fps: float) -> str:
+    """进度条尾部的「整批剩余」字段。
+
+    当前文件的剩余优先按实时帧率算，这样整批剩余会跟着当前任务一起倒数；
+    尚未起步（无帧率）时退化为该文件的字节估算；帧数已跑满（收尾中）则该文件
+    不再计入。非批量模式（构件为 None）返回空串。
+    """
+    if queue_rest is None or queue_cur is None:
+        return ''
+    if total_frames and total_frames > 0 and 0 < frame < total_frames and fps > 0:
+        cur_left = (total_frames - frame) / fps
+    elif frame <= 0:
+        cur_left = queue_cur
+    else:
+        cur_left = 0.0
+    return f'  整批剩余 {_fmt_duration(queue_rest + cur_left)}'
+
+
 def _same_path(a: Path, b: Path) -> bool:
     """比较两个路径是否指向同一位置（优先解析符号链接）。
 
@@ -2490,15 +2524,97 @@ def build_ffmpeg_cmd(
 #  进度条执行
 # ═══════════════════════════════════════════════════════════════════
 
+def _file_bytes(path) -> int:
+    """读取输入文件字节数；stat 失败按 0 处理（不参与吞吐量统计）。"""
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return 0
+
+
+class QueueETA:
+    """整批队列的剩余时间预测（单任务进度条之外的「整批还要多久」）。
+
+    口径：以「已处理字节 / 已耗时」作为吞吐率，外推剩余未开始文件的字节数。
+    按字节加权而非「平均单文件耗时 × 剩余个数」，是因为同一批素材的分辨率、
+    帧率与画质参数一致时耗时近似正比于输入体积，文件大小差异能被反映出来；
+    且无需为未处理文件预先 ffprobe。
+    """
+
+    BAR_WIDTH = 20
+
+    def __init__(self, sizes: List[int]) -> None:
+        self.total = len(sizes)
+        self._remaining = sum(sizes)
+        self._timed_bytes = 0
+        self._timed_seconds = 0.0
+
+    def add(self, size: int, elapsed: float) -> None:
+        """登记一个已结束的文件。
+
+        失败/跳过同样出列（不会再被处理），但只有实际耗时 > 0 的文件计入
+        吞吐率样本，否则跳过文件会把速率拉低到失真。
+        """
+        size = max(0, min(size, self._remaining))
+        self._remaining -= size
+        if elapsed > 0:
+            self._timed_bytes += size
+            self._timed_seconds += elapsed
+
+    def eta(self) -> Optional[float]:
+        """剩余整批预计秒数；无样本或已无剩余时返回 None。"""
+        if self._remaining <= 0 or self._timed_bytes <= 0 or self._timed_seconds <= 0:
+            return None
+        return self._remaining / (self._timed_bytes / self._timed_seconds)
+
+    def rate(self) -> Optional[float]:
+        """当前吞吐率（字节/秒）；尚无样本返回 None。"""
+        if self._timed_bytes <= 0 or self._timed_seconds <= 0:
+            return None
+        return self._timed_bytes / self._timed_seconds
+
+    def split(self, size: int) -> Tuple[Optional[float], Optional[float]]:
+        """把队列剩余拆成「当前文件之后的剩余」与「当前文件的字节估算」。
+
+        供进度条使用：当前文件的剩余部分随任务实际帧率实时倒数，只有档下
+        已经无法计入帧数的收尾阶段才退化回字节估算，避免整批剩余在整个任务
+        期间纹丝不动。
+        """
+        rate = self.rate()
+        if rate is None:
+            return None, None
+        return max(0, self._remaining - size) / rate, size / rate
+
+    def line(self, handled: int, elapsed: float,
+             done: int, failed: int, skipped: int) -> str:
+        pct    = handled / self.total if self.total else 1.0
+        filled = int(round(self.BAR_WIDTH * pct))
+        bar    = '█' * filled + '░' * (self.BAR_WIDTH - filled)
+        eta    = self.eta()
+        eta_s  = _fmt_duration(eta) if eta is not None else '--'
+        return (
+            f'[{bar}] {handled}/{self.total}({pct * 100:.1f}%)  '
+            f'完成 {done}  失败 {failed}  跳过 {skipped}  '
+            f'累计 {_fmt_duration(elapsed)}  预计剩余 {eta_s}'
+        )
+
+
 def _run_with_progress(
     cmd: List[str],
     total_frames: Optional[int],
+    queue_rest: Optional[float] = None,
+    queue_cur: Optional[float] = None,
 ) -> Tuple[int, str]:
     """
     执行 FFmpeg 命令并在终端显示实时进度条。
     通过 -progress pipe:1 -nostats 获取结构化进度流；
     异步线程收集 stderr，失败时返回完整错误文本。
     进程注册到 _ACTIVE_PROCS 以支持 Ctrl+C 安全中断。
+
+    queue_rest / queue_cur: 批量模式的整批剩余时间构件（秒），两者都非 None 时
+               进度条尾部常驻「整批剩余」= 当前文件剩余 + 后续文件剩余，让用户
+               不必回头翻历史输出就知道"这批还要多久"。当前文件剩余优先按实时
+               帧率算，于是该数字会跟着当前任务一起倒数。
     """
     prog_cmd = list(cmd)
     try:
@@ -2507,10 +2623,13 @@ def _run_with_progress(
     except ValueError:
         prog_cmd += ['-progress', 'pipe:1', '-nostats']
 
-    term_w = shutil.get_terminal_size((80, 24)).columns
-    bar_w  = max(10, min(30, term_w - 52))
-    t0     = time.perf_counter()
-    frame  = 0
+    # 整批剩余字段常驻尾随，为避免进度条换行，先从可用宽度里预留它的长度
+    has_q   = queue_rest is not None and queue_cur is not None
+    reserve = len('  整批剩余 00m00s') if has_q else 0
+    term_w  = shutil.get_terminal_size((80, 24)).columns
+    bar_w   = max(10, min(30, term_w - 52 - reserve))
+    t0      = time.perf_counter()
+    frame   = 0
     stderr_lines: List[str] = []
 
     try:
@@ -2558,24 +2677,30 @@ def _run_with_progress(
 
             elapsed = time.perf_counter() - t0
             fps     = frame / elapsed if elapsed > 0 else 0
+            q_tail  = _queue_tail(queue_rest, queue_cur, frame, total_frames, fps)
 
             if total_frames and total_frames > 0:
+                # 预探测的帧数偏小时 ffmpeg 报出的帧数会超出它；不上修的话进度会被
+                # 钉在 100%、剩余恒为 0，而实际还在编码。
+                total_frames = max(total_frames, frame)
                 pct    = min(frame / total_frames, 1.0)
                 filled = int(bar_w * pct)
                 bar    = '█' * filled + '░' * (bar_w - filled)
-                eta    = (total_frames - frame) / fps if fps > 0 else 0
+                tail   = _eta_tail(frame, total_frames, fps)
                 print(
                     f'\r  [{bar}] {pct*100:5.1f}%'
                     f'  {frame}/{total_frames}帧'
                     f'  fps={fps:5.1f}'
                     f'  speed={speed or "-":>6}'
                     f'  已用 {_fmt_duration(elapsed)}'
-                    f'  剩余 {_fmt_duration(max(0.0, eta))}   ',
+                    f'{tail}'
+                    f'{q_tail}   ',
                     end='', flush=True,
                 )
             else:
                 print(
-                    f'\r  已处理 {frame} 帧  {fps:.1f}fps  {elapsed:.1f}s   ',
+                    f'\r  已处理 {frame} 帧  {fps:.1f}fps  {elapsed:.1f}s   '
+                    f'{q_tail}   ',
                     end='', flush=True,
                 )
 
@@ -2651,6 +2776,8 @@ def process_file(
     file_total: int = 0,
     flag: Optional[str] = None,
     color_range: Optional[str] = None,
+    queue_rest: Optional[float] = None,
+    queue_cur: Optional[float] = None,
 ) -> Dict[str, object]:
     """
     处理单个视频文件，支持动态策略降级。
@@ -2667,6 +2794,8 @@ def process_file(
         file_index      当前文件序号（1 起），用于 [i/n] 前缀
         file_total      文件总数，用于 [i/n] 前缀
         flag            输出文件名后缀标记，None 时用默认 _cropped / _covered
+        queue_rest / queue_cur  整批剩余时间的两个构件（秒），透传给进度条常驻
+                                显示；两者皆为 None 时不显示该字段
     """
     extra_args = extra_args or []
 
@@ -2865,7 +2994,7 @@ def process_file(
                   + f'[{i + 1}/{len(all_strategies)}] {strategy["name"]}{tag}')
             print('  ' + _label('执行命令') + shlex.join(cmd))
 
-            rc, stderr_text = _run_with_progress(cmd, total_frames)
+            rc, stderr_text = _run_with_progress(cmd, total_frames, queue_rest, queue_cur)
 
             # rc=0 不代表产物存在：ffmpeg 在少数静默错误下会以 0 退出却不写文件。
             # 直接 stat() 会抛 FileNotFoundError 中断整批处理，故显式判为策略失败。
@@ -3296,6 +3425,9 @@ def main() -> int:
     sum_frames = 0
     sum_enc_elapsed = 0.0
 
+    sizes = [_file_bytes(vf) for vf in video_files]
+    queue = QueueETA(sizes) if len(video_files) > 1 else None
+
     try:
         for idx, vf in enumerate(video_files, start=1):
             if _STOP_REQUESTED.is_set():
@@ -3310,6 +3442,12 @@ def main() -> int:
                 out_width, out_height = calculate_auto_crop_size(src_w, src_h, crop_ratio_num, crop_ratio_den)
             else:
                 out_width, out_height = args.output_width, args.output_height
+
+            # 整批剩余拆成两段交给进度条：当前文件的剩余部分随实时帧率倒数，
+            # 该文件之后的部分按字节估算（尚无样本时为 None，不显示该字段）
+            q_rest = q_cur = None
+            if queue is not None:
+                q_rest, q_cur = queue.split(sizes[idx - 1])
 
             res = process_file(
                 input_file=vf,
@@ -3341,6 +3479,8 @@ def main() -> int:
                 file_total=len(video_files),
                 flag=args.flag,
                 color_range=args.color_range,
+                queue_rest=q_rest,
+                queue_cur=q_cur,
             )
             st = res['status']
             if st == 'done':
@@ -3354,6 +3494,14 @@ def main() -> int:
                 sum_frames += frames
                 sum_enc_elapsed += el
                 peak_fps = max(peak_fps, frames / el)
+
+            # 每个文件结束后刷新一次整批队列进度（最后一个文件由末尾「汇总」收尾）
+            if queue is not None and not args.dry_run and idx < len(video_files):
+                queue.add(sizes[idx - 1], el)
+                print('  ' + _label('队列进度') + queue.line(
+                    idx, sum_enc_elapsed,
+                    done_count, failed_count, skipped_count,
+                ))
 
     except KeyboardInterrupt:
         _STOP_REQUESTED.set()

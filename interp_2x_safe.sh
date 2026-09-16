@@ -512,6 +512,26 @@ CWDROOT="$RUNLOGS/cwd"
 EVENTS="$RUNLOGS/.events"
 PROBE_ERR_FILE="$RUNLOGS/.probe_err"
 
+# cgroup 的 OOM 击杀计数（/sys/fs/cgroup/memory.events 的 oom_kill）。
+# 拿不到就返回非 0 —— 调用方按"不可知"处理，不要瞎猜 OOM。
+cgroup_oom_kills() {
+    local f=/sys/fs/cgroup/memory.events v
+    [[ -r "$f" ]] || return 1
+    v=$(awk '$1=="oom_kill"{print $2; exit}' "$f" 2>/dev/null) || return 1
+    case "$v" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$v"
+}
+# "已用/上限（余量）"一行字，仅用于 OOM 诊断
+mem_now_line() {
+    local mx cu
+    [[ -r /sys/fs/cgroup/memory.max && -r /sys/fs/cgroup/memory.current ]] || return 1
+    mx=$(cat /sys/fs/cgroup/memory.max 2>/dev/null) || return 1
+    cu=$(cat /sys/fs/cgroup/memory.current 2>/dev/null) || return 1
+    case "$mx" in ''|max|*[!0-9]*) return 1 ;; esac
+    case "$cu" in ''|*[!0-9]*) return 1 ;; esac
+    awk -v c="$cu" -v m="$mx" 'BEGIN{printf "%.2f/%.2f GB（余量 %.2f GB）", c/1073741824, m/1073741824, (m-c)/1073741824}'
+}
+
 # --- 收拾"还在往本目录 parts/ 写"的 ffmpeg（孤儿 & 在飞的都算）--------------------
 # 为什么不能只靠 run_job 子 shell 里的 trap + $!：
 #   · 子 shell 被打死、或信号正好落在它"装 trap 之前"那一瞬间 → ffmpeg 变孤儿，pid 没人知道；
@@ -1314,15 +1334,48 @@ drain_events() {
             else
                 log "FAIL  $tag（rc=$rc，半成品保留在 $PARTS/$tag.ts.part.$$）"
             fi
+            # 内存不足单独说清楚：分片被 OOM 打死时，ffmpeg 自己不报错，日志里可能只有
+            # x265 的噪声 —— 只剩下一句"分片失败"根本没法排查。
+            # 判据① cgroup 的 oom_kill 计数在本次运行里涨了（确凿）；
+            # 判据② rc=137（SIGKILL）但计数没涨 → 也可能是外部 kill -9，措辞上要留余地。
+            local _oom_now _oom_why=""
+            _oom_now=$(cgroup_oom_kills) || _oom_now=""
+            if [[ -n "${OOM_KILL_BASE:-}" && -n "$_oom_now" ]] && (( _oom_now > OOM_KILL_BASE )); then
+                _oom_why="cgroup OOM 击杀计数上涨（oom_kill ${OOM_KILL_BASE} → ${_oom_now}）"
+            elif (( rc == 137 )); then
+                _oom_why="进程被 SIGKILL（rc=137）；oom_kill 计数未变，也可能是外部 kill -9"
+            fi
+            if [[ -n "$_oom_why" ]]; then
+                log "OOM   : $tag 很可能是内存不足被打死 —— $_oom_why
+  当时 cgroup 内存: $(mem_now_line 2>/dev/null || echo '读不到')
+  单任务画像: ${MEM_PER_JOB_GB}GB / 片（4K 实测峰值 ≈4.6GB；--mem-per-job 只改这个估计，不改实际占用）
+  建议: ① 降分辨率（1080p 画像 1.3GB、720p 0.7GB）② 换内存配额更大的机器
+        ③ 确认没有别的进程/实例在抢同一个 cgroup 的内存"
+            fi
             if [[ -s "$RUNLOGS/$tag.log" ]]; then
-                log "      该片日志末 20 行（完整日志：$RUNLOGS/$tag.log）："
-                mapfile -t _tail < "$RUNLOGS/$tag.log"   # 同样用文件重定向，不走管道
-                local _b=$(( ${#_tail[@]} > 20 ? ${#_tail[@]} - 20 : 0 ))
-                local _i
-                for (( _i=_b; _i<${#_tail[@]}; _i++ )); do
-                    printf '        %s\n' "${_tail[_i]}"
+                # 打印末尾时滤掉 x265 的 set_mempolicy 噪声：实测它能把整份日志刷满
+                # （4K 下 624 字节里 100% 是它），真实报错会被淹掉。
+                # 从末尾往前取 20 行"非噪声"，并报出滤掉多少行。
+                mapfile -t _tail < "$RUNLOGS/$tag.log"   # 文件重定向，不走管道
+                local -a _show=(); local _i _noise=0 _noise_note=""
+                for (( _i=${#_tail[@]}-1; _i>=0; _i-- )); do
+                    case "${_tail[_i]}" in
+                        set_mempolicy:*) _noise=$(( _noise + 1 )) ;;
+                        *) if (( ${#_show[@]} < 20 )); then _show=("${_tail[_i]}" "${_show[@]}"); fi ;;
+                    esac
                 done
-                unset _tail
+                if (( _noise > 0 )); then _noise_note="（已滤掉 ${_noise} 行 x265 set_mempolicy 噪声）"; fi
+                if (( ${#_show[@]} > 0 )); then
+                    log "      该片日志末 ${#_show[@]} 行${_noise_note}（完整日志：$RUNLOGS/$tag.log）："
+                    for _i in "${_show[@]}"; do printf '        %s\n' "$_i"; done
+                else
+                    if [[ -n "$_oom_why" ]]; then
+                        log "      该片日志没有其它输出${_noise_note} —— 与上面的 OOM 判断一致（被杀时 ffmpeg 来不及报错）；完整日志：$RUNLOGS/$tag.log"
+                    else
+                        log "      该片日志除噪声外没有输出${_noise_note}；完整日志：$RUNLOGS/$tag.log"
+                    fi
+                fi
+                unset _tail _show
             fi
         fi
         if (( TODO >= 3 && COMPLETED < TODO && DONE_PARTS > 0 )); then
@@ -1350,6 +1403,9 @@ reap_children() {
 
 if (( TODO > 0 )); then
     : > "$EVENTS"
+    # 记下 cgroup 的 OOM 击杀计数基线：分片失败时如果它涨了，就能确凿地说是内存不足
+    # （而不是让用户对着一句"分片失败"猜）。拿不到就留空 = 不可知。
+    OOM_KILL_BASE=$(cgroup_oom_kills) || OOM_KILL_BASE=""
     SCHED_START=$SECONDS
     DISPATCHED=0; NEXT=0; ANY_ALIVE=1
     while (( COMPLETED < TODO )); do

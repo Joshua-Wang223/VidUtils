@@ -245,14 +245,27 @@ usage() {
                       不可用就回退并打印原因；gpu 则不可用直接报错
       --cpu-preset N  CPU 后端时 libx265 的预设，默认 medium
   -j, --jobs N        并行片数（别名 --workers）。0=自动（默认），1=顺序。
-                      auto：CPU 后端按"可用核数 / 2"与内存算（可用核数已扣掉当前
-                      被别的进程占用的部分），GPU 后端取 1
-                      （T4 实测 NVENC 单引擎，多路并发总吞吐基本不变；
-                       想要重叠收益就显式 -j 2/3/4，脚本会先做并发试编码确认）
+                      auto = min(CPU 槽位, 内存槽位)，**上限通常由内存给出**：
+                        · CPU 槽位 = (cgroup 核数 - 当前已被别人占用的核数) ÷ 每路 1 核
+                          （插帧滤镜是串行的，单片只吃 ~1 核，所以按 1 核/路铺满）
+                        · 内存槽位 = 可用内存 ÷ 单任务画像（720p 0.7 / 1080p 1.3 / 4K 5.0 GB，
+                          取实测单片峰值 RSS × 1.1）
+                        · 例：4 核 + 8GiB 跑 4K → CPU 给 4 路、内存 floor(5.8/5.0)=1 → 取 **1 路**
+                        · 复用（skip）之后只剩 N 片要编时再收敛到 N，日志会打
+                          "只剩 N 片要编（共 M 片，其余复用）→ 由 x 路收敛为 N 路"
+                      GPU 后端固定 1（T4 实测 NVENC 单引擎，多路并发总吞吐基本不变；
+                      想要重叠收益就显式 -j 2/3/4，脚本会先做并发试编码确认）
                       并行度不影响分片内容，不进 recipe：改 -j 不会触发整体重编
-      --threads N     每片 ffmpeg 线程数，0=自动（不显式限制）。
-                      ⚠ CPU 后端靠 -j 而不是它：minterpolate 串行（-filter_complex_threads 无效）、
-                      -threads 对 libx265 只改 frame threads；给 >0 会翻译成 -x265-params pools=N
+      --threads N     每片 ffmpeg 线程数，0=自动（**推荐就用默认，一般都不需要设**）。
+                      · CPU 后端 auto = 核数/并行数，并翻译成 -x265-params pools=N
+                        （这才是真能限住 x265 线程池的旋钮）
+                      · GPU 后端 auto = 完全不下发
+                      什么时候才值得显式设：想给机器上别的活留核（--threads 1）、
+                      或做基准测试时固定变量。
+                      **提速请调 -j，不要靠它**：实测 -filter_complex_threads 对 minterpolate
+                      无效（滤镜串行，给 1/2/8 的 wall 时间一样），-threads 对 libx265 也只改
+                      frame threads、线程池不变（-threads 1 时 x265 仍用满池）。
+                      同样不进 recipe：改了不会触发整体重编。
       --mem-per-job GB  单任务内存估计，0=按分辨率画像（只影响自动并行度）
       --sequential    强制 1 路（等价 -j 1）
   -L, --seg-len SEC   每片秒数，默认 300（越大接缝越少、崩一次损失越多）

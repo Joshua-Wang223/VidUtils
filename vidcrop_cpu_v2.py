@@ -3252,9 +3252,13 @@ def main() -> int:
             quality_parts.append(f"CQ: {DEFAULT_CQ}")
         elif encoder_supports_crf(args.codec):
             quality_parts.append(f"CRF: {DEFAULT_CRF}")
+    # 没有 -preset 选项的编码器（libvpx-vp9 / libaom-av1 / librav1e）不展示 preset：
+    # build_encoder_options() 里 encoder_supports_preset() 为假时根本不下发，展示了就是假信息。
+    _preset_field = (f"preset: {args.preset}   "
+                     if encoder_supports_preset(args.codec) else "")
     print(
         _label("编码器")
-        + f"{args.codec}   preset: {args.preset}   "
+        + f"{args.codec}   {_preset_field}"
         + "   ".join(quality_parts)
         + f"   pix_fmt: {args.pix_fmt_resolved or '不指定'}"
         + f"   color_range: {args.color_range}"

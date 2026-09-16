@@ -297,7 +297,7 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--cq` | **`23`** | GPU 编码器质量（0–51）；字面量原样下发 |
 | `--crf` | **`21`** | CPU 编码器质量（0–51）；字面量原样下发 |
 | `--crf-ref` / `--cq-ref` | 无 | 统一质量基准（同上），与 `--crf`/`--cq` **互斥，混用直接报错退出** |
-| `--preset` | GPU `p5` / CPU `medium` | NVENC（p1~p7）↔ libx264 风格双向映射；`libsvtav1` 自动转整数档 |
+| `--preset` | GPU `p5` / CPU `medium` | NVENC（p1~p7）↔ libx264 风格双向映射；`libsvtav1` 自动转整数档。降级到 CPU 编码器时按**请求的编码器**换算，档位保持等效（`h264_nvenc` 的 p5 → `libx264` 的 medium、`av1_nvenc` 的 p5 → `libsvtav1` 的 8），概览块显示的就是实际下发的值 |
 | `--color-range` | `auto` | 同 v2 |
 | `--flag` | `_cropped` / `_covered` | 同 v2 |
 | `--audio-codec` / `--audio-bitrate` | `copy` / `128k` | 音频编码；WebM 下自动换 `libopus` |
@@ -1106,10 +1106,16 @@ vidutils/
   `exec` 出去的子任务被杀会留孤儿；找"另一个实例"要读 `/proc/<pid>/cmdline` 精确匹配
 - [FFmpeg 7.1 已合并 nvinterpolate 与 libvmaf](memory/project_nvinterpolate_build.md)
   —— 单一 ffmpeg、无需环境文件；`nvinterpolate` 必须放滤镜链末尾否则段错误；移植补丁位置
+- [preset 档位换算与展示的三条约定](memory/project_preset_equivalence.md)
+  —— 两个裁剪脚本的 NVENC↔x264 preset 表必须一致（曾错位一档，同一条 `--preset p5` 会落不同档）；
+  降级到 CPU 编码器时基准档取"请求的编码器"的默认值再换算，保持档位等效；
+  概览块只展示最终命令里真正会出现的参数
 - [ffmpeg 挂起的两个根因](memory/project_ffmpeg_stdin_hang.md)
   —— SIGTTIN（状态 T，`-nostdin` 能修）vs 输出管道反压（状态 S 且 CPU 冻结，`-nostdin` 没用）
 - [T4 能力边界 + 测性能前先查并发流水线](memory/project_t4_gpu_capabilities.md)
-  —— 别的流水线会抢 CPU/GPU 导致基准不可信；T4 无 AV1 编码器；零拷贝管线里 `-pix_fmt` 无效
+  —— 别的流水线会抢 CPU/GPU 导致基准不可信；T4 无 AV1 编码器，且本机 ffmpeg 也无 AV1 软编
+  （`libsvtav1`/`libaom-av1`/`librav1e` 都没有 → 本机 AV1 完全编不出来，只能 `--dry-run` 验证）；
+  零拷贝管线里 `-pix_fmt` 无效
 
 写法沿用本机 codebuddy 自动记忆的约定：frontmatter 带 `name` / `description` / `type`，
 正文对 project / feedback 类用「事实 → **Why:** → **How to apply:**」的结构，

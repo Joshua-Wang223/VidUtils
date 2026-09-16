@@ -1,6 +1,6 @@
 ---
 name: T4 编解码能力/性能基线，以及本机可能有并发流水线抢占
-description: Tesla T4 的 NVENC/NVDEC 能力边界与性能基线；做性能测试前必须先在 /workspace/Video_Enhancement 查是否有流水线在跑（会占 CPU 40%+GPU 70%）
+description: Tesla T4 的 NVENC/NVDEC 能力边界与性能基线（含本机 ffmpeg 无任何 AV1 软编）；做性能测试前必须先在 /workspace/Video_Enhancement 查是否有流水线在跑（会占 CPU 40%+GPU 70%）
 type: project
 ---
 
@@ -29,6 +29,15 @@ GPU 39–69%、`utilization.encoder` 20–29%、显存 3.4GB 被 TensorRT 占着
 - `h264_nvenc` ✓、`hevc_nvenc` ✓
 - `av1_nvenc` **在编码器列表里存在但运行时打不开**（rc=187，`Could not open encoder`，
   error code -22）→ T4 无 AV1 编码器。列表里有 ≠ 能用，别被 `-encoders` 输出骗了。
+- **本机 ffmpeg 也没有任何 AV1 软编**：`-encoders` 里没有 `libsvtav1` / `libaom-av1` / `librav1e`。
+  两个事实叠加的直接后果：**这台机器上 AV1 根本编不出来**——`--codec av1_nvenc` 会在
+  `_check_nvenc_available()` 的 1 帧试编里被判不可用（该函数是真试编，不会只看列表，所以判得对），
+  随后按 `_get_software_fallback()` 降级到 `libsvtav1`，而 `libsvtav1` 不存在 → 硬失败。
+  **Why:** 2026-09-16 核查 AV1/VP9 计划执行情况时实测确认；计划文档里"本机硬件已确认可用"
+  的说法对 `av1_nvenc` 是错的（只看了 `-encoders` 列表）。
+  **How to apply:** 本机验证 AV1 只能到 `--dry-run`（命令构造正确即可），真机编码结论必须标为
+  "环境不支持"，别据此认为代码有问题。想要真机 AV1 得换含 `libsvtav1` 的 ffmpeg —— 那属于
+  **环境变更，须另开立项**，不要塞进脚本改动里顺手做。VP9（`libvpx-vp9`）不受影响，可真机跑。
 - 像素格式：h264_nvenc 支持 `yuv420p`/`yuv444p`，**不支持 `p010le`**（H.264 无 10bit）；
   hevc_nvenc 支持 `yuv420p`/`yuv444p`/`p010le`（10bit）。
 
@@ -39,6 +48,7 @@ GPU 39–69%、`utilization.encoder` 20–29%、显存 3.4GB 被 TensorRT 占着
 
 **本机 ffmpeg 现状（2026-09-14 起）**：只有一个 `/usr/local/bin/ffmpeg`（7.1），
 已含上述全部 T4 可用能力 **+ nvinterpolate（光流插帧）+ libvmaf**，无需任何环境文件。
+注意"全部 T4 可用能力"里**不含任何 AV1 编码器**（硬编与软编都没有，见上）。
 详见 project_nvinterpolate_build.md。系统 `/usr/bin/ffmpeg` 6.1.1 保留未动（被
 imagemagick 依赖），平时不会被调用。
 

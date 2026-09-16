@@ -51,7 +51,8 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
     等效表见同目录 convert_crf.py；例：--crf-ref 21 → libvpx-vp9 -crf 27、
     libsvtav1 -crf 27、libx265 -crf 24、hevc_nvenc -cq 28
   • 默认值：h264_nvenc + --cq 23 + --preset p5；无 NVENC 自动降级为
-    libx264 + --crf 21 + --preset medium（preset 按实际生效的编码器逐个策略取值）
+    libx264 + --crf 21 + --preset medium（preset 按"请求的编码器"的默认档换算到
+    各策略实际用的编码器，降级前后档位等效，如 av1_nvenc p5 → libsvtav1 8）
   • 速度档位自动取值：libaom-av1 的 -cpu-used 与 libsvtav1 的 -preset 按 CPU 核数
     自动选档（ffmpeg 给 libaom-av1 的默认 -cpu-used=1 慢到不可用，实测仅 1fps）
   • librav1e 没有 -crf（实测传 -crf 只会被 ffmpeg 静默忽略），自动换算为等效 -qp
@@ -186,6 +187,7 @@ CODEC_ALIASES = {
     'libsvt-av1':       'libsvtav1',
     'rav1e':            'librav1e',
     'nvenc_av1':        'av1_nvenc',
+    'av1_nvenc':        'av1_nvenc',
 }
 
 # 编码器 → 推荐容器扩展名
@@ -260,14 +262,18 @@ NVENC_TO_SVTAV1_PRESET = {
     'p1': 12, 'p2': 11, 'p3': 10, 'p4': 9, 'p5': 8, 'p6': 6, 'p7': 4,
 }
 
-# NVENC preset ↔ libx264 preset 双向映射表
+# NVENC preset ↔ libx264 preset 双向映射表。
+# 必须与 vidcrop_cpu_v2.py 的同名表一致：两张表错位会让同一条 `--preset p5`
+# 在两个脚本里落到不同档位（历史上这里错位一档：p4→medium / p5→slow，
+# 而 cpu_v2 是 p4→faster / p5→medium / p6→slow，已按 cpu_v2 对齐）。
+# 对应关系是把 NVENC 的 7 档均匀铺在 x264 阶梯上，两端各留一档（faster 起、veryslow 止）。
 NVENC_TO_X264_PRESET = {
     'p1': 'ultrafast',
     'p2': 'superfast',
     'p3': 'veryfast',
-    'p4': 'medium',
-    'p5': 'slow',
-    'p6': 'slower',
+    'p4': 'faster',
+    'p5': 'medium',
+    'p6': 'slow',
     'p7': 'veryslow',
 }
 
@@ -897,12 +903,19 @@ def normalize_codec_name(codec: str) -> str:
     return normalized
 
 
-def normalize_preset(preset: str, target_codec: str) -> str:
+def normalize_preset(preset: str, target_codec: str, quiet: bool = False) -> str:
     """在 NVENC（p1~p7）与 libx264 风格（ultrafast~veryslow）之间自动双向映射。
 
     libsvtav1 另走一套：它的 -preset 是 0~13 的整数，名字类取值一律先换算成
     整数再下发，否则 ffmpeg 解析失败（"Unable to parse option value"）。
+
+    quiet=True 时不打印换算提示：调用方用"默认档位"（而非用户显式给的 --preset）
+    触发换算时，提示里的 `--preset xxx` 会让用户困惑（他从没写过这个值）。
     """
+    def _note(msg: str) -> None:
+        if not quiet:
+            print(msg)
+
     if target_codec == 'libsvtav1':
         p = preset.strip().lower()
         if p.lstrip('-').isdigit():
@@ -910,10 +923,10 @@ def normalize_preset(preset: str, target_codec: str) -> str:
             return str(max(0, min(13, int(p))))
         mapped = NVENC_TO_SVTAV1_PRESET.get(p) or X264_TO_SVTAV1_PRESET.get(p)
         if mapped is not None:
-            print(f"  提示：--preset '{preset}' 已映射为 '{mapped}'"
+            _note(f"  提示：--preset '{preset}' 已映射为 '{mapped}'"
                   f"（libsvtav1 使用 0~13 整数 preset）。")
             return str(mapped)
-        print(f"  提示：--preset '{preset}' 在 {target_codec} 下无对应，"
+        _note(f"  提示：--preset '{preset}' 在 {target_codec} 下无对应，"
               f"使用默认 '{DEFAULT_PRESET_SVTAV1}'。")
         return DEFAULT_PRESET_SVTAV1
 
@@ -923,17 +936,17 @@ def normalize_preset(preset: str, target_codec: str) -> str:
         rev = {v: k for k, v in NVENC_TO_X264_PRESET.items()}
         if preset in rev:
             mapped = rev[preset]
-            print(f"  提示：--preset '{preset}' 已映射为 '{mapped}'"
+            _note(f"  提示：--preset '{preset}' 已映射为 '{mapped}'"
                   f"（{target_codec} 使用 NVENC 风格 preset）。")
             return mapped
-        print(f"  提示：--preset '{preset}' 在 {target_codec} 下无对应，"
+        _note(f"  提示：--preset '{preset}' 在 {target_codec} 下无对应，"
               f"使用默认 '{DEFAULT_PRESET_GPU}'。")
         return DEFAULT_PRESET_GPU
 
     if target_codec in ('libx264', 'libx265'):
         if preset.startswith('p') and preset[1:].isdigit():
             mapped = NVENC_TO_X264_PRESET.get(preset, DEFAULT_PRESET_CPU)
-            print(f"  提示：--preset '{preset}' 已映射为 '{mapped}'"
+            _note(f"  提示：--preset '{preset}' 已映射为 '{mapped}'"
                   f"（{target_codec} 使用 libx264 风格 preset）。")
             return mapped
         return preset
@@ -973,7 +986,7 @@ def check_container_compatibility(ext: str, codec: str) -> bool:
         # VP9 虽以 .webm 为默认容器，但 ISO-BMFF 同样能封装 VP9（实测可写），
         # 用户用 --container .mp4 强制时不应误报警告。
         return any(x in cod_l for x in
-                   ['264', '265', 'hevc', 'av1', 'rave1', 'mpeg4', 'vp9'])
+                   ['264', '265', 'hevc', 'av1', 'rav1e', 'mpeg4', 'vp9'])
     if ext_l == '.webm':
         return any(x in cod_l for x in ['vpx', 'vp8', 'vp9', 'av1'])
     if ext_l == '.mov':
@@ -990,6 +1003,32 @@ def default_preset_for(codec: str) -> str:
         # 0~13 整数，按 CPU 核数自动取值（见 auto_effort）
         return str(auto_effort()[1])
     return DEFAULT_PRESET_GPU if c in CQ_SUPPORTED_CODECS else DEFAULT_PRESET_CPU
+
+
+def strategy_preset(user_preset: Optional[str], requested_codec: str,
+                    strategy_codec: str, quiet: bool = False) -> str:
+    """算出某条策略最终要下发的 --preset。
+
+    用户显式给了 --preset 就按本策略的编码器换算。没给时，基准档位取
+    **用户请求的那个编码器**的默认值，再换算到本策略的编码器 —— 这样降级前后
+    的档位是等效的：
+        h264_nvenc(默认 p5) → libx264  得到 medium
+        av1_nvenc (默认 p5) → libsvtav1 得到 8
+    若反过来按"本策略编码器自己的默认值"取，档位会随编码器漂移（libsvtav1 的
+    默认值还会随 CPU 核数变），用户拿到的速度/质量就与请求的不等价了。
+
+    --codec auto 是例外：它没有"请求的编码器"可言，策略链本身就是自适应的
+    （NVENC 策略取 p5、CPU 策略取 medium），故仍按本策略编码器取默认值。
+
+    由默认档位触发的换算不打印提示（用户没写过那个 --preset）；实际生效值由
+    任务概览块统一展示，避免逐文件重复刷屏。quiet=True 则连用户显式给的
+    --preset 的换算提示也一并静音，供概览块这类"只取值不报细节"的调用方使用。
+    """
+    if user_preset:
+        return normalize_preset(user_preset, strategy_codec, quiet=quiet)
+    base = (default_preset_for(strategy_codec) if requested_codec == 'auto'
+            else default_preset_for(requested_codec))
+    return normalize_preset(base, strategy_codec, quiet=True)
 
 
 def encoder_supports_preset(codec: str) -> bool:
@@ -2898,8 +2937,7 @@ def process_file(
             strategy['codec'], crf, cq, src_codec=codec,
             crf_ref=crf_ref, cq_ref=cq_ref,
         )
-        norm_preset = normalize_preset(
-            preset or default_preset_for(strategy['codec']), strategy['codec'])
+        norm_preset = strategy_preset(preset, codec, str(strategy['codec']))
         cmd = build_ffmpeg_cmd(
             input_file=input_file,
             output_file=output_file,
@@ -2945,10 +2983,9 @@ def process_file(
         current_crf, current_cq = _resolve_quality_params(
             current_codec, crf, cq, src_codec=codec,
             crf_ref=crf_ref, cq_ref=cq_ref)
-        # preset 为 None 表示用户没指定，按"当前策略实际使用的编码器"取默认值，
-        # 从而 GPU 策略得到 p5、降级后的 CPU 策略得到 medium。
-        norm_preset = normalize_preset(
-            preset or default_preset_for(current_codec), current_codec)
+        # preset 为 None 表示用户没指定，此时按"请求的编码器"的默认档位换算到本策略
+        # 的编码器（见 strategy_preset），保证降级前后档位等效。
+        norm_preset = strategy_preset(preset, codec, current_codec)
 
         # [META-KEEP] 10bit 源 + hof=cuda 时 hwdownload 先试 p010；旧驱动或不支持
         # 10bit 下载的设备会失败，此时同一策略回退 nv12 再试一次（代价：降为 8bit、
@@ -3268,9 +3305,9 @@ def main() -> int:
     # 归一化编码器名称
     args.codec = normalize_codec_name(args.codec)
 
-    # --preset 未指定时保持 None，由 process_file 按"实际生效的编码器"逐个策略取默认值：
-    # 这样 GPU 策略拿到 p5，降级到 CPU 策略时自动变成 medium，而不是把 GPU 的 p5
-    # 映射成 libx264 的 slow（用户预期是 medium）。
+    # --preset 未指定时保持 None，由 process_file 按「请求的编码器」的默认档位换算到
+    # 每条策略实际用的编码器（见 strategy_preset）：既让 GPU 策略拿到 p5、降级到
+    # libx264 时得到 medium，也让 av1_nvenc 降级到 libsvtav1 时得到 p5 的等效档 8。
 
     # 归一化容器扩展名
     container_ext = args.container
@@ -3392,16 +3429,38 @@ def main() -> int:
         quality_parts.append(f'CRF-ref: {args.crf_ref}（libx264 基准，按等效表换算）')
     if args.cq_ref is not None:
         quality_parts.append(f'CQ-ref: {args.cq_ref}（h264_nvenc 基准，按等效表换算）')
+    # 概览块展示**实际会生效**的编码器：直接取策略链的第一条，这样
+    #   · --codec auto 会被解析成具体编码器（h264_nvenc 或 libx264），不再显示 "auto"；
+    #   · 请求的 NVENC 编码器不可用时也已反映为 CPU 编码器（见 _get_software_fallback）。
+    # 概览块整批只打印一次，策略层那次才逐文件重复。
+    _effective_codec = str(_generate_strategies(
+        args.codec, hw_caps, args.hwaccel, mode=args.mode)[0]['codec'])
+    # 未指定 --preset 时按"请求的编码器"的默认档位换算，降级前后档位等效
+    # （见 strategy_preset），避免概览显示 p5 而命令里却是 libsvtav1 的 8。
+    # quiet：换算提示留给逐策略那次打印，概览块只展示结果值。
+    _shown_preset = strategy_preset(args.preset, args.codec, _effective_codec,
+                                    quiet=True)
     if not quality_parts:
-        # 与 vidcrop_cpu_v2.py 一致：直接展示将要生效的数值
-        if encoder_supports_cq(args.codec):
+        # 默认质量参数同样按实际生效的编码器取：libsvtav1 只认 -crf，
+        # 若还按请求的 av1_nvenc 显示 "CQ: 23" 就与本行编码器自相矛盾。
+        if encoder_supports_cq(_effective_codec):
             quality_parts.append(f'CQ: {DEFAULT_CQ}')
-        elif encoder_supports_crf(args.codec):
+        elif encoder_supports_crf(_effective_codec):
             quality_parts.append(f'CRF: {DEFAULT_CRF}')
-    # preset 未指定时展示"按当前编码器取到的默认值"，降级后仍以策略级取值为准
-    _shown_preset = args.preset or default_preset_for(args.codec)
+    # 没有 -preset 选项的编码器（libvpx-vp9 / libaom-av1 / librav1e）不展示 preset：
+    # build_ffmpeg_cmd 里 encoder_supports_preset() 为假时根本不下发，展示了就是假信息。
+    _preset_field = (f'preset: {_shown_preset}   '
+                     if encoder_supports_preset(_effective_codec) else '')
     print(_label('编码器')
-          + f'{args.codec}   preset: {_shown_preset}   ' + '   '.join(quality_parts))
+          + f'{_effective_codec}   {_preset_field}' + '   '.join(quality_parts))
+    # 只在"用户点名要的 NVENC 编码器"被换掉时才提示；--codec auto 解析出的具体
+    # 编码器属正常自适应，不是降级。
+    if args.codec in NVENC_CODECS and _effective_codec != args.codec:
+        _why = ('已禁用 GPU 处理（--hwaccel none / --fallback-policy cpu-only）'
+                if args.hwaccel == 'none' or args.fallback_policy == 'cpu-only'
+                else '当前环境未检测到该 NVENC 编码器')
+        print(_label('降级提示')
+              + f'{args.codec} 不可用（{_why}），实际将改用 CPU 编码器 {_effective_codec}。')
     print(_label('音频') + args.audio_codec
           + (f' @ {args.audio_bitrate}' if args.audio_codec.lower() != 'copy' else ''))
     if args.color_range != 'auto':

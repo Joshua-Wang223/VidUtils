@@ -227,6 +227,24 @@ CPU_SLOTS = max(floor((CGROUP_CORES - USED_CORES) / CPU_PREF_THREADS), 1)
 - 取不到 `cpu.stat`（老 cgroup / 非容器）就退化成"不看负载"，即旧行为。
 - 启发式的量终究是启发式：想要更满就显式 `-j`（脚本对 `-j` 只做试编码可行性检查，不拦）。
 
+**6) 4K 在 8GiB 上会被 OOM 杀掉（2026-09-16 实测）**。铁的数字：单片 4K
+（minterpolate + libx265 medium）峰值 RSS = **4.23GB（VmHWM，在跑的那片实测）**；
+画像取 5.0GB（lab 峰值 4.59 × 1.1）。而 8GiB 的 cgroup 里 harness 自己还占 ~2.4GB：
+
+```
+memory.max = 8GiB，USABLE ≈ 5.8GB → 内存槽位 = floor(5.8/5.0) = 1
+CPU 槽位 = 4 核 ÷ 每路 1 核 = 4      → auto = min(4,1) = 1 路
+```
+
+**强开多路必然 OOM**：实测强开 5 路 → `memory.events: oom_kill` 3 → 6 → **9**，
+分片日志只剩几行 `set_mempolicy` 噪声（x265 初始化完就被杀），**一片都没跑成**。
+所以这不是脚本保守，是内存硬约束；要并行只能降分辨率（1080p 1.3GB/片 → 4 路；
+720p 0.7GB → 7 路），或换内存配额更大的机器。4K 单路约 **75s / 秒内容**（20s 的片 ≈ 20-25 分钟）。
+
+脚本现在会**识别 OOM**：调度开始时记 `cgroup_oom_kills` 基线，分片失败时若计数上涨（确凿）
+或 `rc=137`（措辞留"也可能是外部 kill"）→ 打印"当时 cgroup 内存 / 单片画像 / 三条建议"；
+打印失败片日志时**滤掉 `set_mempolicy` 噪声**（4K 下日志 100% 是它，真实错误会被淹没）。
+
 **5) `MEM_PER_JOB_GB` 画像复核（按实测改）**。用 `/usr/bin/time -v` 的
 `Maximum resident set size` 量单分片（`-threads 4`、libx265 medium、脚本同款滤镜串）：
 

@@ -1,0 +1,11 @@
+# —— Python ——
+__pycache__/
+*.py[cod]
+
+# —— CodeBuddy 本机状态（会话、权限等，不入库）——
+# 如果希望共享权限白名单，可以改成只忽略 .codebuddy/ 下的会话数据
+.codebuddy/
+
+# —— 插帧脚本的分片产物（用 -w 指到仓库内时会产生）——
+*.ts.part.*
+interp_2x/

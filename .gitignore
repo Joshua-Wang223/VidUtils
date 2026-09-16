@@ -6,6 +6,10 @@ __pycache__/
 # 如果希望共享权限白名单，可以改成只忽略 .codebuddy/ 下的会话数据
 .codebuddy/
 
+# nvinterpolate 会在【当前工作目录】下写 NvOFFRUC/logFRUCError.txt（脚本已给每片独立 CWD，
+# 但手工直接跑 ffmpeg 时可能落到仓库里）
+NvOFFRUC/
+
 # —— 插帧脚本的分片产物（用 -w 指到仓库内时会产生）——
 *.ts.part.*
 interp_2x/

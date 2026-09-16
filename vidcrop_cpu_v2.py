@@ -39,7 +39,7 @@ vidcrop_cpu_v2.py – 批量视频裁剪/覆盖缩放工具（CPU 多任务并�
 --output-height        目标视频高度  (--crop-ratio 模式下可选)
 --crop-ratio           目标宽高比，如 16:9 或 1.777，启用后自动计算最大化裁剪尺寸
 --mode                 crop | cover（默认 crop）
---codec                视频编码器（默认 libx264，支持别名自动归一化）
+--codec                视频编码器（默认 libx264，支持别名自动归一化；auto 等同 libx264）
 --crf                  CRF 质量值（默认 21，仅对支持 CRF 的编码器生效；字面量原样下发）
 --cq                   CQ 质量值（默认 23，仅对 NVENC/AMF/QSV 等 GPU 编码器生效，
                        CPU 编码器下自动映射为等效 CRF）
@@ -713,6 +713,10 @@ CQ_SUPPORTED_CODECS = {
 
 DEFAULT_CRF = 21
 DEFAULT_CQ = 23
+
+# 默认视频编码器。--codec 的 argparse 默认值与 --codec auto 的解析结果都用它，
+# 保证 "不指定" 和 "auto" 落到同一个编码器。
+DEFAULT_CODEC = "libx264"
 
 # 未指定 --preset 时的默认预设：CPU 软件编码器 medium，GPU 硬件编码器 p5，
 # libsvtav1 为 8（0~13 整数中速度与质量的平衡点）
@@ -2974,9 +2978,10 @@ def parse_args() -> argparse.Namespace:
 
     ap.add_argument(
         "--codec",
-        default="libx264",
+        default=DEFAULT_CODEC,
         help="视频编码器，默认 libx264 (支持别名: x264, x265, h264, h265, hevc, "
-             "vp9→libvpx-vp9, av1→libaom-av1, svtav1→libsvtav1, rav1e→librav1e 等)",
+             "vp9→libvpx-vp9, av1→libaom-av1, svtav1→libsvtav1, rav1e→librav1e 等；"
+             "auto 等同 libx264)",
     )
     ap.add_argument(
         "--crf",
@@ -3071,6 +3076,15 @@ def validate_and_finalize_args(args: argparse.Namespace) -> None:
 
     # 归一化编码器名称 (别名映射)
     args.codec = normalize_codec_name(args.codec)
+
+    # --codec auto：本脚本是纯 CPU 路径（不做硬件探测，也没有"硬件编码器不可用时
+    # 降级到 CPU 编码器"那条链），故 auto 即默认编码器 libx264 —— 与
+    # vidcrop_hwaccel.py 在无 NVENC 时把 auto 解析成 libx264 的结果一致。
+    # 此前 auto 会被原样透传到命令里变成 `-c:v auto`，ffmpeg 报
+    # "Unknown encoder 'auto'"（rc=8）直接失败。
+    if args.codec == "auto":
+        args.codec = DEFAULT_CODEC
+        print(f"提示：--codec auto 已解析为 {DEFAULT_CODEC}（本脚本为纯 CPU 路径）。")
 
     # 未指定 --preset 时按编码器类型取默认：GPU 编码器 p5，CPU 编码器 medium
     if not args.preset:

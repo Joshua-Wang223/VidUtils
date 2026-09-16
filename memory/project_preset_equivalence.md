@@ -1,6 +1,6 @@
 ---
-name: preset 档位换算与展示的三条约定（两脚本同表、降级后等效、概览只显示真参数）
-description: vidcrop_hwaccel.py 与 vidcrop_cpu_v2.py 的 NVENC↔x264 preset 表必须一致；降级到 CPU 编码器时 preset 要按"请求的编码器"换算；概览块只展示最终命令里真正会出现的参数
+name: 两个裁剪脚本的行为一致约定（preset 换算、概览展示、--codec auto 解析）
+description: vidcrop_hwaccel.py 与 vidcrop_cpu_v2.py 的 NVENC↔x264 preset 表必须一致；降级到 CPU 编码器时 preset 要按"请求的编码器"换算；概览块只展示最终命令里真正会出现的参数；--codec auto 必须解析成具体编码器而不能透传
 type: project
 ---
 
@@ -54,3 +54,23 @@ type: project
 就会发现概览不可信，进而怀疑整份命令。
 **How to apply:** 改概览块时先问"这一行显示的值，最终命令里真的有吗"。逐策略的换算提示照旧
 逐文件打印，概览那次用 `quiet=True`，免得同一句话打两遍。
+
+## 约定 3：`--codec auto` 必须解析成具体编码器，不能透传
+
+2026-09-16 发现 `vidcrop_cpu_v2.py` 的 `--codec auto` 会把 `auto` **原样**下发成 `-c:v auto`，
+ffmpeg 报 `Unknown encoder 'auto'`（rc=8）直接失败；概览块也原样显示 `编码器: auto`。
+根因是 `normalize_codec_name()` 里那句 `if codec in ("auto", "copy"): return codec` —— `copy`
+是合法的 ffmpeg 取值可以透传，`auto` 不是，这句是从硬件版抄过来的残留。
+
+修法：硬件版取策略链第一条的 codec（`auto` 由此解析成 `h264_nvenc` 或 `libx264`）；
+CPU 版把 `auto` 解析成 `DEFAULT_CODEC`（= `libx264`），并用同一个常量做 argparse 默认值，
+从结构上保证"不指定 --codec"和"`--codec auto`"落到同一个编码器。解析必须放在
+`default_preset_for()` **之前**——否则 `encoder_supports_preset("auto")` 为假，概览会漏掉
+preset 字段。
+
+**Why:** `auto` 是用户最容易顺手写的值（README 里硬件版的 `--codec` 就写着"支持 auto"），
+透传后只得到一个 ffmpeg 层面的 `Unknown encoder`，既不提是哪个脚本的哪个参数，也不好排查。
+**How to apply:** 两脚本的 `--codec auto` 在**没有 NVENC 的机器上**必须给出逐字相同的概览与
+命令（`libx264  preset: medium  CRF: 21` / `-c:v libx264 -crf 21 -preset medium`）；
+在有 NVENC 的机器上硬件版解析成 `h264_nvenc` 属预期差异（CPU 版没有硬件路径），不算不一致。
+再往 `normalize_codec_name()` 的透传白名单里加值时，先确认它在 ffmpeg 侧是合法取值。

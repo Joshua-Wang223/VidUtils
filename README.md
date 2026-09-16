@@ -246,7 +246,7 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--output-width` / `--output-height` | 与 `--crop-ratio` 二选一 | 目标视频宽 / 高 |
 | `--crop-ratio` | 无 | 目标宽高比（`16:9` / `4:3` / 浮点 `1.777`），自动算最大化裁剪尺寸 |
 | `--mode` | `crop` | `crop` / `cover` |
-| `--codec` | `libx264` | 视频编码器；支持别名（`vp9`→`libvpx-vp9`、`av1`→`libaom-av1`、`svtav1`→`libsvtav1`、`rav1e`→`librav1e` …） |
+| `--codec` | `libx264` | 视频编码器；支持别名（`vp9`→`libvpx-vp9`、`av1`→`libaom-av1`、`svtav1`→`libsvtav1`、`rav1e`→`librav1e` …）；`auto` 等同 `libx264`（本脚本为纯 CPU 路径，与硬件版的 `auto` 在无 NVENC 时解析结果一致） |
 | `--crf` | `21` | CPU 编码器质量（0–51）；**字面量原样下发，不换算** |
 | `--cq` | `23` | GPU 编码器质量（0–51）；落到 CPU 软编时按等效表换算为 CRF |
 | `--crf-ref` | 无 | 以 **libx264 CRF** 为基准给出质量，按等效表换算到目标编码器；与 `--crf`/`--cq` 互斥 |
@@ -1106,10 +1106,10 @@ vidutils/
   `exec` 出去的子任务被杀会留孤儿；找"另一个实例"要读 `/proc/<pid>/cmdline` 精确匹配
 - [FFmpeg 7.1 已合并 nvinterpolate 与 libvmaf](memory/project_nvinterpolate_build.md)
   —— 单一 ffmpeg、无需环境文件；`nvinterpolate` 必须放滤镜链末尾否则段错误；移植补丁位置
-- [preset 档位换算与展示的三条约定](memory/project_preset_equivalence.md)
+- [两个裁剪脚本的行为一致约定](memory/project_preset_equivalence.md)
   —— 两个裁剪脚本的 NVENC↔x264 preset 表必须一致（曾错位一档，同一条 `--preset p5` 会落不同档）；
   降级到 CPU 编码器时基准档取"请求的编码器"的默认值再换算，保持档位等效；
-  概览块只展示最终命令里真正会出现的参数
+  概览块只展示最终命令里真正会出现的参数；`--codec auto` 必须解析成具体编码器（透传会报 Unknown encoder）
 - [ffmpeg 挂起的两个根因](memory/project_ffmpeg_stdin_hang.md)
   —— SIGTTIN（状态 T，`-nostdin` 能修）vs 输出管道反压（状态 S 且 CPU 冻结，`-nostdin` 没用）
 - [T4 能力边界 + 测性能前先查并发流水线](memory/project_t4_gpu_capabilities.md)

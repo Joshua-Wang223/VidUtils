@@ -32,10 +32,11 @@
   （libsvtav1/libaom-av1/librav1e 都没有 → 本机 AV1 完全编不出来）；零拷贝管线里 `-pix_fmt` 无效
 - [FFmpeg 7.1 已合并 nvinterpolate 与 libvmaf](project_nvinterpolate_build.md)
   — 单一 ffmpeg、无需环境文件；`nvinterpolate` 必须放滤镜链末尾否则段错误；移植补丁位置
-- [preset 档位换算与展示的三条约定](project_preset_equivalence.md)
+- [两个裁剪脚本的行为一致约定](project_preset_equivalence.md)
   — 两裁剪脚本的 NVENC↔x264 表必须一致（曾错位一档：p4→medium/p5→slow，会让同一条 `--preset p5` 落不同档）；
   降级到 CPU 编码器时基准档取"请求的编码器"的默认值再换算；概览块只展示最终命令里真正会出现的参数
-  （编码器名取策略链第一条、无 `-preset` 的编码器不展示 preset 字段）
+  （编码器名取策略链第一条、无 `-preset` 的编码器不展示 preset 字段）；
+  `--codec auto` 必须解析成具体编码器，透传会得到 `-c:v auto` 使 ffmpeg 报 Unknown encoder（曾发生在 cpu_v2）
 
 ---
 

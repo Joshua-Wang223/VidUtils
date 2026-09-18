@@ -2,7 +2,11 @@
 
 > 一组基于 **FFmpeg** 的命令行视频处理工具，聚焦 *批量、可复现、生产可用* 的视频工程任务。
 > 当前提供居中裁剪（CPU 顺序版 / CPU 并发版 / CPU 并发增强版 / 硬件加速版四个变体），
-> 以及光流插帧 2x 工具（`interp_2x_safe.sh` GPU 专版 / `interp_2x_safe_v1.sh` 通用版，后者多一条 CPU 回退后端；含配套回归测试）；
+> 光流插帧 2x 工具（`interp_2x_safe.sh` GPU 专版 / `interp_2x_safe_v1.sh` 通用版，后者多一条 CPU 回退后端；含配套回归测试），
+> 以及 `ls` / `ll` 替代品 **`vidls`**（列目录时顺带显示视频的分辨率 / 帧率 / 比特率 / 编码器 / 容器 / 时长，
+> 帧数用 `--show frames` 另开；
+> 另有 **`vidll`** = `vidls -l` 的快捷方式。Linux 版 `vidls.sh` / `vidll.sh` + `vidls.py`，
+> Windows 版 `vidls.cmd` / `vidll.cmd` + `vidls_win.py`）；
 > 后续将逐步扩展缩放、修复、增强等能力。
 
 ---
@@ -20,6 +24,9 @@
   - [vidcrop_hwaccel.py — 硬件加速裁剪](#vidcrop_hwaccelpy--硬件加速裁剪)
   - [convert_crf.py — 质量换算表（被上面两个脚本依赖）](#convert_crfpy--质量换算表被上面两个脚本依赖)
   - [interp_2x_safe.sh — 光流插帧 2x（崩溃安全版）](#interp_2x_safesh--光流插帧-2x崩溃安全版)
+  - [vidls.sh — ls / ll 替代 + 视频属性探测](#vidlssh--ls--ll--替代--视频属性探测)
+  - [Windows 版 vidls — ls / ll 替代（Windows）](#windows-版vidlscmd--vidls_winpy)
+  - [vidll — vidls -l 的快捷方式（Linux + Windows）](#vidll--vidls--l-的快捷方式linux--windows)
   - [test_interp_2x_lock.sh — 回归测试（并发与锁）](#test_interp_2x_locksh--回归测试并发与锁)
   - [test_interp_2x_orphan.sh — 回归测试（中断收尾与孤儿 ffmpeg）](#test_interp_2x_orphansh--回归测试中断收尾与孤儿-ffmpeg)
 - [快速上手](#快速上手)
@@ -156,6 +163,38 @@ python vidcrop_hwaccel.py --help
 ```
 
 > `vidcrop_cpu_v2.py` 与 `vidcrop_hwaccel.py` 运行时会 import 同目录的 `convert_crf.py`（质量换算表）。**拷贝脚本时请一并带上它**，否则会 ImportError。
+
+### 把 `vidls` 装成一条命令（可选）
+
+`vidls` 是 `ls` / `ll` 的替代品，用法见 [工具一览](#vidlssh--ls--ll-替代--视频属性探测)。
+它自带安装器，会自检环境、按要求补依赖，再把命令接入 `PATH`：
+
+```bash
+chmod +x vidls.sh
+./vidls.sh --install          # 等价 -I；加 -y/--yes 可免交互
+```
+
+安装器做四件事：① 检查 Python ≥ 3.8；② 检查 `ffmpeg` / `ffprobe`，缺失时按检测到的包管理器
+（`apt-get` / `dnf` / `yum` / `apk` / `brew`）**询问后**安装；③ 探测 GPU 与 CUDA 硬解，
+打印帧数会走哪一档；④ 给 `vidls.sh` 加可执行权限，并在 `/usr/local/bin`（无权限时退回
+`~/.local/bin`）建名为 `vidls` 与 `vidll` 的**两条**软链；若该目录不在 `PATH` 里，会往 shell 配置文件追加一行
+`export PATH=...`。**不改动 `ls` / `ll` 本身。**
+
+想装到别处：`./vidls.sh --install --prefix ~/bin`。
+
+> 软链用的是**绝对路径**，仓库目录搬家后需要重跑一次 `--install`。
+> 卸载：`rm /usr/local/bin/vidls`（再删掉 rc 文件里那行 PATH 即可）。
+
+**Windows** 用另一个入口（细节见 [Windows 版](#windows-版vidlscmd--vidls_winpy)）：
+
+```bat
+vidls.cmd --install       :: 在仓库里这样敲；装好之后从任何目录都是 vidls --install
+                          :: 等价 -I；加 -y 可免交互
+```
+
+同样做四件事，但第 ② 步用 Windows 的包管理器（`winget` → `choco` → `scoop` 依次探测），
+第 ④ 步**不建软链**（要管理员 / 开发者模式），改成在已在 PATH 的目录
+（默认 `%USERPROFILE%\.local\bin`）写四个启动器（`vidls` / `vidll` 各两个）。
 
 ---
 
@@ -607,6 +646,195 @@ SRC=/path/small1080p.mp4 bash test_interp_2x_orphan.sh       # 省掉现场生�
 
 ---
 
+### `vidls.sh` — `ls` / `ll` 替代 + 视频属性探测
+
+`ls` / `ll` 的**即插即用替代品**：非视频文件完全按 coreutils `ls` 的原生版式渲染（多列网格 /
+`-l` 长格式，含 `total N`、人类可读体积、列间 Tab 填充 —— 实测与 `ls` 逐字节一致），
+**视频文件额外追加属性列**。实现分两层：`vidls.sh` 是启动器（负责定位同目录的 `vidls.py`，
+所以走软链调用也没问题），`vidls.py` 是内核（纯标准库）。
+
+```bash
+vidls                         # 列当前目录：普通文件走多列网格，视频独占一行带属性
+vidls -l                      # ll 长格式 + 视频属性
+vidls -lh                     # + 人类可读体积（-h 是 human-readable，不是 help）
+vidls --show frames           # 加上「帧数」列（唯一会解码/解复用的列）
+vidls --show frames --cpu     # 要帧数但只走 CPU 档（0.1s，不解码）
+vidls --show-all              # 全部可选列：帧数/像素格式/位深/音轨/字幕/HDR
+vidls --show audio,subs       # 只追加音轨与字幕
+vidls -lt /path/to/dir        # 按修改时间排序
+vidls --install               # 自检环境 + 装依赖 + 接入 PATH
+```
+
+默认恒显 **6 列**：**分辨率 / 帧率 / 比特率 / 编码器 / 容器 / 时长**。
+
+**帧数是可选列**（`--show frames` / `--show-all`）—— 它是唯一需要解码或至少解复用的列，
+所以**默认既不显示也不计算**：裸 `vidls` 的成本只有一次 ffprobe。
+要看帧数加 `--show frames`；此时该列落在原来的位置（比特率与编码器之间）。
+帧数后面带来源标签 —— 不同来源的成本与可信度差很多，所以必须标出来：
+
+| 档 | 标签 | 手段 | 成本 |
+|---|---|---|---|
+| 1 | `包头` | 容器头 `nb_frames` | 免费（mp4 / mov 精确） |
+| 2 | `硬解` | `ffmpeg` 显式 `xxx_cuvid` 整片解码数帧 | 解码（GPU），最准 |
+| 3 | `包数` | `ffprobe -count_packets` | 只解复用、**不解码**（CPU 侧降级手段） |
+| 4 | `估算` | `duration × fps` | 免费，兜底 |
+
+**降级链**：档 1 免费所以永远先试；缺帧数时 GPU 可用走档 2，不可用（或 `--cpu`）走档 3；
+都拿不到才算档 4。
+
+> `--cpu` / `--fast` / `--deep` 都是「帧数**怎么算**」的开关，**只在显示帧数时才有意义**。
+> 没请求帧数列时它们会被忽略，并往 stderr 打一行提示（不影响退出码）：
+> ```
+> vidls: --deep 只在显示帧数时才有意义 —— 当前没请求帧数列，已忽略。要帧数请加 --show frames（或 --show-all）
+> ```
+
+**硬解档实测成本（T4 + 1080p，900 帧样本，仅 `--show frames` 时才付）** —— 这一档明显比其它档贵：
+
+| 档 | 耗时 | 模型 |
+|---|---|---|
+| `包头` | 0 | 搭主探测的车（仅 mp4/mov 可靠） |
+| `包数` | **0.10s** | **与时长无关**（只解复用） |
+| `硬解` | **2.26s** | 0.55s CUDA context 固定开销 + 时长/≈500fps |
+| `估算` | 0 | 2.045s × 25fps 实测估出 51（真值 50） |
+
+**所以：要帧数、又在长片或大目录上，请用 `--show frames --cpu`（或 `--fast`）** ——
+实测 6 种编码器/容器组合（h264 / h264-B帧 / h264-隔行 / hevc / vp9 / av1，容器 mp4/mkv/webm/ts）里，
+**包数与解码真值全部相等**，但硬解要按 `时长/500fps` 付代价（2 小时片子约 7 分钟），
+包数恒定 0.1s。要帧数时默认仍走硬解（最准），想秒回就加 `--cpu` 切到包数档。
+
+**硬解失败分两级，粒度不同**（都是实测踩出来的）：
+- **CUDA / 驱动层坏掉**（`cannot load libnvcuvid`、`no device available for decoder`、
+  沙箱不给设备）→ 整个进程不再试硬解，全部回落到包数档；
+- **这张卡解不了某个编码器**（实测 T4 遇到 AV1：`Codec av1_cuvid is not supported.`）→
+  **只拉黑该编码器**，同批的 h264 / hevc / vp9 继续走硬解。
+
+档 2 用**显式** `-c:v xxx_cuvid` 而不是 `-hwaccel cuda` 的自动选择：后者遇到 NVDEC 不支持的
+编码器（实测 ffv1）会**静默转软解** —— 帧数虽然对，但「硬解」这个标签是假的。所以先查
+`ffmpeg -decoders` 里有没有该编码器的 `_cuvid` 解码器，没有就直接走包数档。
+
+**硬解并发拐点是 4 路**（8 × 900 帧 1080p 实测 `-j 1/2/4/8` → 18.1 / 10.6 / **9.4** / 10.4 秒；
+4 路时 GPU 利用率仅 40%、显存 540MiB，瓶颈在每文件的 CUDA context 启动）。
+
+| 参数 | 说明 |
+|---|---|
+| `-l` / `-1` / `-a` / `-A` / `-d` / `-t` / `-S` / `-r` / `-h` | 与 `ls` 同义；**`-h` 是 `--human-readable`**，帮助看 `--help` |
+| `--show LIST` / `--show-all` | 追加可选列，逗号分隔：`frames,pixfmt,bits,audio,subs,hdr`；`--show-all` = 全部 |
+| `--cpu` | **需 `--show frames`**：帧数跳过 GPU 硬解、走「包数」档（**比硬解快 20 倍以上**，长片 / 大目录建议加） |
+| `--fast` | **需 `--show frames`**：永不解码，帧数只取容器头，缺则估算 |
+| `--deep` | **需 `--show frames`**：强制重新数帧（忽略容器头），有 GPU 走硬解，否则包数 |
+| `-j N` | 探测并发数（`0` = 按 CPU / 内存自动决定，深解档额外封顶 4 路） |
+| `--ffmpeg-bin` / `--ffprobe-bin` | 指定 FFmpeg 路径（可给目录，也可给可执行文件路径） |
+| `-v` | 把资源探测结果、视频数、并发度、硬解是否可用打到 stderr |
+| `-I` / `--install` | 环境自检与安装（见 [安装](#把-vidls-装成一条命令可选)）；配套 `--prefix DIR`、`-y` |
+
+**并发与资源**：只对视频条目起 `ThreadPoolExecutor`（非视频只要 `lstat`），
+并发度按 cgroup 感知的 CPU / 内存探测自动算（沿用 `vidcrop_cpu_v2.py` 的预算常量，
+每路 ffprobe 预留 0.1GB），结果按原索引回填，**输出顺序稳定**。
+单个文件探测失败只让那一行显示 `不可探测（原因）`，不中断整批。
+
+**退出码**：`0` 正常 / `1` 有条目 stat 或探测失败 / `2` 参数错误（如 `--show` 里出现未知字段名）。
+
+**已知不做**：`-R` 递归、`--color` 配色、`-i` inode、`--time-style` 等冷门开关 —— 需要时请用真 `ls`。
+
+#### Windows 版：`vidls.cmd` + `vidls_win.py`
+
+Windows 上另起两个文件，**Linux 版原样保留、两者互不 import**。
+`vidls.cmd` 是启动器（用 `%~dp0` 定位自己，所以在仓库里直接敲也行），`vidls_win.py` 是内核；
+`vidll.cmd` 是 `vidls -l` 的快捷方式（只转发，见 [vidll 一节](#vidll--vidls--l-的快捷方式linux--windows)）。
+
+**为什么内核带 `_win`、启动器不带**：内核加 `_win` 是为了**一眼区分**哪份 `.py` 是哪边的
+（`vidls.py` 是 Linux、`vidls_win.py` 是 Windows）；启动器叫 `vidls.cmd` 是为了让
+**命令名在 Windows 上也是 `vidls`**，与 Linux 完全一致 —— 装好之后两边都是
+`vidls` / `vidll` / `vidls --install`，敲的时候不用想自己在哪台机器上。
+
+```bat
+vidls                     :: 列当前目录（普通文件走网格，视频独占一行带属性）
+vidls -l                  :: ll 长格式 + 视频属性
+vidll                     :: == vidls -l
+vidls -lh D:\videos       :: 人类可读体积
+vidls --install           :: 自检 + 把 vidls / vidll 写进 PATH（默认 %USERPROFILE%\.local\bin）
+```
+
+> 在仓库目录里可以直接 `vidls.cmd`（cmd.exe 会先找当前目录）；装过 `--install`
+> 之后从任何目录都能直接敲 `vidls`。
+
+`--install` **不做软链**（Windows 建软链要管理员 / 开发者模式），而是在一个**已经在 PATH 里**
+的目录写四个启动器：`vidls.cmd` / `vidll.cmd`（cmd / PowerShell）与无扩展名的 `vidls` / `vidll`（Git Bash）。
+四个都指向**仓库里**同一个 `vidls_win.py` 绝对路径 —— 改代码立刻生效、不用重装；
+代价同样是**仓库搬家后要重跑 `--install`**。目标目录不在 PATH 里时**只打印指引**，不擅自改
+（并提醒别用 `setx`：它会把 PATH 截断到 1024 字符）。
+
+**非视频部分的版式在 Git Bash 下与 coreutils ls 8.32 逐字节一致** —— 实测 **1040 组随机布局**
+（名字长度 1~15、混 CJK、终端宽 12~300）全部 byte-identical，其中 160 组是端到端走 PATH 上
+装好的 `vidls.cmd` 验的。四处已知差异（都是平台限制，宁可不显示也不显示错的）：
+
+| 差异 | 原因 |
+|---|---|
+| `-l` 没有属主 / 属组 / 硬链接数三列 | Windows `os.stat` 的 `st_uid`/`st_gid` 恒为 0；MSYS 的 `197121` 是它自己的映射表；`st_nlink` 从 `os.scandir` 拿恒为 0（真值要额外 open 一次文件句柄） |
+| `-l` 的 mode 是 `-rw-rw-rw-` / `drwxrwxrwx` | Python 给的是**合成**模式（文件 0666 / 目录 0777，只反映只读位）；MSYS 的 `0644`/`0755` 是从 ACL 推的 |
+| `-l` 的 `total` 是**近似值** | Windows 没有 `st_blocks`，按「4K 簇 + NTFS 常驻小文件（≤~700B）记 1KB」模拟。模型本身实测准（17 个同尺寸新副本：ls 890 = 模型 890），但 NTFS 实际分配受写入史影响会差几 KB（同批原文件是 898） |
+| 隐藏文件只看 `.` 前缀 | 与 MSYS 的 ls 一致，**不看 Windows 的 H 属性**（实测 `attrib +H` 的文件在 `ls` 里照样出现） |
+
+> 输出编码**跟随控制台**：Git Bash 下是 UTF-8（所以能跟 `ls` 逐字节比），
+> cmd.exe / PowerShell 下是 GBK（中文才显示得对）。另：`.cmd` 启动器**故意写成纯 ASCII**
+> —— cmd.exe 用 ANSI 代码页（本机 936）解析批处理，UTF-8 中文注释会被拆成乱码并**破坏解析**。
+
+> ⚠️ **WSL 会把 Windows 的 PATH 带进来** —— 装在 `C:\Users\<你>\.local\bin` 的
+> `vidls` / `vidll` 在 WSL 里也会被找到并执行，而它们本来只会用 Windows 的
+> `python.exe` 跑 Windows 内核，在 WSL 里必然报
+> `exec: /c/Program Files/Python312/python.exe: not found`（实测踩到过）。
+> 所以那份**无扩展名的 shim 里带了三分支**，按 `uname -s` 自己选路：
+>
+> | `uname -s` | 行为 |
+> |---|---|
+> | `Linux*`（WSL） | **转交给仓库里的 `vidls.sh`**（`/mnt/d/.../vidls.sh`）—— 只有 Linux 版才懂 WSL 的路径语义；找不到就明确报错并给出 `bash /mnt/d/.../vidls.sh --install` |
+> | `MINGW*` / `MSYS*`（Git Bash） | 用 Windows 的 python 跑 `vidls_win.py` |
+> | 其它 | 明确报错，不猜 |
+>
+> 结果：**WSL 里 `vidll` / `vidls` 谁排在 PATH 前面都能正常工作** —— 命中 Linux 软链就直接跑，
+> 命中 Windows shim 就自动转交给 Linux 版。生成的 shim 是**快照**，改完要重跑一次
+> `vidls --install`（Windows 侧）才会更新。
+
+> 💡 **移植时的额外收获**：用这 1040 组样本还查出 Linux 版 `vidls.py` 有三处版式 bug，
+> 并**已于 2026-09-17 回修**（两份实现现在一致，Linux 版那三处函数的注释里也记了实测依据）：
+> ① 列宽下限 `MIN_COLUMN_WIDTH = 3` 是错的 —— 短名字目录比 `ls` 多两格空白
+> （实测 `ls` 的 `a  b  c` 间隔是 2，不是 4）；
+> ② 缺「**最后一列不能是空的**」判据（30 个单字符名字、宽 80 时会比 `ls` 多铺一列）；
+> ③ Tab 填充缺「**Tab 不省字节就用空格**」判据（`from % 8 == 7` 时多吐一个 Tab）。
+> 前两条只在名字普遍 ≥3 字符、条目数又不巧时才显形，所以最初那轮 40/60/80/100/166 列
+> 的对比没抓到 —— 是**随机化布局 + 大量样本**才把它逼出来的。
+
+---
+
+### vidll — vidls -l 的快捷方式（Linux + Windows）
+
+`ll` 的替代品：**`vidll` 完全等于 `vidls -l`**，一个字符都不差。
+
+| 平台 | 文件 | 说明 |
+|---|---|---|
+| Linux | `vidll.sh` | 3 行逻辑：把 `-l` 塞到参数最前面，`exec` 给同目录的 `vidls.sh` |
+| Windows | `vidll.cmd` | 同样只做转发，`call` 给同目录的 `vidls.cmd` |
+
+```bash
+vidll                 # == vidls -l
+vidll -h              # == vidls -l -h（人类可读体积）
+vidll -lt /path       # == vidls -l -lt /path
+vidll --show-all      # == vidls -l --show-all
+```
+
+**为什么用转发而不是复制逻辑**：vidll 自己没有实现，参数解析、版式、退出码、探测行为
+全部由 vidls 决定 —— 所以两者**永远同步**，改 vidls 不用回来动 vidll。
+实测（Windows）：`vidll <dir>` 与 `vidls -l <dir>` 输出**逐字节相同**，
+退出码 `0/1/2`、`--help` 文本、`--show bogus` 报错全都一致。
+
+`--install` 会**一起装上**（Linux 建第二条软链 `vidll -> vidll.sh`；Windows 多写
+`vidll.cmd` 与 `vidll` 两个启动器），所以装好之后 `vidls` / `vidll` 都能直接敲。
+
+> `vidll` 的实现在 Windows 上只做了 `call` 转发（不重复探测 Python），
+> 在 Linux 上是 `exec` 转发（不产生多余进程）—— 两边的错误处理都留在 vidls 里。
+
+---
+
 ## 快速上手
 
 ```bash
@@ -1022,6 +1250,13 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 | 4K 的 `-j` 到底能开几路？ | 上限几乎总是**内存**，不是 CPU：实测单片峰值 RSS（`-threads 4` + libx265 medium）720p 0.61GB、1080p 1.16GB、**4K 4.59GB**（脚本画像已按此调成 0.7 / 1.3 / 5.0，取实测×1.1）。而 CPU 侧单片只吃 ~1 核（`minterpolate` 串行），所以核数不是瓶颈 | 8GiB 的 cgroup：4K `floor(5.57/5.0)=1` 路；32GB 上 `floor(25/5)=5` 路。想看脚本算出来的值，看日志的 `并发  : N 路 × M 线程/片（CPU 槽位 … × 内存 …）` 那一行 |
 | `-w` 用**相对路径**会失败 | `PARTS=` 等变量在 WORKDIR 绝对化**之前**就赋值了，而每片会 `cd` 进自己的临时 CWD → 分片报 `Error opening output <相对路径>/parts/pXXXXX.ts.part.NNN` | 用绝对路径 `-w /path/work`（文档示例与回归测试都是绝对路径，所以这个坑一直没暴露） |
 | Ctrl+C 之后任务好像还在跑 | ① Ctrl+C 只发给**终端前台进程组** —— 用 `setsid`（脚本推荐的起法）或 `&` 起的任务根本收不到；② 即使收到了，ffmpeg **捕获了 INT/TERM 但要 11–13s 才真的退出**（实测连 640x480 的 lavfi 编码都这样，4K 的 `minterpolate` 只会更久），旧代码 `kill -TERM` 之后就 `wait`，于是看起来像没反应 | 现在收尾有界且有日志：`中断: 还有 N 个 ffmpeg 在写 … → 先发 TERM`，3s 后 `优雅收尾超时 → SIGKILL`。想立刻停用 `kill -TERM <脚本pid>`（或 `-<pgid>` 连整个进程组） |
+| `vidls` 的「硬解」档要用 ffmpeg 而不是 ffprobe | **ffprobe 没有 `-hwaccel` 选项**（实测 6.1.1：`Failed to set value 'cuda' for option 'hwaccel': Option not found`，连 `-nostdin` 也不认） | 档 2 改成 `ffmpeg -hwaccel cuda … -f null - -progress pipe:1`，取最后一行 `frame=N` |
+| `vidls` 默认的「硬解」档对长片很贵 | 成本 = 0.55s 固定 + 时长/≈500fps（T4 实测），2 小时 1080p 约 7 分钟；而 6 种编码器/容器上「包数」与解码真值完全相等 | 长片 / 大目录加 `--cpu`（走 0.1s 的包数档）或 `--fast`（只读容器头） |
+| T4 不能硬解 AV1 | `av1_cuvid` 解码器编译进来了，但 Turing 运行时报 `Codec av1_cuvid is not supported.` | 只对该编码器降级到包数档，同批的 h264/hevc/vp9 仍走硬解 |
+| `vidls` 不实现 `-R` / `--color` | 列布局是"连续非视频项攒成一组铺网格，视频行独占一行"，递归与配色会破坏这个约定 | 需要时用真 `ls`；`vidls` 只覆盖单目录场景 |
+| `vidls` 的软链是绝对路径 | 建的是 `/usr/local/bin/vidls -> /仓库/vidls.sh` | 仓库搬家后重跑 `vidls --install` |
+| Windows 版 `-l` 少三列、mode 是合成值、`total` 只有近似 | Windows 的 `os.stat` 给不出属主/属组/硬链接数、没有 `st_blocks`，mode 只反映只读位（详见 [Windows 版](#windows-版vidlscmd--vidls_winpy)） | 这是移植的取舍：宁可不显示也不显示错的。需要真值就用 Git Bash 的 `ls -l` |
+| Windows 版 `vidls.cmd` 是纯 ASCII、不改 PATH | cmd.exe 用 ANSI 代码页解析批处理（UTF-8 中文注释会破坏解析）；改 PATH 属系统级改动 | 中文都在 `.py` 内核里；PATH 不在位时只打印可粘贴的 PowerShell 命令 |
 | 脚本被 `kill -9` 后还有 ffmpeg 在烧 CPU（孤儿） | 走不到 trap；`$!` 记的 pid 只活在 run_job 子 shell 里，子 shell 被打死就丢了。**更关键：子 shell 与 ffmpeg 都继承了锁的 fd 9** → 孤儿自己占着锁，旧逻辑下重跑一直撞锁、"启动清孤儿"永远走不到 | ①根因：子 shell / 试编码 subshell 里 `exec 9>&-`（锁不再外泄）；②启动时按「命令行里在写本目录 `parts/`」收残留（`TERM → 3s → KILL`）再清 `.part`；③撞锁兜底：只有 ffmpeg 持有 → 收掉再接管锁，否则报错并打印持有者 pid/启动时间/命令行 |
 
 ---
@@ -1075,6 +1310,12 @@ vidutils/
 ├── interp_2x_safe_v1.sh      # 同上的通用版（多一条 CPU 回退 minterpolate + libx265 与 --backend/--cpu-preset）
 ├── test_interp_2x_lock.sh    # 上面两版的回归测试（单实例锁 / 并发安全）
 ├── test_interp_2x_orphan.sh  # 上面两版的回归测试（中断收尾 / 孤儿 ffmpeg 自愈）
+├── vidls.sh                  # ls / ll 替代（启动器；--install 把自己接进 PATH）
+├── vidll.sh                  # vidll == vidls -l，只有 3 行转发逻辑
+├── vidls.py                  # 上面的内核（纯标准库）：列布局、资源探测、帧数四级降级链（Linux 版）
+├── vidls.cmd                 # 同上 Windows 版启动器（纯 ASCII + CRLF：cmd.exe 按 ANSI 代码页解析批处理）
+├── vidll.cmd                 # Windows 版 vidll（只转发给 vidls.cmd）
+├── vidls_win.py              # Windows 版内核：版式判据按实测重写、控制台编码自适应、写启动器的 --install
 ├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
 ├── AV1_VP9_UPGRADE_PLAN_v2.md # AV1/VP9 升级方案归档
 ├── docs/                     # （规划）设计文档与性能基准
@@ -1112,10 +1353,18 @@ vidutils/
   概览块只展示最终命令里真正会出现的参数；`--codec auto` 必须解析成具体编码器（透传会报 Unknown encoder）
 - [ffmpeg 挂起的两个根因](memory/project_ffmpeg_stdin_hang.md)
   —— SIGTTIN（状态 T，`-nostdin` 能修）vs 输出管道反压（状态 S 且 CPU 冻结，`-nostdin` 没用）
+- [复刻 ls 版式与视频属性探测的踩坑](memory/project_ls_probe_pitfalls.md)
+  —— `vidls` 的实测事实：coreutils 列算法的**三条真判据**（竖填、总宽**严格 `<`**、
+  **最后一列不能为空**）与 Tab 填充的取舍规则，并**推翻了原先记的「列宽下限 3」**；
+  `ffprobe` 没有 `-hwaccel` / `-nostdin`（硬解数帧只能用 ffmpeg + `-progress pipe:1`）；
+  帧数四档（包头 / 硬解 / 包数 / 估算）的可信度差异；AV1 降级实测；
+  Windows 移植必须处理的六件事（**CRLF 会让 diff 全红**、`.cmd` 必须纯 ASCII、
+  编码跟随控制台、`-l` 少三列、`total` 只能近似、CUDA 关键字要带 `.dll`）
 - [T4 能力边界 + 测性能前先查并发流水线](memory/project_t4_gpu_capabilities.md)
-  —— 别的流水线会抢 CPU/GPU 导致基准不可信；T4 无 AV1 编码器，且本机 ffmpeg 也无 AV1 软编
-  （`libsvtav1`/`libaom-av1`/`librav1e` 都没有 → 本机 AV1 完全编不出来，只能 `--dry-run` 验证）；
-  零拷贝管线里 `-pix_fmt` 无效
+  —— 别的流水线会抢 CPU/GPU 导致基准不可信；**VP9 有硬解但从来没有硬编**、
+  **AV1 硬解硬编都没有**（`av1_cuvid` 在列表里，运行时报 not supported）；
+  「本机 AV1 完全编不出来」这条已更正为：custom `ffmpeg` 7.1 没有 AV1 软编，
+  但系统 `ffmpeg` 6.1.1 有 `libsvtav1`/`libaom-av1`；零拷贝管线里 `-pix_fmt` 无效
 
 写法沿用本机 codebuddy 自动记忆的约定：frontmatter 带 `name` / `description` / `type`，
 正文对 project / feedback 类用「事实 → **Why:** → **How to apply:**」的结构，

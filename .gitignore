@@ -1,3 +1,9 @@
+# ============================================================================
+# VidUtils 忽略规则 —— 由仓库内两份模板合并而来，改规则时请同步它们：
+#   · gitignore.txt    —— 本文件的正文来源
+#   · tar_excludes.txt —— 打包快照用的排除表（多出备份文件 / 构建产物等）
+# ============================================================================
+
 # —— Python ——
 __pycache__/
 *.py[cod]
@@ -5,6 +11,8 @@ __pycache__/
 # —— CodeBuddy 本机状态（会话、权限等，不入库）——
 # 如果希望共享权限白名单，可以改成只忽略 .codebuddy/ 下的会话数据
 .codebuddy/
+.claude/
+.claude-flow/
 
 # nvinterpolate 会在【当前工作目录】下写 NvOFFRUC/logFRUCError.txt（脚本已给每片独立 CWD，
 # 但手工直接跑 ffmpeg 时可能落到仓库里）
@@ -13,3 +21,33 @@ NvOFFRUC/
 # —— 插帧脚本的分片产物（用 -w 指到仓库内时会产生）——
 *.ts.part.*
 interp_2x/
+
+# —— 本地临时目录（测试素材 / 中间产物，别入库；同理已在 tar_excludes.txt 里）——
+temp/
+tmp/
+logs/
+output/
+archive/
+.cache/
+.venv/
+.vscode/
+.backups/
+
+# —— 备份 / 副本文件（来自 tar_excludes.txt；编辑器与手工备份都可能产生）——
+*- Copy.*
+*.Copy.*
+*_Copy.*
+*- copy.*
+*.copy.*
+*_copy.*
+*.Bak*
+*_Bak*
+*.bak*
+*_bak*
+core.*
+
+# —— 打包产物 ——
+*.tar.gz
+
+# —— 本地草稿（历史 ffmpeg 命令行笔记，含 /workspace/... 私有路径，不公开发布）——
+vidcrop.txt

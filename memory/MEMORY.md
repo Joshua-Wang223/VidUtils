@@ -27,9 +27,19 @@
   `exec ffmpeg` 的子 shell 被杀会留下孤儿 ffmpeg；找"另一个实例"必须读 `/proc/<pid>/cmdline` 精确匹配
 - [ffmpeg 挂起的两个根因](project_ffmpeg_stdin_hang.md)
   — SIGTTIN（状态 T，`-nostdin` 能修）vs 输出管道反压（状态 S 且 CPU 冻结，`-nostdin` 没用）
+- [复刻 ls 版式与视频属性探测的踩坑](project_ls_probe_pitfalls.md)
+  — vidls（ls/ll 替代，另有 `vidll` = `vidls -l`）的实测事实：coreutils 列算法的**三条真判据**
+  （竖填、总宽**严格 <**、**最后一列不能空**）与 Tab 填充的取舍规则，并**推翻了原先记的
+  「列宽下限 3」**（三处 bug 已在 Linux/Windows 两份实现里同时修好）；
+  `ffprobe` 没有 `-hwaccel`/`-nostdin`（硬解数帧只能用 ffmpeg + `-progress pipe:1`）；
+  帧数四档（包头/硬解/包数/估算）差异；AV1 降级实测（首波每个文件各试一次、失败尝试 0.36–0.50s）；
+  Windows 移植必须处理的六件事（**CRLF 会让 diff 全红**、`.cmd` 必须纯 ASCII、
+  控制台编码不要硬钉 UTF-8、`-l` 少三列、`total` 只能近似、CUDA 关键字要带 `.dll`）
 - [T4 能力边界 + 测性能前先查并发流水线](project_t4_gpu_capabilities.md)
-  — 别的流水线会抢 CPU/GPU 导致基准不可信；T4 无 AV1 编码器，且本机 ffmpeg 也无 AV1 软编
-  （libsvtav1/libaom-av1/librav1e 都没有 → 本机 AV1 完全编不出来）；零拷贝管线里 `-pix_fmt` 无效
+  — 别的流水线会抢 CPU/GPU 导致基准不可信；**VP9 有硬解但从来没有硬编**、
+  **AV1 硬解硬编都没有**（`av1_cuvid` 在列表里但运行时报 not supported）；
+  「本机 AV1 完全编不出来」这条已更正：custom ffmpeg 7.1 没有、系统 ffmpeg 6.1.1 有
+  libsvtav1/libaom-av1；零拷贝管线里 `-pix_fmt` 无效
 - [FFmpeg 7.1 已合并 nvinterpolate 与 libvmaf](project_nvinterpolate_build.md)
   — 单一 ffmpeg、无需环境文件；`nvinterpolate` 必须放滤镜链末尾否则段错误；移植补丁位置
 - [两个裁剪脚本的行为一致约定](project_preset_equivalence.md)

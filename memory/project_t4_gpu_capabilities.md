@@ -1,6 +1,6 @@
 ---
 name: T4 编解码能力/性能基线，以及本机可能有并发流水线抢占
-description: Tesla T4 的 NVENC/NVDEC 能力边界与性能基线（含本机 ffmpeg 无任何 AV1 软编）；做性能测试前必须先在 /workspace/Video_Enhancement 查是否有流水线在跑（会占 CPU 40%+GPU 70%）
+description: Tesla T4 的 NVENC/NVDEC 能力边界与性能基线（VP9 有硬解无硬编、AV1 硬解硬编都没有；AV1 软编取决于用哪个 ffmpeg）；做性能测试前必须先在 /workspace/Video_Enhancement 查是否有流水线在跑（会占 CPU 40%+GPU 70%）
 type: project
 ---
 
@@ -27,21 +27,30 @@ GPU 39–69%、`utilization.encoder` 20–29%、显存 3.4GB 被 TensorRT 占着
 
 **编码**
 - `h264_nvenc` ✓、`hevc_nvenc` ✓
+- **VP9：T4 没有 VP9 硬编**（NVENC 从来没有 VP9 编码器，任何代都没有）。
+  VP9 只能走软件 `libvpx-vp9`。用户 2026-09-17 明确提醒过这一点。
 - `av1_nvenc` **在编码器列表里存在但运行时打不开**（rc=187，`Could not open encoder`，
   error code -22）→ T4 无 AV1 编码器。列表里有 ≠ 能用，别被 `-encoders` 输出骗了。
-- **本机 ffmpeg 也没有任何 AV1 软编**：`-encoders` 里没有 `libsvtav1` / `libaom-av1` / `librav1e`。
-  两个事实叠加的直接后果：**这台机器上 AV1 根本编不出来**——`--codec av1_nvenc` 会在
-  `_check_nvenc_available()` 的 1 帧试编里被判不可用（该函数是真试编，不会只看列表，所以判得对），
-  随后按 `_get_software_fallback()` 降级到 `libsvtav1`，而 `libsvtav1` 不存在 → 硬失败。
-  **Why:** 2026-09-16 核查 AV1/VP9 计划执行情况时实测确认；计划文档里"本机硬件已确认可用"
-  的说法对 `av1_nvenc` 是错的（只看了 `-encoders` 列表）。
-  **How to apply:** 本机验证 AV1 只能到 `--dry-run`（命令构造正确即可），真机编码结论必须标为
-  "环境不支持"，别据此认为代码有问题。想要真机 AV1 得换含 `libsvtav1` 的 ffmpeg —— 那属于
-  **环境变更，须另开立项**，不要塞进脚本改动里顺手做。VP9（`libvpx-vp9`）不受影响，可真机跑。
+  AV1 硬编要到 Ada（RTX 40 系）。
+- **AV1 软编：custom build 有、系统 ffmpeg 没有（这条以前写错过，2026-09-17 更正）。**
+  `/usr/local/bin/ffmpeg` 7.1（脚本默认用的那个）**没有** `libsvtav1` / `libaom-av1` /
+  `librav1e`；但**系统 `/usr/bin/ffmpeg` 6.1.1（Ubuntu 包）有** —— 实测
+  `ffmpeg -encoders` 里能看到 `libaom-av1` 与 `libsvtav1`（SVT-AV1 v1.7.0），
+  而且真的用它编出了 AV1 测试片。
+  **Why:** 原记录写成「本机 AV1 完全编不出来」，与后来「用 libsvtav1 造 AV1 素材」
+  直接矛盾 —— 差别只在用的是哪个 ffmpeg。解析前者要看 `command -v ffmpeg`。
+  **How to apply:** 判「能不能编 AV1」时必须先确认是哪个 ffmpeg；想要稳定的 AV1 软编
+  得给 custom build 也编进 libsvtav1，那属于**环境变更，须另开立项**。
 - 像素格式：h264_nvenc 支持 `yuv420p`/`yuv444p`，**不支持 `p010le`**（H.264 无 10bit）；
   hevc_nvenc 支持 `yuv420p`/`yuv444p`/`p010le`（10bit）。
 
 **解码**：`h264_cuvid`/`hevc_cuvid`/`vp9_cuvid`/`mpeg2_cuvid`/`mjpeg_cuvid` 等一整套 cuvid。
+
+- **VP9 有硬解**（实测 `vp9_cuvid` 能跑，帧数正确）—— 与「VP9 没有硬编」正好相反，
+  这对能力最容易记混。
+- **AV1 没有硬解**：`av1_cuvid` **在 `-decoders` 列表里存在**（Turing 之前的构建都会列出来），
+  但运行时直接报 `Codec av1_cuvid is not supported.` → 这是**编码器级**失败，
+  只该拉黑 av1，不能当成 CUDA 坏了把整批硬解关掉（T4 的 AV1 解码要 Ampere+）。
 
 **NVENC 是单引擎**：1/2/4/8 路并发总吞吐基本不变（300 帧 1080p 约 227–263 fps），
 单路吞吐随并发数成反比。8 路会话都能建立（数据中心卡无消费级的会话数限制）。

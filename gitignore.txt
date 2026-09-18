@@ -1,0 +1,19 @@
+# —— Python ——
+__pycache__/
+*.py[cod]
+
+# —— CodeBuddy 本机状态（会话、权限等，不入库）——
+# 如果希望共享权限白名单，可以改成只忽略 .codebuddy/ 下的会话数据
+.codebuddy/
+
+# nvinterpolate 会在【当前工作目录】下写 NvOFFRUC/logFRUCError.txt（脚本已给每片独立 CWD，
+# 但手工直接跑 ffmpeg 时可能落到仓库里）
+NvOFFRUC/
+
+# —— 插帧脚本的分片产物（用 -w 指到仓库内时会产生）——
+*.ts.part.*
+interp_2x/
+
+# —— 本地临时目录（测试素材 / 中间产物，别入库；同理已在 tar_excludes.txt 里）——
+temp/
+tmp/

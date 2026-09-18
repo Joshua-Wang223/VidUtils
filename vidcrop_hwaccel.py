@@ -6,10 +6,15 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
 功能概述
 ────────────────────────────────────────────────────────────────────
   • 单文件 / 文件夹批量处理；-r 递归扫描子目录并保持目录结构
-  • 两种处理模式：
+  • 三种处理模式：
       - crop （默认）：直接居中裁剪（目标尺寸不得大于源尺寸）
       - cover：等比缩放至完全覆盖目标区域后居中裁剪（任意尺寸）
+      - crop-cover：先对源画面做裁剪，再把裁剪结果缩放覆盖到最终尺寸（可放大）。
+                    裁剪步骤的比例由 --crop-ratio 决定，未给出时即目标宽高比，
+                    因此该模式下 --crop-ratio 可与 --output-width/height 并用：
+                    有 --crop-ratio 时最终尺寸只需给一个维度，另一个按比例推导。
   • --crop-ratio 自动按目标宽高比（如 16:9）最大化裁剪，无需指定输出尺寸
+    （crop-cover 模式下与 --output-width/height 并用，用于指定最终的缩放尺寸）
   • 编码格式覆盖 H.264 / H.265 / VP9 / AV1：
       - H.264/HEVC：libx264 / libx265（CPU）、h264_nvenc / hevc_nvenc（GPU）
       - AV1：libsvtav1 / libaom-av1 / librav1e（CPU）、av1_nvenc（GPU 策略 1/2）
@@ -34,7 +39,8 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
         4) auto 模式下的最佳硬解 + 软件编码
         5) 纯 CPU 处理
 
-        注：cover 模式因需要 scale 步骤，自动跳过策略 1（crop_cuda 不支持缩放）。
+        注：cover / crop-cover 模式因需要 scale 步骤，自动跳过策略 1
+            （crop_cuda 不支持缩放）。
 
 编码器智能处理
 ────────────────────────────────────────────────────────────────────
@@ -96,6 +102,17 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
       --input ./raw --output ./out \\
       --output-width 1920 --output-height 1080 \\
       --codec libvpx-vp9 --crf-ref 21      # → -crf 27
+
+  # 2f) crop-cover 模式：先按 16:9 裁剪，再把结果缩放覆盖到 1920x1080
+  python vidcrop_hwaccel.py \\
+      --input video.mp4 --output out.mp4 \\
+      --mode crop-cover --crop-ratio 16:9 \\
+      --output-width 1920 --output-height 1080
+
+  # 2g) crop-cover + 单维度：--crop-ratio 已定比例，只给宽度即可（高度自动推导）
+  python vidcrop_hwaccel.py \\
+      --input video.mp4 --output out.mp4 \\
+      --mode crop-cover --crop-ratio 16:9 --output-width 1280   # → 1280x720
 
   # 3) 递归扫描 + 音频重编码 + 追加参数
   python vidcrop_hwaccel.py \\
@@ -2025,8 +2042,29 @@ def _build_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int) -> s
         return f'scale={dst_w}:-2,crop={dst_w}:{dst_h}:0:(ih-{dst_h})/2'
 
 
+def _build_crop_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
+                                 crop_ratio: Optional[Tuple[int, int]] = None) -> str:
+    """
+    生成「先裁剪、后缩放覆盖」滤镜字符串（crop-cover 模式）。
+
+    第一段按 crop_ratio 最大化居中裁剪：裁剪尺寸由 calculate_auto_crop_size 算出，
+    天然不超过源尺寸，故本模式不受 crop 模式「目标不得大于源」的限制；
+    crop_ratio 为 None 时用目标宽高比，此时第二段的比例与裁剪结果一致，
+    整条链退化为 `crop=... ,scale=dst_w:dst_h`（纯裁剪 + 纯缩放，不再二次裁剪）。
+    比例不一致时（--crop-ratio 与目标尺寸不同）再补一次居中裁剪。
+
+    crop-cover 需要 scale 步骤，crop_cuda 不支持，故始终使用 CPU 侧滤镜。
+    """
+    rn, rd = crop_ratio if crop_ratio else (dst_w, dst_h)
+    crop_w, crop_h = calculate_auto_crop_size(src_w, src_h, rn, rd)
+    crop = _build_crop_filter_str(src_w, src_h, crop_w, crop_h)
+    cover = _build_cover_filter_str(crop_w, crop_h, dst_w, dst_h)
+    return f'{crop},{cover}' if cover else crop
+
+
 def build_video_filter(mode: str, src_w: int, src_h: int, dst_w: int, dst_h: int,
-                       use_cuda: bool = False) -> str:
+                       use_cuda: bool = False,
+                       crop_ratio: Optional[Tuple[int, int]] = None) -> str:
     """
     根据 mode 生成对应的 FFmpeg 视频滤镜字符串。
 
@@ -2034,9 +2072,17 @@ def build_video_filter(mode: str, src_w: int, src_h: int, dst_w: int, dst_h: int
     mode='cover': 等比缩放+裁剪，始终使用 CPU 侧滤镜（忽略 use_cuda 参数）。
                   cover 需要 scale 步骤，crop_cuda 不支持，调用方已在策略生成阶段
                   排除了全 GPU 流水线（策略 1），此处 use_cuda 永远为 False。
+    mode='crop-cover': 先按 crop_ratio（未给出时即目标宽高比 dst_w:dst_h）最大化
+                  居中裁剪，再把裁剪结果等比缩放覆盖到 dst_w×dst_h。同样含 scale
+                  步骤，故与 cover 一样只用 CPU 侧滤镜。
+
+    Args:
+        crop_ratio: (分子, 分母)，crop-cover 的裁剪步骤所用比例；None 时用目标宽高比。
     """
     if mode == 'cover':
         return _build_cover_filter_str(src_w, src_h, dst_w, dst_h)
+    if mode == 'crop-cover':
+        return _build_crop_cover_filter_str(src_w, src_h, dst_w, dst_h, crop_ratio)
     return _build_crop_filter_str(src_w, src_h, dst_w, dst_h, use_cuda=use_cuda)
 
 
@@ -2109,6 +2155,18 @@ def calculate_auto_crop_size(src_w: int, src_h: int, target_num: int, target_den
     out_h = min(out_h, src_h)
     
     return out_w, out_h
+
+
+def derive_even_dimension(value: float) -> int:
+    """
+    把按比例推导出的边长取整为不小于 2 的偶数。
+
+    4:2:0 系编码器（含 yuv420p / yuv420p10le / p010le）要求宽高均为偶数，
+    故推导出的维度不能是任意整数。取整到最近的偶数，向上补 1 而不是向下
+    （宁可多 1 像素，也不要因为向下取整让画面被裁掉一条）。
+    """
+    n = max(2, int(round(value)))
+    return n if n % 2 == 0 else n + 1
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -2285,7 +2343,8 @@ def _generate_strategies(
     sw_codec = user_codec if (not is_nvenc and user_codec != 'auto') else sw_fallback
 
     # ── 策略 1：全 GPU 流水线（硬解 + crop_cuda + NVENC 编码）──
-    # cover 模式需要 scale 步骤，crop_cuda 不支持，此策略仅在 crop 模式下可用。
+    # cover / crop-cover 模式需要 scale 步骤，crop_cuda 不支持，
+    # 此策略仅在 crop 模式下可用。
     if (hw_mode != 'none'
             and mode == 'crop'
             and is_nvenc
@@ -2815,6 +2874,7 @@ def process_file(
     file_total: int = 0,
     flag: Optional[str] = None,
     color_range: Optional[str] = None,
+    crop_ratio: Optional[Tuple[int, int]] = None,
     queue_rest: Optional[float] = None,
     queue_cur: Optional[float] = None,
 ) -> Dict[str, object]:
@@ -2832,7 +2892,8 @@ def process_file(
         dry_run         True 时仅打印最优策略命令，不实际执行
         file_index      当前文件序号（1 起），用于 [i/n] 前缀
         file_total      文件总数，用于 [i/n] 前缀
-        flag            输出文件名后缀标记，None 时用默认 _cropped / _covered
+        flag            输出文件名后缀标记，None 时用默认 _cropped / _covered / _cropcovered
+        crop_ratio      crop-cover 模式裁剪步骤所用比例 (分子, 分母)；None 时用目标宽高比
         queue_rest / queue_cur  整批剩余时间的两个构件（秒），透传给进度条常驻
                                 显示；两者皆为 None 时不显示该字段
     """
@@ -2852,7 +2913,10 @@ def process_file(
     t_file_start = time.perf_counter()
     # 括号内不再嵌套括号，避免 "crop（居中裁剪）)" 这类观感，故用 mode_inline 而非
     # 带全角括号的 mode_label（后者仅用于 main() 的概览输出）。
-    mode_inline = 'crop 居中裁剪' if mode == 'crop' else 'cover 等比缩放+裁剪'
+    mode_inline = {
+        'cover': 'cover 等比缩放+裁剪',
+        'crop-cover': 'crop-cover 先裁剪后缩放覆盖',
+    }.get(mode, 'crop 居中裁剪')
     idx_tag = f'[{file_index}/{file_total}] ' if file_total else ''
     print(f'\n{idx_tag}{input_file.name}')
     # [META-KEEP] 源含旋转时提示显示尺寸：裁剪坐标基于存储坐标系（与 ffprobe 的
@@ -2867,12 +2931,21 @@ def process_file(
           + f'{out_width}x{out_height} (源 {actual_width}x{actual_height}, '
             f'{mode_inline}{_rot_note})')
 
+    # crop-cover 的裁剪步骤是否为空操作。裁剪比例与源比例不同时，即使最终尺寸
+    # 与源相同，画面也已经变了（先裁掉一圈再缩放回来），不能按同尺寸跳过。
+    _cc_noop = True
+    if mode == 'crop-cover':
+        _rn, _rd = crop_ratio if crop_ratio else (out_width, out_height)
+        _cc_noop = calculate_auto_crop_size(
+            actual_width, actual_height, _rn, _rd) == (actual_width, actual_height)
+
     # ── 同尺寸跳过（可通过 --no-skip-same-size 关闭）──
-    if actual_width == out_width and actual_height == out_height and not no_skip_same_size:
+    if (actual_width == out_width and actual_height == out_height
+            and _cc_noop and not no_skip_same_size):
         print('  ⏭  跳过：目标尺寸与原始尺寸相同（--no-skip-same-size 可强制转码）。')
         return _result('skipped')
 
-    # ── crop 模式下目标不能大于源（cover 模式无此限制）──
+    # ── crop 模式下目标不能大于源（cover / crop-cover 可放大，无此限制）──
     if mode == 'crop':
         if out_width > actual_width or out_height > actual_height:
             print(
@@ -2896,7 +2969,10 @@ def process_file(
         ext = container if container else get_extension_from_codec(ext_codec)
         if ext is None:
             ext = input_file.suffix
-        suffix = flag if flag else ('_covered' if mode == 'cover' else '_cropped')
+        suffix = flag if flag else {
+            'cover': '_covered',
+            'crop-cover': '_cropcovered',
+        }.get(mode, '_cropped')
         output_file = output_dir / f'{input_file.stem}{suffix}{ext}'
     else:
         output_file = output_path
@@ -2927,7 +3003,7 @@ def process_file(
         try:
             vf_filter = build_video_filter(
                 mode, actual_width, actual_height, out_width, out_height,
-                use_cuda=strategy['use_hw_filter'],
+                use_cuda=strategy['use_hw_filter'], crop_ratio=crop_ratio,
             )
         except ValueError as exc:
             print(f'  ✘ 失败：滤镜构建 — {exc}', file=sys.stderr)
@@ -2974,7 +3050,7 @@ def process_file(
         try:
             vf_filter = build_video_filter(
                 mode, actual_width, actual_height, out_width, out_height,
-                use_cuda=use_hw_filter,
+                use_cuda=use_hw_filter, crop_ratio=crop_ratio,
             )
         except ValueError as exc:
             print(f'  ✘ 失败：滤镜构建 — {exc}', file=sys.stderr)
@@ -3094,8 +3170,15 @@ def parse_args() -> argparse.Namespace:
   --hwaccel none   禁用硬件加速，纯 CPU 处理
 
 处理模式：
-  --mode crop      直接居中裁剪（默认，目标尺寸不能大于源尺寸）
-  --mode cover     等比缩放至完全覆盖目标区域后居中裁剪（任意目标尺寸）
+  --mode crop       直接居中裁剪（默认，目标尺寸不能大于源尺寸）
+  --mode cover      等比缩放至完全覆盖目标区域后居中裁剪（任意目标尺寸）
+  --mode crop-cover 先裁剪、再缩放覆盖到最终尺寸（可放大）
+                    裁剪步骤的比例取 --crop-ratio，未给出时即目标宽高比：
+                      · 无 --crop-ratio：必须同时给出 --output-width 和 --output-height
+                        （两者之比就是裁剪比例，链路退化为 裁剪 + 缩放）；
+                      · 有 --crop-ratio：最终尺寸只需给一个维度，另一个按比例推导。
+                    例： --mode crop-cover --crop-ratio 16:9 --output-width 1280
+                         → 按 16:9 最大化裁剪后缩放为 1280x720
 
 质量参数：
   --crf  CPU 编码器（libx264/265 等），默认 21，0-51 越小越好
@@ -3129,15 +3212,22 @@ preset 映射（NVENC ↔ libx264 自动转换）：
     parser.add_argument('--original-height', type=int,
                         help='原始视频高度（不提供则自动通过 ffprobe 检测）')
     parser.add_argument('--output-width',  type=int, default=None,
-                        help='目标视频宽度（与 --crop-ratio 二选一）')
+                        help='目标视频宽度（与 --crop-ratio 二选一；'
+                             '--mode crop-cover 配合 --crop-ratio 时可只给一个维度）')
     parser.add_argument('--output-height', type=int, default=None,
-                        help='目标视频高度（与 --crop-ratio 二选一）')
+                        help='目标视频高度（与 --crop-ratio 二选一；'
+                             '--mode crop-cover 配合 --crop-ratio 时可只给一个维度）')
     parser.add_argument('--crop-ratio', type=str, default=None,
-                        help='自动计算裁剪尺寸的目标宽高比，如 16:9 或 1.777（与 --output-width/height 二选一）')
+                        help='自动计算裁剪尺寸的目标宽高比，如 16:9 或 1.777'
+                             '（与 --output-width/height 二选一；'
+                             '--mode crop-cover 下两者并用，前者定裁剪比例、后者定最终尺寸）')
 
     # 处理模式
-    parser.add_argument('--mode', choices=['crop', 'cover'], default='crop',
-                        help='处理模式：crop=居中裁剪（默认），cover=等比缩放+居中裁剪')
+    parser.add_argument('--mode', choices=['crop', 'cover', 'crop-cover'], default='crop',
+                        help='处理模式：crop=居中裁剪（默认，目标不得大于源）；'
+                             'cover=等比缩放覆盖后居中裁剪（任意尺寸）；'
+                             'crop-cover=先按 --crop-ratio（未给出时用目标宽高比）'
+                             '最大化裁剪，再缩放覆盖到 --output-width/height')
 
     # 视频编码
     parser.add_argument('--codec', default='h264_nvenc',
@@ -3165,7 +3255,8 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                         help='编码器预设。默认：CPU 编码器 medium，GPU 编码器 p5；'
                              'NVENC（p1~p7）与 libx264 风格（ultrafast~veryslow）自动双向映射')
     parser.add_argument('--flag', default=None, metavar='SUFFIX',
-                        help='输出文件名后缀标记，用于替代默认的 _cropped / _covered。'
+                        help='输出文件名后缀标记，用于替代默认的 _cropped / _covered / '
+                             '_cropcovered。'
                              '例：--flag "_Croped" → abc.mp4 输出为 abc_Croped.mp4。'
                              '仅对工具自动生成的输出名生效（批量模式或 --output 为目录）；'
                              '--output 指定了完整文件名时不改动。')
@@ -3244,15 +3335,32 @@ def main() -> int:
 
     # 验证参数冲突：--crop-ratio 与 --output-width/height 不能同时指定
     has_explicit_size = args.output_width is not None and args.output_height is not None
+    has_any_size = args.output_width is not None or args.output_height is not None
     has_crop_ratio = args.crop_ratio is not None
-    
-    if has_explicit_size and has_crop_ratio:
-        print('[ERROR] --crop-ratio 与 --output-width/--output-height 不能同时指定，请二选一。', file=sys.stderr)
-        return 2
-    
-    if not has_explicit_size and not has_crop_ratio:
-        print('[ERROR] 必须指定 --output-width/--output-height 或 --crop-ratio 其中之一。', file=sys.stderr)
-        return 2
+    is_crop_cover = args.mode == 'crop-cover'
+
+    if is_crop_cover:
+        # crop-cover 是唯一允许 --crop-ratio 与 --output-width/height 并用的模式：
+        # 前者定裁剪比例（未给出时用目标宽高比），后者定缩放后的最终尺寸。
+        #   · 无 --crop-ratio：裁剪比例就来自目标宽高比，两个维度缺一不可；
+        #   · 有 --crop-ratio：比例已定，最终尺寸只需一个维度，另一个按比例推导。
+        if has_crop_ratio:
+            if not has_any_size:
+                print('[ERROR] --mode crop-cover 配合 --crop-ratio 时，'
+                      '还需提供 --output-width 或 --output-height 之一。', file=sys.stderr)
+                return 2
+        elif not has_explicit_size:
+            print('[ERROR] --mode crop-cover 未提供 --crop-ratio 时，'
+                  '必须同时提供 --output-width 和 --output-height。', file=sys.stderr)
+            return 2
+    else:
+        if has_explicit_size and has_crop_ratio:
+            print('[ERROR] --crop-ratio 与 --output-width/--output-height 不能同时指定，请二选一。', file=sys.stderr)
+            return 2
+
+        if not has_explicit_size and not has_crop_ratio:
+            print('[ERROR] 必须指定 --output-width/--output-height 或 --crop-ratio 其中之一。', file=sys.stderr)
+            return 2
 
     # -ref 系列与字面量 --crf/--cq 互斥：两者量纲不同，混用无法判断用户意图
     _refs = [n for n, v in (('--crf-ref', args.crf_ref), ('--cq-ref', args.cq_ref))
@@ -3268,10 +3376,11 @@ def main() -> int:
                 '混用无法确定以哪个为准。请只保留其中一种。', file=sys.stderr)
         return 2
 
-    # 验证显式尺寸（如果指定了）
-    if has_explicit_size:
-        if args.output_width <= 0 or args.output_height <= 0:
-            print('[ERROR] --output-width 和 --output-height 必须为正整数。', file=sys.stderr)
+    # 验证显式尺寸（凡是给出来的维度都必须是正整数）
+    for _opt, _value in (('--output-width', args.output_width),
+                         ('--output-height', args.output_height)):
+        if _value is not None and _value <= 0:
+            print(f'[ERROR] {_opt} 必须为正整数。', file=sys.stderr)
             return 2
 
     # 解析 crop-ratio（如果指定了）
@@ -3284,6 +3393,20 @@ def main() -> int:
         except ValueError as exc:
             print(f'[ERROR] {exc}', file=sys.stderr)
             return 2
+
+    # crop-cover + --crop-ratio：只给了一个维度时，按裁剪比例补全另一个。
+    # 比例即最终画面比例（裁剪后按比例缩放覆盖，不产生黑边或额外裁剪），
+    # 故 width : height == crop_ratio_num : crop_ratio_den。
+    if is_crop_cover and has_crop_ratio and not has_explicit_size:
+        if args.output_width is None:
+            args.output_width = derive_even_dimension(
+                args.output_height * crop_ratio_num / crop_ratio_den)
+        else:
+            args.output_height = derive_even_dimension(
+                args.output_width * crop_ratio_den / crop_ratio_num)
+        print(f'提示：--mode crop-cover 仅给了一个维度，已按裁剪比例 '
+              f'{crop_ratio_num}:{crop_ratio_den} 补全为 '
+              f'{args.output_width}x{args.output_height}。')
 
     if args.crf is not None and not (0 <= args.crf <= 63):
         print('[ERROR] --crf 建议范围为 0-63。', file=sys.stderr)
@@ -3409,12 +3532,18 @@ def main() -> int:
     input_root = input_path if input_path.is_dir() else input_path.parent
 
     # ── 打印任务概览（与 vidcrop_cpu_v2.py 对齐的双分割线结构化块）──
-    mode_label = 'cover（等比缩放+裁剪）' if args.mode == 'cover' else 'crop（居中裁剪）'
+    mode_label = {
+        'cover': 'cover（等比缩放+裁剪）',
+        'crop-cover': 'crop-cover（先裁剪后缩放覆盖）',
+    }.get(args.mode, 'crop（居中裁剪）')
     print(_SEP)
     print(_label('待处理文件') + f'{len(video_files)} 个')
     if has_crop_ratio:
+        # crop-cover 下 --crop-ratio 定的是裁剪比例，最终尺寸另由 --output-* 给出
+        _tail = (f'  最终尺寸: {args.output_width}x{args.output_height}'
+                 if is_crop_cover else '')
         print(_label('处理模式')
-              + f'{mode_label}  自动裁剪比例: {crop_ratio_num}:{crop_ratio_den}')
+              + f'{mode_label}  自动裁剪比例: {crop_ratio_num}:{crop_ratio_den}{_tail}')
     else:
         print(_label('处理模式')
               + f'{mode_label}  目标尺寸: {args.output_width}x{args.output_height}')
@@ -3492,8 +3621,9 @@ def main() -> int:
             if _STOP_REQUESTED.is_set():
                 break
 
-            # 如果使用 --crop-ratio，需要为每个文件单独计算输出尺寸
-            if has_crop_ratio:
+            # crop-ratio 在 crop / cover 模式下决定输出尺寸；crop-cover 模式下它
+            # 只决定裁剪步骤的比例，最终尺寸固定为 --output-width/height。
+            if has_crop_ratio and not is_crop_cover:
                 if args.original_width is not None and args.original_height is not None:
                     src_w, src_h = args.original_width, args.original_height
                 else:
@@ -3538,6 +3668,7 @@ def main() -> int:
                 file_total=len(video_files),
                 flag=args.flag,
                 color_range=args.color_range,
+                crop_ratio=(crop_ratio_num, crop_ratio_den) if has_crop_ratio else None,
                 queue_rest=q_rest,
                 queue_cur=q_cur,
             )

@@ -46,7 +46,12 @@
   — 两裁剪脚本的 NVENC↔x264 表必须一致（曾错位一档：p4→medium/p5→slow，会让同一条 `--preset p5` 落不同档）；
   降级到 CPU 编码器时基准档取"请求的编码器"的默认值再换算；概览块只展示最终命令里真正会出现的参数
   （编码器名取策略链第一条、无 `-preset` 的编码器不展示 preset 字段）；
-  `--codec auto` 必须解析成具体编码器，透传会得到 `-c:v auto` 使 ffmpeg 报 Unknown encoder（曾发生在 cpu_v2）
+  `--codec auto` 必须解析成具体编码器，透传会得到 `-c:v auto` 使 ffmpeg 报 Unknown encoder（曾发生在 cpu_v2）；
+  **`--mode` 的语义/校验/跳过判定也要两边一致**：2026-09-18 同时加了 `crop-cover`
+  （先裁剪再缩放覆盖；无 `--crop-ratio` 必须给全宽高、有则只给一个按比例推导；
+  后缀 `_cropcovered`；比例与源不同时即使同尺寸也不能跳过）；
+  同日又逐字对齐了 17 条校验文案与校验顺序（cpu_v2 的「crop-ratio + 显式尺寸」由
+  「忽略+提示」改为**报错**、量程检查提到 `_resolve_quality_params` 之前）
 
 ---
 

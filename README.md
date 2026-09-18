@@ -64,6 +64,7 @@
 |---|---|---|---|---|
 | 居中裁剪（crop 模式） | ✅ | ✅ | ✅ | ✅ |
 | 等比缩放+居中裁剪（cover 模式） | ✅ | ✅ | ✅ | ✅¹ |
+| 先裁剪后缩放覆盖（crop-cover 模式） | ❌ | ❌ | ✅ | ✅¹ |
 | 单文件 / 目录批量 | ✅ | ✅ | ✅ | ✅ |
 | 递归扫描目录（`-r`） | ✅ | ✅ | ✅ | ✅ |
 | `--crop-ratio` 按比例自动算裁剪尺寸 | ❌ | ❌ | ✅ | ✅ |
@@ -96,7 +97,7 @@
 | `--crf-ref` / `--cq-ref` 统一质量基准 | ❌ | ❌ | ✅ | ✅ |
 | `--fallback-policy` 策略控制 / `--cuda-diagnostics` | ❌ | ❌ | ❌ | ✅ |
 
-> ¹ hwaccel 版 cover 模式始终使用 CPU 侧 `scale,crop` 滤镜，GPU 仅负责解码与编码；`crop_cuda` 全 GPU 流水线（策略 1）仅对 crop 模式启用。
+> ¹ hwaccel 版的 cover / crop-cover 模式始终使用 CPU 侧 `scale,crop` 滤镜，GPU 仅负责解码与编码；`crop_cuda` 全 GPU 流水线（策略 1）仅对 crop 模式启用（后两者都需要 scale 步骤，`crop_cuda` 不支持）。
 > ² `av1_nvenc` 需第 8 代 NVENC（Ada / RTX 40 / L40 及以上），否则自动降级为 `libsvtav1`。
 > ³ v2 可以**使用**硬件编码器（写 `--codec h264_nvenc` 等），但不做硬件探测、也不做硬件解码——解码全程走 CPU。是否可用由 FFmpeg 与驱动自行决定。
 
@@ -282,9 +283,9 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--input` / `--output` | 必选 | 输入 / 输出（文件或目录） |
-| `--output-width` / `--output-height` | 与 `--crop-ratio` 二选一 | 目标视频宽 / 高 |
-| `--crop-ratio` | 无 | 目标宽高比（`16:9` / `4:3` / 浮点 `1.777`），自动算最大化裁剪尺寸 |
-| `--mode` | `crop` | `crop` / `cover` |
+| `--output-width` / `--output-height` | 与 `--crop-ratio` 二选一 | 目标视频宽 / 高；`crop-cover` 模式下配合 `--crop-ratio` 时可只给一个维度（另一个按比例推导，取偶数） |
+| `--crop-ratio` | 无 | 目标宽高比（`16:9` / `4:3` / 浮点 `1.777`），自动算最大化裁剪尺寸；`crop-cover` 模式下与 `--output-width/height` 并用（前者定裁剪比例、后者定最终尺寸） |
+| `--mode` | `crop` | `crop` / `cover` / `crop-cover`（`crop-cover`=先按 `--crop-ratio`（未给出时即目标宽高比）最大化裁剪，再缩放覆盖到最终尺寸） |
 | `--codec` | `libx264` | 视频编码器；支持别名（`vp9`→`libvpx-vp9`、`av1`→`libaom-av1`、`svtav1`→`libsvtav1`、`rav1e`→`librav1e` …）；`auto` 等同 `libx264`（本脚本为纯 CPU 路径，与硬件版的 `auto` 在无 NVENC 时解析结果一致） |
 | `--crf` | `21` | CPU 编码器质量（0–51）；**字面量原样下发，不换算** |
 | `--cq` | `23` | GPU 编码器质量（0–51）；落到 CPU 软编时按等效表换算为 CRF |
@@ -293,7 +294,7 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--preset` | CPU `medium` / GPU `p5` | 支持 x264 风格与 NVENC `p1~p7`，自动双向映射；`libsvtav1` 自动转 0~13 整数档 |
 | `--pix-fmt` | `auto` | 输出像素格式；可填 `none` 禁用 |
 | `--color-range` | `auto` | `tv` / `pc` 强制值域，且与源不同时会插入 scale 滤镜做**真值域转换** |
-| `--flag` | `_cropped` / `_covered` | 自定义输出名后缀（仅对自动生成的输出名生效） |
+| `--flag` | `_cropped` / `_covered` / `_cropcovered` | 自定义输出名后缀（仅对自动生成的输出名生效） |
 | `--audio-codec` / `--audio-bitrate` | `copy` / `128k` | 音频编码；WebM 容器下 `copy` 遇到不兼容音轨会自动换成 `libopus` |
 | `--workers` / `--threads` / `--mem-per-job` | `0`（自动） | 并发控制 |
 | `--sequential` | 否 | 强制顺序执行 |
@@ -328,9 +329,9 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 |---|---|---|
 | `--input` / `--output` | 必选 | 输入 / 输出（文件或目录） |
 | `-r, --recursive` | 否 | 递归扫描输入目录，输出自动镜像原始子目录结构 |
-| `--output-width` / `--output-height` | 与 `--crop-ratio` 二选一 | 目标视频宽 / 高 |
-| `--crop-ratio` | 无 | 目标宽高比，自动算最大化裁剪尺寸 |
-| `--mode` | `crop` | `crop` / `cover`（注¹） |
+| `--output-width` / `--output-height` | 与 `--crop-ratio` 二选一 | 目标视频宽 / 高；`crop-cover` 模式下配合 `--crop-ratio` 时可只给一个维度（另一个按比例推导，取偶数） |
+| `--crop-ratio` | 无 | 目标宽高比，自动算最大化裁剪尺寸；`crop-cover` 模式下与 `--output-width/height` 并用（前者定裁剪比例、后者定最终尺寸） |
+| `--mode` | `crop` | `crop` / `cover` / `crop-cover`（`crop-cover`=先按 `--crop-ratio`（未给出时即目标宽高比）最大化裁剪，再缩放覆盖到最终尺寸）（注¹） |
 | `--original-width/height` | 自动检测 | 手动指定源尺寸，跳过 ffprobe |
 | `--codec` | **`h264_nvenc`** | 支持 `auto`；无 NVENC 时自动降级为 **`libx264`** |
 | `--cq` | **`23`** | GPU 编码器质量（0–51）；字面量原样下发 |
@@ -349,7 +350,7 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--ffmpeg-bin` | `ffmpeg` | 自定义 FFmpeg 路径；ffprobe 自动从同目录推导 |
 | `--dry-run` / `--log` / `--extra-args` | — | 预览 / 日志 / 追加参数 |
 
-> ¹ cover 模式下 `scale,crop` 滤镜在 CPU 侧执行（`crop_cuda` 不支持 scale 步骤），解码与编码仍可走 GPU。
+> ¹ cover / crop-cover 模式下 `scale,crop` 滤镜在 CPU 侧执行（`crop_cuda` 不支持 scale 步骤），解码与编码仍可走 GPU。
 
 ---
 
@@ -864,10 +865,38 @@ python vidcrop_hwaccel.py \
 python vidcrop_cpu_v2.py \
     --input ./videos --output ./out --crop-ratio 16:9
 
+# 先裁剪后缩放覆盖（crop-cover）：按 16:9 最大化裁剪，再缩放覆盖到 1920x1080
+python vidcrop_cpu_v2.py \
+    --input ./videos --output ./out \
+    --mode crop-cover --crop-ratio 16:9 \
+    --output-width 1920 --output-height 1080
+
+# 同上，但只给一个维度（高度按 16:9 自动推导为 720）
+python vidcrop_hwaccel.py \
+    --input ./videos --output ./out \
+    --mode crop-cover --crop-ratio 16:9 --output-width 1280
+
 # 干跑预览实际命令
 python vidcrop_hwaccel.py \
     --input ./videos --output ./out \
     --output-width 1280 --output-height 720 --dry-run
+
+# 列目录时顺带看视频属性（vidls）
+vidls                                  # 当前目录：普通文件多列，视频行带属性
+vidls -l                               # ll 风格
+vidls -lh /path/to/dir                 # 人类可读体积
+vidls -l --show-all                    # 追加像素格式 / 位深 / 音轨 / 字幕 / HDR
+vidls --show frames                    # 加帧数列（默认不算：它是唯一要解码的列）
+vidls --show frames --deep --cpu        # 强制重新数帧，且只走 CPU 档（对拍用）
+vidll                                  # == vidls -l（ll 替代；两个平台都有）
+vidll -h /path/to/dir                  # == vidls -l -h
+
+# Windows 版：命令名与 Linux 一致（装过 --install 之后两边都是 `vidls`）。
+# 仓库目录里可以直接用 vidls.cmd（cmd.exe 会先找当前目录）；Git Bash 里 ./vidls.cmd 也行。
+vidls                                  # 当前目录：普通文件多列，视频行带属性
+vidls -l                               # ll 风格 + 视频属性
+vidls -lh D:\videos                    # 人类可读体积
+vidls --install                        # 自检 + 把 vidls 写进 PATH
 
 # 光流插帧 2x：脱离会话后台跑，日志落盘（4K 素材约 50 分钟 / 半小时）
 setsid bash interp_2x_safe.sh /path/in.mp4 -w /tmp/work \
@@ -918,7 +947,31 @@ python vidcrop_cpu_v2.py \
     --mode cover --workers 4
 ```
 
-### 4. 按比例裁剪（不指定具体尺寸）
+### 4. 先裁剪后缩放覆盖（crop-cover 模式）
+
+```bash
+# 按 16:9 最大化裁剪，再缩放覆盖到 1280x720
+python vidcrop_cpu_v2.py \
+    --input ./clips --output ./out \
+    --mode crop-cover --crop-ratio 16:9 \
+    --output-width 1280 --output-height 720
+
+# --crop-ratio 已定比例：只给一个维度即可（高度按 16:9 自动推导为 720）
+python vidcrop_hwaccel.py \
+    --input ./clips --output ./out \
+    --mode crop-cover --crop-ratio 16:9 --output-width 1280 \
+    --codec hevc_nvenc --cq-ref 22
+```
+
+> 与 `cover` 的区别：`cover` 按**目标**比例缩放再裁（裁掉哪一圈由尺寸比决定）；
+> `crop-cover` 先按 `--crop-ratio` **独立**裁出画面，再缩放覆盖到目标尺寸 ——
+> 想定向"裁掉画面哪一圈"时用后者。不带 `--crop-ratio` 时裁剪比例就是目标宽高比
+> （此时两个维度都必须给）。
+>
+> 整条链是**单次 ffmpeg** 调用（`crop=…,scale=…` 一条滤镜链，逐帧流式通过），
+> 不落中间文件、只编解码一次，因此没有二次有损压缩。
+
+### 5. 按比例裁剪（不指定具体尺寸）
 
 ```bash
 python vidcrop_cpu_v2.py \
@@ -926,7 +979,7 @@ python vidcrop_cpu_v2.py \
     --crop-ratio 16:9 --codec libx264 --crf-ref 21
 ```
 
-### 5. 递归扫描子目录 + 保留目录结构
+### 6. 递归扫描子目录 + 保留目录结构
 
 ```bash
 python vidcrop_hwaccel.py \
@@ -935,7 +988,7 @@ python vidcrop_hwaccel.py \
     --recursive --codec hevc_nvenc --cq-ref 22 --overwrite
 ```
 
-### 6. Linux 服务器 + Intel 核显（VA-API 仅硬解，软件编码）
+### 7. Linux 服务器 + Intel 核显（VA-API 仅硬解，软件编码）
 
 ```bash
 python vidcrop_hwaccel.py \
@@ -944,7 +997,7 @@ python vidcrop_hwaccel.py \
     --codec libx264 --crf-ref 21 --hwaccel vaapi
 ```
 
-### 7. CI / 容器环境（强制禁用所有硬件加速）
+### 8. CI / 容器环境（强制禁用所有硬件加速）
 
 ```bash
 python vidcrop_hwaccel.py \
@@ -953,7 +1006,7 @@ python vidcrop_hwaccel.py \
     --codec libx264 --crf-ref 21 --hwaccel none
 ```
 
-### 8. 网页分发（VP9 / WebM）
+### 9. 网页分发（VP9 / WebM）
 
 ```bash
 # 输出自动为 .webm；若源音轨是 AAC，会自动换成 libopus（WebM 不收 AAC）
@@ -963,7 +1016,7 @@ python vidcrop_cpu_v2.py \
     --codec vp9 --crf-ref 24
 ```
 
-### 9. 长期归档（AV1，极致压缩率）
+### 10. 长期归档（AV1，极致压缩率）
 
 ```bash
 # libsvtav1 比 libaom-av1 快一个数量级，是首选
@@ -973,7 +1026,7 @@ python vidcrop_cpu_v2.py \
     --codec svtav1 --crf-ref 21
 ```
 
-### 10. AV1 硬件编码（需 Ada / RTX 40 / L40 及以上）
+### 11. AV1 硬件编码（需 Ada / RTX 40 / L40 及以上）
 
 ```bash
 # 硬件不支持时自动降级为 libsvtav1 CPU 编码，并打印提示
@@ -983,7 +1036,7 @@ python vidcrop_hwaccel.py \
     --codec av1_nvenc --cq-ref 21
 ```
 
-### 11. 音频重编码
+### 12. 音频重编码
 
 ```bash
 python vidcrop_hwaccel.py \
@@ -993,7 +1046,7 @@ python vidcrop_hwaccel.py \
     --audio-codec aac --audio-bitrate 192k --overwrite
 ```
 
-### 12. 手动并发策略（CPU v2，2 任务 × 4 线程）
+### 13. 手动并发策略（CPU v2，2 任务 × 4 线程）
 
 ```bash
 python vidcrop_cpu_v2.py \
@@ -1002,7 +1055,7 @@ python vidcrop_cpu_v2.py \
     --workers 2 --threads 4
 ```
 
-### 13. 自定义 FFmpeg 构建路径 + 诊断硬解故障
+### 14. 自定义 FFmpeg 构建路径 + 诊断硬解故障
 
 ```bash
 python vidcrop_hwaccel.py \
@@ -1011,7 +1064,7 @@ python vidcrop_hwaccel.py \
     --ffmpeg-bin /opt/ffmpeg-7.0/bin/ffmpeg --cuda-diagnostics
 ```
 
-### 14. 追加自定义 FFmpeg 参数
+### 15. 追加自定义 FFmpeg 参数
 
 ```bash
 python vidcrop_cpu_v2.py \
@@ -1020,7 +1073,7 @@ python vidcrop_cpu_v2.py \
     --extra-args -- -max_muxing_queue_size 4096
 ```
 
-### 15. 带日志归档的批量任务
+### 16. 带日志归档的批量任务
 
 ```bash
 python vidcrop_cpu_v2.py \
@@ -1233,6 +1286,8 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 | 无 VP9 硬件编码 | FFmpeg 从未提供 `vp9_nvenc`；VP9 硬编只有 `vp9_qsv` / VA-API | VP9 走 CPU 编码（可配硬解） |
 | `av1_nvenc` 需新卡 | 第 8 代 NVENC（Ada / RTX 40 / L40+）才有；Turing / Ampere 没有 | 自动降级 `libsvtav1` |
 | `crop_cuda` 缺失 | FFmpeg 6.1 未编译该滤镜，全 GPU 流水线（策略 1）始终跳过 | 仍走"硬解 + CPU 裁剪 + NVENC 硬编"；代价是**吞吐对 CPU 敏感**，见 [FAQ Q13](#常见问题faq) |
+| `--crop-ratio` + **只给一个**维度（非 crop-cover） | 互斥判据是"两个维度都给才算同时指定"，只给一个不算 → 那个维度被**静默忽略**（`--mode crop --crop-ratio 16:9 --output-width 320` 里 `320` 不生效）。两个脚本行为一致 | 按比例裁剪就别给尺寸；要指定最终尺寸用 `--mode crop-cover`（该模式明确支持单维度） |
+| hwaccel 不校验 `--original-width/height` | 只有 `vidcrop_cpu_v2.py` 校验正整数；hwaccel 传负值会一路带进尺寸计算 | 手填源尺寸时自己保证为正；不确定就用默认的 ffprobe 探测 |
 | `librav1e` 无 `-crf` | 编码器本身只支持 `-qp` | 脚本自动换算（实测标定） |
 | `h264_nvenc` 无 10bit | NVENC H.264 只做 8bit | 自动降 8bit 保硬件；需 10bit 用 `hevc_nvenc` / `av1_nvenc` |
 | 脚本依赖 `convert_crf.py` | 两个裁剪脚本运行时 import 同目录该文件 | 拷贝时一并带上 |
@@ -1269,13 +1324,15 @@ VidUtils 规划作为一个**命令行优先 / Python 原生**的视频工程工
 |---|---|---|
 | `vidcrop_cpu_v0.py` | ✅ 已发布 | CPU 顺序裁剪（crop + cover） |
 | `vidcrop_cpu_v1.py` | ✅ 已发布 | CPU 并发裁剪（crop + cover，自动并行） |
-| `vidcrop_cpu_v2.py` | ✅ 已发布 | CPU 并发裁剪增强版（AV1/VP9、别名、preset 映射、`-ref` 基准、crop-ratio、color-range） |
-| `vidcrop_hwaccel.py` | ✅ 已发布 | 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL，5 级策略链） |
+| `vidcrop_cpu_v2.py` | ✅ 已发布 | CPU 并发裁剪增强版（AV1/VP9、别名、preset 映射、`-ref` 基准、crop-ratio、crop-cover、color-range） |
+| `vidcrop_hwaccel.py` | ✅ 已发布 | 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL，5 级策略链；三种模式 crop / cover / crop-cover，CLI 与 v2 逐字对齐） |
 | `convert_crf.py` | ✅ 已发布 | 质量换算单一事实来源 |
 | `interp_2x_safe.sh` | ✅ 已发布 | 光流插帧 2x **GPU 专版**（`nvinterpolate` + `hevc_nvenc`，**无 CPU 回退**；**cgroup 感知的环境自动探测** + **分片级并行 `-j`** + **时间段截取 `--SS/--TO/-T`** + `setsid` + TS 分片 + 断点恢复 + 单实例锁） |
 | `interp_2x_safe_v1.sh` | ✅ 已发布 | 同上的**通用版**：多一条 CPU 回退后端（`minterpolate` + `libx265`）与 `--backend` / `--cpu-preset`；其余特性（环境探测 / `-j` / `--SS/--TO/-T`）与 GPU 专版一致，两者的 `recipe.txt` 兼容、可互相接管分片目录 |
 | `test_interp_2x_lock.sh` | ✅ 已发布 | 上面两版的回归测试（单实例锁 / 并发安全，退出码 0/1/2），默认 `SUT` 为 `interp_2x_safe.sh` |
 | `test_interp_2x_orphan.sh` | ✅ 已发布 | 上面两版的回归测试（中断收尾 / 孤儿 ffmpeg 自愈，退出码 0/1/2），默认 `SUT` 为 `interp_2x_safe.sh` |
+| `vidls.sh` + `vidls.py`（另有 `vidll.sh`） | ✅ 已发布 | `ls` / `ll` 替代品（`vidll` == `vidls -l`）：非视频按原生 `ls` 版式（实测逐字节一致），视频追加分辨率 / 帧率 / 比特率 / 编码器 / 容器 / 时长（帧数为可选列 `--show frames`）；帧数四级降级链（包头 → 硬解 → 包数 → 估算）+ cgroup 感知的自动并行 + `--install` 自检装机 |
+| `vidls.cmd` + `vidls_win.py`（另有 `vidll.cmd`） | ✅ 已发布 | 上面的 Windows 移植（Linux 版原样保留、两者互不 import）：非视频版式在 Git Bash 下与 coreutils ls 8.32 **逐字节一致**（1040 组随机布局实测）+ 同样的四级降级链 + 控制台编码自适应 + 写启动器进 PATH 的 `--install` |
 | `vidscale_*.py` | 🚧 规划中 | 视频缩放：双三次 / Lanczos / `scale_cuda` / `scale_npp` |
 | `vidrepair_*.py` | 🚧 规划中 | 视频修复：容器修复、损坏帧跳过、时间戳重建、丢帧补偿 |
 | `videnhance_*.py` | 🚧 规划中 | 视频增强：去噪、锐化、去隔行、HDR→SDR、AI 超分接入 |
@@ -1378,9 +1435,32 @@ vidutils/
 
 无 GPU 或批量 CPU 处理 → **v2**（功能最全，v1 的超集）；有 NVIDIA / AMD / Intel GPU、追求吞吐 → **hwaccel**；要对照历史行为 → v0 / v1。v2 与 hwaccel 功能基本对齐（cover、递归、音频重编码、dry-run、日志、extra-args、`-ref` 基准均支持），区别在是否有硬件解码与策略链。
 
-**Q2：hwaccel 版的 cover 模式与 crop 模式有什么区别？**
+**Q2：crop / cover / crop-cover 三种模式有什么区别？**
 
-cover 模式使用 `scale,crop` 组合滤镜，该滤镜在 CPU 侧执行（`crop_cuda` 无法替代 `scale`），GPU 仍负责解码与编码。全 GPU 流水线（策略 1，`crop_cuda`）仅对 crop 模式启用，cover 模式从策略 2 开始尝试。
+| 模式 | 滤镜链 | 目标尺寸限制 |
+|---|---|---|
+| `crop`（默认） | `crop=W:H:x:y` | 目标不得大于源尺寸 |
+| `cover` | `scale=…,crop=W:H`（先缩放再居中裁剪） | 任意尺寸，比例按目标算 |
+| `crop-cover` | `crop=…,scale=…`（先裁剪再缩放覆盖） | 任意尺寸，裁剪比例由 `--crop-ratio` 单独决定 |
+
+`crop-cover` 与 `cover` 的区别是**裁剪比例可以独立于最终尺寸**：`--crop-ratio` 定裁剪比例，
+`--output-width/height` 定缩放后的最终尺寸。因此该模式下两者可以并用，且**只给一个维度即可**
+（另一个按比例推导为偶数）：
+
+```bash
+# 两种写法等价（结果都是按 16:9 裁剪后缩放到 1280x720）
+--mode crop-cover --crop-ratio 16:9 --output-width 1280 --output-height 720
+--mode crop-cover --crop-ratio 16:9 --output-width 1280
+
+# 不给 --crop-ratio 时裁剪比例就是目标宽高比，两个维度都必须给
+--mode crop-cover --output-width 1280 --output-height 720
+```
+
+`cover` / `crop-cover` 都使用 `scale,crop` 组合滤镜，该滤镜在 CPU 侧执行（`crop_cuda` 无法替代 `scale`），
+GPU 仍负责解码与编码。全 GPU 流水线（策略 1，`crop_cuda`）仅对 `crop` 模式启用，后两者从策略 2 开始尝试。
+
+另外 `crop-cover` 的同尺寸跳过判定会先看裁剪步骤是否为空操作：裁剪比例与源比例不同时，
+即使最终尺寸等于源尺寸也会改变画面，因此**不会**被跳过（`--no-skip-same-size` 可强制转码）。
 
 **Q3：为什么硬件加速版探测阶段要真的跑一遍 FFmpeg？**
 

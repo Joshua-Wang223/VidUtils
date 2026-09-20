@@ -2640,12 +2640,17 @@ _DECODE_SW_FRAME_BACKENDS = ('vulkan', 'vaapi', 'opencl')
 def _decode_hwaccel(decode: str, hw_caps: HardwareCapabilities) -> Optional[str]:
     """解码轴 → `-hwaccel` 的实际取值（None = 软解、不下发）。
 
-    auto → 'auto'（保持现状：交给 ffmpeg 自己挑）；cpu → None；其余后端不可用时
-    也退化为 None —— 要不要因为这次「够不到」而报错，由上层按 --fallback-policy 决定，
-    这一层只负责给出「实际能用哪个」。
+    **`auto` 与 `--scale-algo auto` 是同一套逻辑：先探测、再定，探测不到就降级 cpu。**
+    也就是不再把 `-hwaccel auto` 丢给 ffmpeg 让它自己试——那样"实际用了什么"我们并不
+    知道，概览块也报不出确定答案。现在：探测到可用的硬解就给**那个具体后端**，
+    一个都没有就明确走软解（不下发 `-hwaccel`），与 `--scale-algo auto` 的
+    「优先 cuda、失败回退 cpu」对称。
+
+    顺序沿用既有的 `_select_best_hwaccel()`：CUDA > Vulkan > VA-API > OpenCL。
+    `auto` 不是显式请求，所以探测不到时只是降级，不算"够不到"（不触发 strict 报错）。
     """
     if decode == 'auto':
-        return 'auto'
+        return _select_best_hwaccel(hw_caps)
     if decode == 'cpu':
         return None
     return decode if hw_caps.has_hwaccel(decode) else None
@@ -2806,9 +2811,10 @@ def _generate_strategies(
             })
 
     # ── 策略 2：解码轴后端 + NVENC 编码（CPU 侧 vf 滤镜）──
-    # 这里不再硬写 'auto'：显式 --decode cuda 就该拿到 -hwaccel cuda。
+    # 不再硬写 'auto'：auto 由 _decode_hwaccel() 按探测结果解析成具体后端（或软解），
+    # 显式 --decode cuda 也就真拿到 -hwaccel cuda。
     if is_nvenc and nvenc_available:
-        if decode_hw == 'auto':
+        if decode == 'auto':
             _n2 = '自动硬件解码 + GPU 编码'          # 默认路径的字面量，保持不变
         elif decode_hw is None:
             _n2 = '软件解码 + GPU 编码'
@@ -3711,6 +3717,9 @@ def parse_args() -> argparse.Namespace:
 三个正交轴（互不干涉，可任意组合）：
   --decode auto/cuda/vulkan/vaapi/opencl/cpu
                     只决定「帧在哪解出来」（默认 auto）。
+                    auto 与 --scale-algo auto 同一套逻辑：**先探测再定** ——
+                    探测到可用硬解就给那个具体后端（CUDA > Vulkan > VA-API > OpenCL），
+                    一个都没有就降级 cpu（不下发 -hwaccel）。
                     cpu=纯软解，但不影响编码与缩放：--decode cpu --codec h264_nvenc
                     = 软解 + NVENC 硬编；--decode cpu --scale-algo cuda-lanczos
                     = 软解 + 显存内缩放（自动加 hwupload_cuda）。
@@ -3849,7 +3858,9 @@ preset 映射（NVENC ↔ libx264 自动转换）：
     # 解码轴（只管解码；编码看 --codec，缩放看 --scale-algo，三者互不干涉）
     parser.add_argument('--decode', type=_decode_value, default='auto', metavar='BACKEND',
                         help='硬件解码后端（默认 auto）：auto / cuda / vulkan / vaapi / '
-                             'opencl / cpu。cpu=纯软解，但**不影响** --codec 与 '
+                             'opencl / cpu。auto 与 --scale-algo auto 同逻辑：先探测，'
+                             '可用则给那个具体后端（CUDA > Vulkan > VA-API > OpenCL），'
+                             '都不可用则降级 cpu。cpu=纯软解，但**不影响** --codec 与 '
                              '--scale-algo（这两轴仍可走 GPU）；旧值 none 等价于 cpu。'
                              '注意 --decode cpu 不再等于「纯 CPU」——要纯 CPU 请用'
                              ' --decode cpu --scale-algo libswscale-lanczos --codec libx264')
@@ -4230,9 +4241,9 @@ def main() -> int:
         if _want_hw == 'cpu':
             _dec_desc = '软件（--decode cpu；只关解码，编码/缩放仍可能走 GPU）'
         elif _eff_hw is None:
-            _dec_desc = ('软件（无可用硬解）' if _want_hw == 'auto'
+            _dec_desc = ('软件（auto 探测无可用硬解，已降级 cpu）' if _want_hw == 'auto'
                          else f'软件（--decode {_want_hw} 不可用，已降级）')
-        elif _eff_hw == _want_hw or _eff_hw == 'auto':
+        elif _eff_hw == _want_hw:
             _dec_desc = _want_hw
         else:
             _dec_desc = f'{_want_hw} → {_eff_hw}'

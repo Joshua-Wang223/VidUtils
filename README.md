@@ -1159,12 +1159,16 @@ python vidcrop_cpu_v2.py \
 
 | 值 | 行为 |
 |---|---|
-| `auto`（默认） | 按策略链自动选择硬解后端；不可用时降级为软解 |
-| `cuda` | 走 CUDA 硬解；不可用时按 `--fallback-policy` 处理（`auto` 降级 / `strict` 报错） |
+| `auto`（默认） | **先探测再定**（与 `--scale-algo auto` 同一套逻辑）：探测到可用硬解就给那个具体后端（顺序 CUDA > Vulkan > VA-API > OpenCL）；一个都没有就降级 `cpu`、不下发 `-hwaccel`。`auto` 不是显式请求，所以探测不到只是降级、不触发 `strict` 报错 |
+| `cuda` | 强制 CUDA 硬解；不可用时按 `--fallback-policy` 处理（`auto` 降级 + 提示 / `strict` 报错退出 2） |
 | `vulkan` / `vaapi` / `opencl` | 用对应后端做硬解；产出的仍是软件帧，因此可与 `--scale-algo cuda-*`（走 `hwupload_cuda`）或任意编码器组合 |
 | `cpu` | 纯软解。**不影响** `--codec` 与 `--scale-algo` |
 
 > 旧名 `--hwaccel` 已**硬更名**为 `--decode`：用旧名会直接报错退出 2，并在提示里给出等价的 `--decode` 写法。
+>
+> `auto` 不会再下发 `-hwaccel auto` 让 ffmpeg 自己试 —— 那样「实际用了什么」脚本是不
+> 知道的，概览块也报不出确定答案。现在探测说了算，概览块的「解码」行会直接给出
+> `auto → cuda` 或「软件（auto 探测无可用硬解，已降级 cpu）」。
 
 **`--fallback-policy` 参数语义：**
 

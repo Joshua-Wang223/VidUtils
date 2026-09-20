@@ -57,9 +57,13 @@ type: project
 
 **How to apply:**
 - 再加任何"后端选择"类参数时，先问它属于哪个轴；**不要**让新参数顺带改变别的轴的行为。
-- 改 `--decode` 的判定或 `_decode_hwaccel()` 时注意：`auto → 'auto'`（字面量必须保持，默认路径
-  靠它逐字不变）、`cpu → None`、其余后端不可用时也退化为 `None`（**报不报错交给
-  `--fallback-policy`**，这一层只负责"实际能用哪个"）。
+- 改 `--decode` 的判定或 `_decode_hwaccel()` 时注意：**`auto` 与 `--scale-algo auto` 是同一套
+  逻辑 —— 先探测、再定**（`auto` → `_select_best_hwaccel()` 给具体后端，一个都没有 → `None`
+  即软解）。**不要退回成下发 `-hwaccel auto` 让 ffmpeg 自己试**：那样"实际用了什么"脚本不知道、
+  概览块也报不出确定答案（2026-09-20 用户专门提过这条）。
+- 承上：`_decode_hwaccel()` 的返回值**永远不会是字面量 `'auto'`**；策略 2 的策略名因此要
+  按**请求的**轴值取（`decode=='auto'` → 名字保持 '自动硬件解码 + GPU 编码' 不变），
+  否则默认路径的输出会变。
 - `scale_backend == 'auto'` 的判据里 **NVENC 门必须保留**（否则 `--codec libx264` 会在有硬解的
   机器上凭空多出一条 CUDA 缩放链，破坏"默认行为逐字不变"）；只有显式 `cuda-*` 才放宽成
   "任何编码器都能接"。

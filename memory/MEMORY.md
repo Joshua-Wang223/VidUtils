@@ -52,6 +52,16 @@
   后缀 `_cropcovered`；比例与源不同时即使同尺寸也不能跳过）；
   同日又逐字对齐了 17 条校验文案与校验顺序（cpu_v2 的「crop-ratio + 显式尺寸」由
   「忽略+提示」改为**报错**、量程检查提到 `_resolve_quality_params` 之前）
+- [cover 的 CUDA 缩放：实测数据与两条硬约束](project_cuda_scale_cover.md)
+  — 2026-09-20 给 `vidcrop_hwaccel.py` 的 cover 加了「`scale_cuda` + 显式 `hwdownload` + CPU crop」
+  策略：真实 4K→1440x1080 实测 **23.11s → 12.83s（快 44.5%）**，CPU 侧 `scale` 占 17.2%
+  （合成 testsrc2 测不出差异，只有 0.2%——收益是内容相关的）；
+  **必须显式写 `hwdownload,format=…`**：靠 FFmpeg 自动插入时 `crop` 会被**静默丢弃**
+  （`scale_cuda=1280:720,crop=iw/2:ih/2` 输出 1280x720 而非 640x360，无任何报错）；
+  **`crop_cuda` 在上游并不存在**（不是"6.1 未编译"）→ 策略 1 实际永远跳过、crop 只能在 CPU；
+  `crop-cover` 不纳入（要先裁剪，GPU 缩放需额外 `hwupload`）；
+  顺带修掉 `_src_download_fmt` 返回非法 pix_fmt 名（`p010`/`p012` → `p010le`/`p012le`），
+  该 bug 此前因唯一调用路径不可达而没暴露；**质量门（PSNR/VMAF）尚未在 T4 上跑**
 
 ---
 

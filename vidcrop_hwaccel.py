@@ -30,17 +30,21 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
 硬件加速
 ────────────────────────────────────────────────────────────────────
   • 运行时探测（非编译字符串匹配）下列能力：
-        CUDA 解码、h264_nvenc、hevc_nvenc、crop_cuda 滤镜、
+        CUDA 解码、h264_nvenc、hevc_nvenc、crop_cuda / scale_cuda 滤镜、
         Vulkan、VA-API、OpenCL
   • 按优先级自动生成策略链并依次尝试，前一级失败自动降级：
-        1) CUDA 全流水线（硬解 + crop_cuda + NVENC 硬编）—— 仅 crop 模式
-        2) 自动硬解 + NVENC 硬编（CPU 做 vf 滤镜）
-        3) 指定硬解（cuda/vulkan/vaapi/opencl）+ 软件编码
-        4) auto 模式下的最佳硬解 + 软件编码
-        5) 纯 CPU 处理
+        1) CUDA 全流水线（硬解 + crop_cuda + NVENC 硬编）—— 仅 crop 模式。
+           注意 crop_cuda 在 FFmpeg 上游并不存在（与编译选项无关），
+           所以这条在本项目所有环境下都会跳过
+        2) CUDA 缩放 + CPU 裁剪（硬解 + scale_cuda + 显式 hwdownload + CPU crop
+           + NVENC 硬编）—— 仅 cover 模式；crop 只能回 CPU，因为 crop_cuda 不存在
+        3) 自动硬解 + NVENC 硬编（CPU 做 vf 滤镜）
+        4) 指定硬解（cuda/vulkan/vaapi/opencl）+ 软件编码
+        5) auto 模式下的最佳硬解 + 软件编码
+        6) 纯 CPU 处理
 
-        注：cover / crop-cover 模式因需要 scale 步骤，自动跳过策略 1
-            （crop_cuda 不支持缩放）。
+        注：crop 模式从第 1 条起、cover 从第 2 条起、crop-cover 从第 3 条起
+            （crop-cover 要先裁剪，GPU 缩放得额外 hwupload 一次，未纳入）。
 
 编码器智能处理
 ────────────────────────────────────────────────────────────────────
@@ -464,6 +468,7 @@ def _save_hw_cache(caps: 'HardwareCapabilities', ffmpeg_version: str = '') -> No
             'hevc_nvenc': caps.has_encoder_hevc,
             'av1_nvenc': caps.has_encoder_av1,
             'crop_cuda': caps.has_crop_cuda,
+            'cuda_scale': caps.has_cuda_scale,
             'vulkan': caps.has_vulkan,
             'vaapi': caps.has_vaapi,
             'opencl': caps.has_opencl,
@@ -487,6 +492,7 @@ class HardwareCapabilities:
         self.has_encoder_hevc  = False
         self.has_encoder_av1   = False
         self.has_crop_cuda     = False
+        self.has_cuda_scale    = False
         self.has_vulkan        = False
         self.has_vaapi         = False
         self.has_opencl        = False
@@ -511,6 +517,14 @@ class HardwareCapabilities:
         """全 GPU 流水线：硬解 + crop_cuda + NVENC 编码（仅 crop 模式可用）。"""
         return self.has_decoder and self.has_crop_cuda and self.has_nvenc(codec)
 
+    def can_cuda_scale(self, codec: str) -> bool:
+        """CUDA 缩放流水线：硬解 + scale_cuda + NVENC 编码（仅 cover 模式）。
+
+        只把【缩放】留在显存里，裁剪仍回 CPU——crop_cuda 在 FFmpeg 上游并不存在，
+        所以链路必然是 scale_cuda → hwdownload → crop（一次下载，与现状次数相同）。
+        """
+        return self.has_decoder and self.has_cuda_scale and self.has_nvenc(codec)
+
     def has_hwaccel(self, hwaccel_type: str) -> bool:
         return {
             'cuda':   self.has_decoder,
@@ -526,6 +540,7 @@ class HardwareCapabilities:
             ('hevc_nvenc', self.has_encoder_hevc,  'has_encoder_hevc'),
             ('av1_nvenc',  self.has_encoder_av1,   'has_encoder_av1'),
             ('crop_cuda',  self.has_crop_cuda,     'has_crop_cuda'),
+            ('scale_cuda', self.has_cuda_scale,    'has_cuda_scale'),
             ('Vulkan',     self.has_vulkan,         'has_vulkan'),
             ('VA‑API',     self.has_vaapi,          'has_vaapi'),
             ('OpenCL',     self.has_opencl,         'has_opencl'),
@@ -859,11 +874,16 @@ def detect_cuda_capabilities(ffmpeg_bin: str = 'ffmpeg',
                 capture_output=True, text=True, timeout=10,
                 env=_ffmpeg_env(),
             )
-            caps.has_crop_cuda = 'crop_cuda' in r.stdout
+            _flist = r.stdout or ''
+            caps.has_crop_cuda = 'crop_cuda' in _flist
+            caps.has_cuda_scale = 'scale_cuda' in _flist
         except Exception:
             caps.has_crop_cuda = False
+            caps.has_cuda_scale = False
         caps._mark_detected('has_crop_cuda')
         print(f"  crop_cuda:  {'可用 ✓' if caps.has_crop_cuda else '不可用 ✗'}")
+        caps._mark_detected('has_cuda_scale')
+        print(f"  scale_cuda: {'可用 ✓' if caps.has_cuda_scale else '不可用 ✗'}")
 
     if detect_vulkan:
         print('  Vulkan:     ', end='', flush=True)
@@ -883,18 +903,22 @@ def detect_cuda_capabilities(ffmpeg_bin: str = 'ffmpeg',
         caps._mark_detected('has_opencl')
         print('可用 ✓' if caps.has_opencl else '不可用 ✗')
 
-    # 只打 ✓/✗ 分不清"本机不支持"和"根本没这个能力"，这里对两类高频问号给出
+    # 只打 ✓/✗ 分不清"本机不支持"和"根本没这个能力"，这里对高频问号给出
     # 原因与真实影响，省得误判成脚本故障：
     #   · av1_nvenc —— 7 代 NVENC（Turing/T4）无 AV1 编码器，属硬件限制，无法修复；
-    #   · crop_cuda —— FFmpeg 6.1 根本没有该滤镜（只有 CPU 侧 crop），
-    #                  故"全 GPU 流水线"在官方构建上必然跳过。
+    #   · crop_cuda —— **该滤镜在 FFmpeg 上游并不存在**（不是"没编译"），
+    #                  所以 crop 模式的全 GPU 流水线（策略 1）永远跳过；
+    #   · scale_cuda —— 自建（--enable-cuda-nvcc）才有，cover 的 CUDA 缩放策略依赖它。
     _notes: List[str] = []
     if detect_cuda and not caps.has_encoder_av1:
         _notes.append('av1_nvenc 不可用：AV1 硬编需 8 代 NVENC（Ada / RTX 40 / L40 及以上）；'
                       '--codec av1_nvenc 会自动降级为 libsvtav1 CPU 编码')
     if detect_cuda and not caps.has_crop_cuda:
-        _notes.append('crop_cuda 不可用：当前 FFmpeg 无此滤镜（6.1 只有 CPU 侧 crop），'
-                      '全 GPU 流水线跳过；仍可走「硬解 + CPU 裁剪 + NVENC 硬编」')
+        _notes.append('crop_cuda 不可用：该滤镜在 FFmpeg 上游并不存在（与编译选项无关），'
+                      'crop 模式的全 GPU 流水线跳过；实际走「硬解 + CPU 裁剪 + NVENC 硬编」')
+    if detect_cuda and not caps.has_cuda_scale:
+        _notes.append('scale_cuda 不可用：cover 模式的「CUDA 缩放 + CPU 裁剪」策略跳过，'
+                      '退回「硬解 + CPU 缩放裁剪 + NVENC 硬编」（需 --enable-cuda-nvcc 的自建 FFmpeg）')
     if _notes:
         print('  ── 说明 ──')
         for _n in _notes:
@@ -1837,8 +1861,8 @@ def build_range_convert_filter(meta: Optional[Dict], color_range: Optional[str],
 
     只在「显式强制 --color-range tv/pc」且「与源实际 range 不同」时才需要转换。
     auto / 未指定 / 与源相同 时不插入任何滤镜，零额外开销。
-    scale 是 CPU 滤镜，链首若是 crop_cuda 等 CUDA 原生滤镜则无法直接接在后面，
-    此时返回 None 并告警（避免生成必然失败的命令）。
+    scale 是 CPU 滤镜，链首若是 crop_cuda / scale_cuda 等 CUDA 原生滤镜则无法直接
+    接在后面，此时返回 None 并告警（避免生成必然失败的命令）。
 
     Returns:
         scale 滤镜字符串；无需转换或无法转换时返回 None。
@@ -1850,8 +1874,8 @@ def build_range_convert_filter(meta: Optional[Dict], color_range: Optional[str],
         return None
     if vf_first_filter and vf_first_filter in _CUDA_NATIVE_FILTERS:
         if warn:
-            warn('CUDA 原生滤镜链路（crop_cuda 等）不支持插入 CPU 端 scale 做 '
-                 'range 转换，已跳过转换（仅改标签）')
+            warn('CUDA 原生滤镜链路（scale_cuda / crop_cuda）不在中途做 CPU 端 '
+                 'scale，无法插入 range 转换，已跳过（color_range 只改标签）')
         return None
     if warn:
         warn(f'color_range 由源 {src} 转换为 {tgt}（插入 scale 滤镜做实际值域转换）')
@@ -2042,6 +2066,50 @@ def _build_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int) -> s
         return f'scale={dst_w}:-2,crop={dst_w}:{dst_h}:0:(ih-{dst_h})/2'
 
 
+def _build_cover_cuda_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
+                                 download_fmt: str) -> str:
+    """
+    生成 cover 模式的 CUDA 缩放链：scale_cuda → hwdownload,format=… → crop。
+
+    几何与 CPU 侧 _build_cover_filter_str 完全一致，只把重采样搬到显存：
+      源更宽   → 先按高度缩放（宽按比例取偶），再左右居中裁剪
+      源更高   → 先按宽度缩放（高按比例取偶），再上下居中裁剪
+      比例相同 → 只缩放、不裁剪
+
+    两处刻意的选择：
+
+    · **显式写 hwdownload,format=…**，不依赖 FFmpeg 自动插入。实测（2026-09-20，
+      T4）自动插入那条路下 crop 会被静默丢弃：scale_cuda=1280:720,crop=iw/2:ih/2
+      实际输出 1280x720 而不是 640x360——尺寸合法、无任何报错，画面却是错的。
+    · **中间尺寸在 Python 侧算成偶数**，不吃 scale_cuda 的 -2 取偶语义；
+      interp_algo 显式钉 lanczos（scale_cuda 的 interp_algo 默认值是 0、未映射到
+      具名档，而 CPU 侧 scale 默认是 bicubic，不指定会得到与预期不符的画质）。
+    """
+    sc = f'scale_cuda={dst_w}:{dst_h}:interp_algo=lanczos'
+    dl = f'hwdownload,format={download_fmt}'
+    if src_w <= 0 or src_h <= 0:
+        return f'{sc},{dl}'
+
+    src_ratio = src_w / src_h
+    dst_ratio = dst_w / dst_h
+
+    if abs(src_ratio - dst_ratio) < 1e-3:
+        # 比例完全一致：只缩放不裁剪
+        return f'{sc},{dl}'
+    if src_ratio > dst_ratio:
+        # 源比目标更宽：以高度为基准缩放，左右裁剪
+        sw = derive_even_dimension(src_w * dst_h / src_h)
+        sh = dst_h
+        crop = f',crop={dst_w}:{dst_h}:(iw-{dst_w})/2:0'
+    else:
+        # 源比目标更高（或更窄）：以宽度为基准缩放，上下裁剪
+        sw = dst_w
+        sh = derive_even_dimension(src_h * dst_w / src_w)
+        crop = f',crop={dst_w}:{dst_h}:0:(ih-{dst_h})/2'
+    return (f'scale_cuda={sw}:{sh}:interp_algo=lanczos,'
+            f'hwdownload,format={download_fmt}{crop}')
+
+
 def _build_crop_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
                                  crop_ratio: Optional[Tuple[int, int]] = None) -> str:
     """
@@ -2064,21 +2132,31 @@ def _build_crop_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
 
 def build_video_filter(mode: str, src_w: int, src_h: int, dst_w: int, dst_h: int,
                        use_cuda: bool = False,
-                       crop_ratio: Optional[Tuple[int, int]] = None) -> str:
+                       crop_ratio: Optional[Tuple[int, int]] = None,
+                       cuda_scale: bool = False,
+                       src_bits: int = 8) -> str:
     """
     根据 mode 生成对应的 FFmpeg 视频滤镜字符串。
 
     mode='crop': 直接居中裁剪，use_cuda=True 时使用 crop_cuda（全 GPU 流水线专用）。
-    mode='cover': 等比缩放+裁剪，始终使用 CPU 侧滤镜（忽略 use_cuda 参数）。
-                  cover 需要 scale 步骤，crop_cuda 不支持，调用方已在策略生成阶段
-                  排除了全 GPU 流水线（策略 1），此处 use_cuda 永远为 False。
+    mode='cover': 等比缩放+裁剪。
+                  cuda_scale=True 时走「CUDA 缩放 + CPU 裁剪」（scale_cuda →
+                  显式 hwdownload,format=… → crop），需要 -hwaccel_output_format cuda；
+                  否则用 CPU 侧 scale（此时忽略 use_cuda：crop_cuda 不是 scale 的替代品）。
     mode='crop-cover': 先按 crop_ratio（未给出时即目标宽高比 dst_w:dst_h）最大化
-                  居中裁剪，再把裁剪结果等比缩放覆盖到 dst_w×dst_h。同样含 scale
-                  步骤，故与 cover 一样只用 CPU 侧滤镜。
+                  居中裁剪，再把裁剪结果等比缩放覆盖到 dst_w×dst_h。含两步变换，
+                  不走 CUDA 缩放链（要先裁剪 → GPU 缩放需额外 hwupload，未实测）。
 
     Args:
         crop_ratio: (分子, 分母)，crop-cover 的裁剪步骤所用比例；None 时用目标宽高比。
+        cuda_scale: 是否使用 scale_cuda 做缩放（仅 cover 模式；cover 之外传 True 报错）。
+        src_bits:   源位深，决定 hwdownload 的下载格式（8bit→nv12，10bit→p010le）。
     """
+    if cuda_scale:
+        if mode != 'cover':
+            raise ValueError('CUDA 缩放链（scale_cuda）目前只支持 cover 模式')
+        return _build_cover_cuda_filter_str(src_w, src_h, dst_w, dst_h,
+                                            _src_download_fmt(src_bits))
     if mode == 'cover':
         return _build_cover_filter_str(src_w, src_h, dst_w, dst_h)
     if mode == 'crop-cover':
@@ -2324,6 +2402,7 @@ def _generate_strategies(
         hwaccel               None / 'auto' / 'cuda' 等
         hwaccel_output_format None / 'cuda'
         use_hw_filter         是否使用 crop_cuda 滤镜（仅 crop 模式 + 全 GPU 流水线）
+        cuda_scale            是否使用 scale_cuda 做缩放（仅 cover 模式的 CUDA 缩放链）
         codec                 实际编码器名称
         fallback              是否为降级策略
     """
@@ -2354,6 +2433,33 @@ def _generate_strategies(
             'hwaccel':               'cuda',
             'hwaccel_output_format': 'cuda',
             'use_hw_filter':         True,
+            'codec':                 preferred_codec,
+            'fallback':              False,
+        })
+
+    # ── 策略 1b：CUDA 缩放 + CPU 裁剪（仅 cover 模式）──
+    # 为什么不是全 GPU：crop_cuda 在 FFmpeg 上游不存在（不是编译选项问题），
+    # 所以 crop 只能回 CPU，链路必然是 scale_cuda → hwdownload → crop ——
+    # 下载次数与现状相同（1 次），省掉的是 CPU 侧的重采样。
+    #
+    # 实测依据（2026-09-20，T4 + 自建 7.1，4K→1440x1080 覆盖链，-f null 去 IO）：
+    #   现行「硬解+CPU scale+crop+NVENC」23.11s  →  本策略 12.83s，快 44.5%；
+    #   CPU 侧 scale 单独成本从 4.03s（占现行 17.2%）降到 0。
+    #   同轮判据：scale_cuda 之后若依赖 FFmpeg【自动插入】的 hwdownload，
+    #   crop 会被静默丢弃（实测 scale_cuda=1280:720,crop=iw/2:ih/2 输出 1280x720
+    #   而不是 640x360）→ 所以链里必须显式写 hwdownload,format=...
+    #
+    # crop-cover 不纳入：它必须先裁剪，GPU 缩放要额外 hwupload 一次，未实测。
+    if (hw_mode != 'none'
+            and mode == 'cover'
+            and is_nvenc
+            and hw_caps.can_cuda_scale(preferred_codec)):
+        strategies.append({
+            'name':                  'CUDA 缩放 + CPU 裁剪（显存内缩放）',
+            'hwaccel':               'cuda',
+            'hwaccel_output_format': 'cuda',
+            'use_hw_filter':         False,
+            'cuda_scale':            True,
             'codec':                 preferred_codec,
             'fallback':              False,
         })
@@ -2456,8 +2562,16 @@ def _prepend_hwdownload(vf_filter: str,
 
 
 def _src_download_fmt(src_bits: int) -> str:
-    """按源位深选择 hwdownload 的下载格式（10bit 用 p010，12bit+ 用 p012）。"""
-    return 'nv12' if src_bits <= 8 else ('p012' if src_bits >= 12 else 'p010')
+    """按源位深选择 hwdownload 的下载格式（10bit→p010le，12bit+→p012le）。
+
+    ⚠ 必须是 **p010le / p012le**，不能写 p010 / p012：ffmpeg 的 pix_fmt 表里
+    只有带字节序后缀的名字（实测 `ffmpeg -pix_fmts` 里没有 p010、p012），
+    写成 p010 会在 hwdownload 协商时报未知像素格式。
+    此前这个函数一直返回 p010/p012——因为唯一会用它的路径（策略 1 的
+    crop_cuda 全 GPU 流水线）在本项目所有环境下都不可达，所以没暴露；
+    接入 cover 的 CUDA 缩放链后才真正被调用。
+    """
+    return 'nv12' if src_bits <= 8 else ('p012le' if src_bits >= 12 else 'p010le')
 
 
 def build_ffmpeg_cmd(
@@ -2927,6 +3041,8 @@ def process_file(
         _d = _meta['derived']
         _rot_note = (f'，含 {_d["rotation"]}° 旋转标签（显示 '
                      f'{_d["effective_width"]}x{_d["effective_height"]}）')
+    # 源位深：决定 CUDA 缩放链里 hwdownload 的下载格式（8bit→nv12，10bit→p010le）
+    _src_bits = _meta['derived']['src_bits'] if _meta else 8
     print('  ' + _label('目标尺寸')
           + f'{out_width}x{out_height} (源 {actual_width}x{actual_height}, '
             f'{mode_inline}{_rot_note})')
@@ -3004,6 +3120,8 @@ def process_file(
             vf_filter = build_video_filter(
                 mode, actual_width, actual_height, out_width, out_height,
                 use_cuda=strategy['use_hw_filter'], crop_ratio=crop_ratio,
+                cuda_scale=bool(strategy.get('cuda_scale', False)),
+                src_bits=_src_bits,
             )
         except ValueError as exc:
             print(f'  ✘ 失败：滤镜构建 — {exc}', file=sys.stderr)
@@ -3043,6 +3161,7 @@ def process_file(
 
         current_codec    = strategy['codec']
         use_hw_filter    = strategy['use_hw_filter']
+        use_cuda_scale   = bool(strategy.get('cuda_scale', False))
         hwaccel          = strategy.get('hwaccel')
         hwaccel_out_fmt  = strategy.get('hwaccel_output_format')
 
@@ -3051,6 +3170,7 @@ def process_file(
             vf_filter = build_video_filter(
                 mode, actual_width, actual_height, out_width, out_height,
                 use_cuda=use_hw_filter, crop_ratio=crop_ratio,
+                cuda_scale=use_cuda_scale, src_bits=_src_bits,
             )
         except ValueError as exc:
             print(f'  ✘ 失败：滤镜构建 — {exc}', file=sys.stderr)
@@ -3066,12 +3186,12 @@ def process_file(
         # [META-KEEP] 10bit 源 + hof=cuda 时 hwdownload 先试 p010；旧驱动或不支持
         # 10bit 下载的设备会失败，此时同一策略回退 nv12 再试一次（代价：降为 8bit、
         # HDR 帧级 side_data 一并丢失），而不是直接放弃整个 GPU 策略。
-        _src_meta = probe_full_metadata(str(input_file), ffmpeg_bin)
-        _src_bits = _src_meta['derived']['src_bits'] if _src_meta else 8
+        # 注意：CUDA 缩放链（cuda_scale）的下载格式烘在滤镜串里，这套 hw_download_fmt
+        # 重试够不到它——那边 p010 下载失败就是整条策略失败、降级到 CPU 缩放（结果仍正确）。
         _first_filter = vf_filter.split(',', 1)[0].split('=', 1)[0].strip()
         _dl_formats: List[Optional[str]] = [None]
         # 只有真正会插入 hwdownload,format=p010 时才值得回退重试；
-        # crop_cuda 这类原生滤镜不产生 hwdownload，重试只会重复同一条命令。
+        # crop_cuda / scale_cuda 这类原生滤镜不经过 _prepend_hwdownload，重试只会重复同一条命令。
         if (hwaccel_out_fmt == 'cuda' and _src_bits >= 10
                 and _first_filter not in _CUDA_NATIVE_FILTERS):
             _dl_formats.append('nv12')

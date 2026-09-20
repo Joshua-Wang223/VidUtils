@@ -77,8 +77,9 @@
 | AMD AMF / Intel QSV（含 av1） | ❌ | ❌ | ✅³ | ✅³ |
 | 硬件解码（CUDA / Vulkan / VA-API / OpenCL） | ❌ | ❌ | ❌ | ✅ |
 | `crop_cuda` 全 GPU 流水线 | ❌ | ❌ | ❌ | ✅¹ |
+| `scale_cuda` 显存内缩放（仅 cover，策略 2） | ❌ | ❌ | ❌ | ✅¹ |
 | 运行时硬件能力探测 | — | — | — | ✅ |
-| 策略链自动降级（5 级） | — | — | — | ✅ |
+| 策略链自动降级（6 级） | — | — | — | ✅ |
 | 编码器级降级（GPU 编码器 → CPU 软编） | — | — | ✅ | ✅ |
 | 多任务并行处理 | ❌ | ✅ | ✅ | ❌ |
 | CPU / 内存自动探测与并发决策 | ❌ | ✅ | ✅ | ❌ |
@@ -97,7 +98,7 @@
 | `--crf-ref` / `--cq-ref` 统一质量基准 | ❌ | ❌ | ✅ | ✅ |
 | `--fallback-policy` 策略控制 / `--cuda-diagnostics` | ❌ | ❌ | ❌ | ✅ |
 
-> ¹ hwaccel 版的 cover / crop-cover 模式始终使用 CPU 侧 `scale,crop` 滤镜，GPU 仅负责解码与编码；`crop_cuda` 全 GPU 流水线（策略 1）仅对 crop 模式启用（后两者都需要 scale 步骤，`crop_cuda` 不支持）。
+> ¹ FFmpeg 上游**并没有 `crop_cuda`** 这个滤镜（与编译选项无关：实测 `-filters` 列表里没有它、`-h filter=crop_cuda` 报 `Unknown filter`），所以「全 GPU 流水线」在真实环境里**永远跳过**。cover 模式在带 `scale_cuda` 的构建（需 `--enable-cuda-nvcc` 的自建 FFmpeg）上把**缩放**放进显存、裁剪仍回 CPU（`scale_cuda → 显式 hwdownload → CPU crop → NVENC`），实测 4K→1440×1080 覆盖链**快 44.5%**；`crop-cover` 保留 CPU 侧 `crop,scale`（它必须先裁剪，GPU 缩放要额外 `hwupload`，未实测）。
 > ² `av1_nvenc` 需第 8 代 NVENC（Ada / RTX 40 / L40 及以上），否则自动降级为 `libsvtav1`。
 > ³ v2 可以**使用**硬件编码器（写 `--codec h264_nvenc` 等），但不做硬件探测、也不做硬件解码——解码全程走 CPU。是否可用由 FFmpeg 与驱动自行决定。
 
@@ -350,7 +351,7 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--ffmpeg-bin` | `ffmpeg` | 自定义 FFmpeg 路径；ffprobe 自动从同目录推导 |
 | `--dry-run` / `--log` / `--extra-args` | — | 预览 / 日志 / 追加参数 |
 
-> ¹ cover / crop-cover 模式下 `scale,crop` 滤镜在 CPU 侧执行（`crop_cuda` 不支持 scale 步骤），解码与编码仍可走 GPU。
+> ¹ `cover` 模式在带 `scale_cuda` 的构建上把缩放放进显存（`scale_cuda → 显式 hwdownload → CPU crop`，实测快 44.5%），否则 `scale,crop` 在 CPU 侧执行；`crop-cover` 始终在 CPU 侧（它要先裁剪）。解码与编码仍可走 GPU。
 
 ---
 
@@ -1086,7 +1087,7 @@ python vidcrop_cpu_v2.py \
 
 ## 硬件加速说明
 
-`vidcrop_hwaccel.py` 启动后首先进行一次**运行时探测**（实测输出，Tesla T4 / FFmpeg 6.1）：
+`vidcrop_hwaccel.py` 启动后首先进行一次**运行时探测**（实测输出，Tesla T4 / 自建 FFmpeg 7.1）：
 
 ```
 正在检测硬件加速能力...
@@ -1095,12 +1096,13 @@ python vidcrop_cpu_v2.py \
   hevc_nvenc: 可用 ✓
   av1_nvenc:  不可用 ✗
   crop_cuda:  不可用 ✗
+  scale_cuda: 可用 ✓
   Vulkan:     不可用 ✗
   VA‑API:     不可用 ✗
   OpenCL:     不可用 ✗
   ── 说明 ──
   · av1_nvenc 不可用：AV1 硬编需 8 代 NVENC（Ada / RTX 40 / L40 及以上）；--codec av1_nvenc 会自动降级为 libsvtav1 CPU 编码
-  · crop_cuda 不可用：当前 FFmpeg 无此滤镜（6.1 只有 CPU 侧 crop），全 GPU 流水线跳过；仍可走「硬解 + CPU 裁剪 + NVENC 硬编」
+  · crop_cuda 不可用：该滤镜在 FFmpeg 上游并不存在（与编译选项无关），crop 模式的全 GPU 流水线跳过；实际走「硬解 + CPU 裁剪 + NVENC 硬编」
 ```
 
 不可用项会给出**原因说明**，而不是只打一个 ✗。
@@ -1118,18 +1120,19 @@ python vidcrop_cpu_v2.py \
 
 | 值 | 行为 |
 |---|---|
-| `auto`（默认） | 完整 5 级策略链，逐级降级 |
+| `auto`（默认） | 完整 6 级策略链，逐级降级 |
 | `strict-cuda` | 无 CUDA 则直接退出，不降级 |
 | `nvenc-only` | 只用 NVENC 编码，跳过硬件解码（驱动有缺陷时的兜底） |
 | `cpu-only` | 纯 CPU 路径，跳过全部 GPU 探测 |
 
-**5 级策略链（按优先级依次尝试）：**
+**6 级策略链（按优先级依次尝试）：**
 
-1. CUDA 全流水线（硬解 + `crop_cuda` + NVENC 硬编）— 仅 crop 模式
-2. auto 硬解 + NVENC 硬编（CPU 做 crop）
-3. 指定硬解（CUDA / Vulkan / VA-API / OpenCL）+ CPU 软件编码
-4. auto 模式下最佳硬解 + CPU 软件编码
-5. 纯 CPU 兜底
+1. CUDA 全流水线（硬解 + `crop_cuda` + NVENC 硬编）— 仅 crop 模式；**该滤镜上游不存在，实际永远跳过**
+2. CUDA 缩放 + CPU 裁剪（硬解 + `scale_cuda` + 显式 `hwdownload` + CPU crop + NVENC 硬编）— 仅 cover 模式
+3. auto 硬解 + NVENC 硬编（CPU 做 vf 滤镜）
+4. 指定硬解（CUDA / Vulkan / VA-API / OpenCL）+ CPU 软件编码
+5. auto 模式下最佳硬解 + CPU 软件编码
+6. 纯 CPU 兜底
 
 **策略降级示例：**
 
@@ -1285,7 +1288,9 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 |---|---|---|
 | 无 VP9 硬件编码 | FFmpeg 从未提供 `vp9_nvenc`；VP9 硬编只有 `vp9_qsv` / VA-API | VP9 走 CPU 编码（可配硬解） |
 | `av1_nvenc` 需新卡 | 第 8 代 NVENC（Ada / RTX 40 / L40+）才有；Turing / Ampere 没有 | 自动降级 `libsvtav1` |
-| `crop_cuda` 缺失 | FFmpeg 6.1 未编译该滤镜，全 GPU 流水线（策略 1）始终跳过 | 仍走"硬解 + CPU 裁剪 + NVENC 硬编"；代价是**吞吐对 CPU 敏感**，见 [FAQ Q13](#常见问题faq) |
+| `crop_cuda` 缺失 | 该滤镜**在 FFmpeg 上游并不存在**（不是编译选项问题），crop 模式的全 GPU 流水线（策略 1）始终跳过 | 仍走"硬解 + CPU 裁剪 + NVENC 硬编"；代价是**吞吐对 CPU 敏感**，见 [FAQ Q13](#常见问题faq) |
+| cover 的 CUDA 缩放需自建 FFmpeg | 只有 `--enable-cuda-nvcc` 编出来的 FFmpeg 才有 `scale_cuda`，发行版 gpl 构建通常没有 | 没有就自动退回 CPU 侧 `scale`（结果正确、只是慢）；要拿那 44.5% 的提速需自建 |
+| `crop-cover` 不走 CUDA 缩放 | 它必须先裁剪，而裁剪只能在 CPU（无 `crop_cuda`）→ GPU 缩放要额外一次 `hwupload` | 保留 CPU 侧 `crop,scale`（该路径未实测）；要用 CUDA 缩放请改用 `--mode cover` |
 | `--crop-ratio` + **只给一个**维度（非 crop-cover） | 互斥判据是"两个维度都给才算同时指定"，只给一个不算 → 那个维度被**静默忽略**（`--mode crop --crop-ratio 16:9 --output-width 320` 里 `320` 不生效）。两个脚本行为一致 | 按比例裁剪就别给尺寸；要指定最终尺寸用 `--mode crop-cover`（该模式明确支持单维度） |
 | hwaccel 不校验 `--original-width/height` | 只有 `vidcrop_cpu_v2.py` 校验正整数；hwaccel 传负值会一路带进尺寸计算 | 手填源尺寸时自己保证为正；不确定就用默认的 ffprobe 探测 |
 | `librav1e` 无 `-crf` | 编码器本身只支持 `-qp` | 脚本自动换算（实测标定） |
@@ -1325,7 +1330,7 @@ VidUtils 规划作为一个**命令行优先 / Python 原生**的视频工程工
 | `vidcrop_cpu_v0.py` | ✅ 已发布 | CPU 顺序裁剪（crop + cover） |
 | `vidcrop_cpu_v1.py` | ✅ 已发布 | CPU 并发裁剪（crop + cover，自动并行） |
 | `vidcrop_cpu_v2.py` | ✅ 已发布 | CPU 并发裁剪增强版（AV1/VP9、别名、preset 映射、`-ref` 基准、crop-ratio、crop-cover、color-range） |
-| `vidcrop_hwaccel.py` | ✅ 已发布 | 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL，5 级策略链；三种模式 crop / cover / crop-cover，CLI 与 v2 逐字对齐） |
+| `vidcrop_hwaccel.py` | ✅ 已发布 | 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL，6 级策略链；三种模式 crop / cover / crop-cover，CLI 与 v2 逐字对齐） |
 | `convert_crf.py` | ✅ 已发布 | 质量换算单一事实来源 |
 | `interp_2x_safe.sh` | ✅ 已发布 | 光流插帧 2x **GPU 专版**（`nvinterpolate` + `hevc_nvenc`，**无 CPU 回退**；**cgroup 感知的环境自动探测** + **分片级并行 `-j`** + **时间段截取 `--SS/--TO/-T`** + `setsid` + TS 分片 + 断点恢复 + 单实例锁） |
 | `interp_2x_safe_v1.sh` | ✅ 已发布 | 同上的**通用版**：多一条 CPU 回退后端（`minterpolate` + `libx265`）与 `--backend` / `--cpu-preset`；其余特性（环境探测 / `-j` / `--SS/--TO/-T`）与 GPU 专版一致，两者的 `recipe.txt` 兼容、可互相接管分片目录 |
@@ -1361,7 +1366,7 @@ vidutils/
 ├── vidcrop_cpu_v0.py         # CPU 顺序裁剪（crop + cover，单进程）
 ├── vidcrop_cpu_v1.py         # CPU 并发裁剪（crop + cover，多任务并行）
 ├── vidcrop_cpu_v2.py         # CPU 并发裁剪增强版（推荐；AV1/VP9、别名、preset 映射、-ref 基准）
-├── vidcrop_hwaccel.py        # 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL，5 级策略链）
+├── vidcrop_hwaccel.py        # 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL，6 级策略链）
 ├── convert_crf.py            # 质量换算表（被 v2 / hwaccel 依赖，单一事实来源）
 ├── interp_2x_safe.sh         # 光流插帧 2x · GPU 专版（nvinterpolate + hevc_nvenc；环境探测 + -j 并行 + --SS/--TO/-T + TS 分片 + 断点恢复）
 ├── interp_2x_safe_v1.sh      # 同上的通用版（多一条 CPU 回退 minterpolate + libx265 与 --backend/--cpu-preset）
@@ -1456,8 +1461,14 @@ vidutils/
 --mode crop-cover --output-width 1280 --output-height 720
 ```
 
-`cover` / `crop-cover` 都使用 `scale,crop` 组合滤镜，该滤镜在 CPU 侧执行（`crop_cuda` 无法替代 `scale`），
-GPU 仍负责解码与编码。全 GPU 流水线（策略 1，`crop_cuda`）仅对 `crop` 模式启用，后两者从策略 2 开始尝试。
+`cover` 模式的缩放现在可以留在显存里：若 FFmpeg 带 `scale_cuda` 且编码器是 NVENC，链是
+`scale_cuda → 显式 hwdownload → CPU crop → NVENC`（策略 2）——实测 4K→1440×1080 比 CPU 侧 `scale` 快 **44.5%**。
+两处细节是刻意的：**必须显式写 `hwdownload,format=…`**（依赖 FFmpeg 自动插入时 `crop` 会被静默丢弃——实测
+`scale_cuda=1280:720,crop=iw/2:ih/2` 输出 1280×720 而不是 640×360，且没有任何报错）；`interp_algo` 也显式钉
+`lanczos`（`scale_cuda` 的默认值是 0，未映射到具名档，而 CPU 侧 `scale` 默认是 bicubic）。
+
+`crop-cover` 仍是 CPU 侧 `crop,scale`：它要先裁剪，而裁剪只能在 CPU（`crop_cuda` 不存在），GPU 缩放得额外
+`hwupload` 一次。crop 模式的全 GPU 流水线（策略 1）因为 `crop_cuda` 不存在，实际永远跳过。
 
 另外 `crop-cover` 的同尺寸跳过判定会先看裁剪步骤是否为空操作：裁剪比例与源比例不同时，
 即使最终尺寸等于源尺寸也会改变画面，因此**不会**被跳过（`--no-skip-same-size` 可强制转码）。
@@ -1511,7 +1522,9 @@ uptime                                                              # load 是�
 nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv   # 是否有其它 NVENC 会话
 ```
 
-本环境（`crop_cuda` 不可用）的实际流水线是 `CUDA 硬解 → hwdownload → CPU 侧 crop → 回传显存 → NVENC 硬编`，CPU 段在关键路径上；NVENC 跑到 1300+ fps 时每帧只摊到约 0.7 ms CPU 预算。8 核机器上任何一个吃满 CPU 的并发作业（典型：算 SSIM/PSNR 的 `-lavfi ssim` 质量对比、另一个转码任务）就会把它从约 47x 拖到约 20x。
+本环境（`crop_cuda` 不可用）的 crop 模式实际流水线是 `CUDA 硬解 → hwdownload → CPU 侧 crop → 回传显存 → NVENC 硬编`，CPU 段在关键路径上；NVENC 跑到 1300+ fps 时每帧只摊到约 0.7 ms CPU 预算。8 核机器上任何一个吃满 CPU 的并发作业（典型：算 SSIM/PSNR 的 `-lavfi ssim` 质量对比、另一个转码任务）就会把它从约 47x 拖到约 20x。
+
+`cover` 模式原先更吃 CPU——它比 crop 多一步 `scale`（实测 4K→1440×1080 上 CPU 侧缩放单独占 **17.2%**）。现在若 FFmpeg 带 `scale_cuda`，缩放搬进显存后这一步不再占 CPU，同一条链从 23.11s 降到 12.83s。
 
 实测对照（同一文件、同一条命令、`vidcrop_hwaccel.py`）：并发 SSIM 作业运行时 **1m11s（610 fps / 20.5x）**，该作业结束后同样命令 **32s（1378 fps / 46.7x）**。所以排查顺序是：先看 `speed`，再查并发作业，最后才怀疑脚本；批量任务与质量对比任务请错开运行。
 

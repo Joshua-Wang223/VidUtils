@@ -162,8 +162,13 @@ awk 程序（判词 + 汇总 + 上传链判词）提成变量，SELFTEST 用假�
 | 变体 | 结果 | 判读 |
 |---|---|---|
 | `C1_hwupload_cuda` | **640,360** | crop 看到 1280×720，**尺寸协商正确**，没被静默丢弃 |
-| `C2_hwupload_no_device` | 失败 | 通用 `hwupload` 不配 device 确实不行 → `hwupload_cuda` 的"自带 device"是真优势 |
+| `C2_hwupload_no_device` | 失败：`[hwupload] A hardware device reference is required to upload frames to.` | 通用 `hwupload` 不配 device 确实不行 → `hwupload_cuda` 的"自带 device"是真优势 |
 | `C3_hwupload_explicit_device` | **640,360** | 通用 `hwupload` + `-init_hw_device cuda=cu:0 -filter_hw_device cu` 这条路也可用（退路） |
+
+> C2 那格的报错行值得一提：第一版探针用 `tail -n1` 取错误，打出来的是
+> `Nothing was written into output file, because at least one of its streams received
+> no packets.` —— 只说"没写出东西"、不说为什么。改成 `errline()`（优先捞提到
+> 滤镜 / device / cuda 的那行）之后才看到真正的根因。诊断输出要捞**根因行**。
 
 **判据 D（软解路径吞吐对照，4K→1440x1080，min of 3）**
 

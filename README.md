@@ -104,7 +104,8 @@
 > ¹ FFmpeg 上游**并没有 `crop_cuda`** 这个滤镜（与编译选项无关：实测 `-filters` 列表里没有它、`-h filter=crop_cuda` 报 `Unknown filter`），所以「全 GPU 流水线」在真实环境里**永远跳过**。cover 模式在带 `scale_cuda` 的构建（需 `--enable-cuda-nvcc` 的自建 FFmpeg）上把**缩放**放进显存、裁剪仍回 CPU（`scale_cuda → 显式 hwdownload → CPU crop → NVENC`），实测 4K→1440×1080 覆盖链**快 51.9%~52.9%**（对着旧 bicubic 基准是 44.5%）；质量门已完整通过（`PSNR(GPU lanczos vs CPU lanczos) = 46.60 dB ≥ 40`、`VMAF = 97.21`）。`crop-cover` 保留 CPU 侧 `crop,scale`（它必须先裁剪，GPU 缩放要额外 `hwupload`，未实测）。
 > ² `av1_nvenc` 需第 8 代 NVENC（Ada / RTX 40 / L40 及以上），否则自动降级为 `libsvtav1`。
 > ³ v2 可以**使用**硬件编码器（写 `--codec h264_nvenc` 等），但不做硬件探测、也不做硬件解码——解码全程走 CPU。是否可用由 FFmpeg 与驱动自行决定。
-> ⁴ 软解 + 显存内缩放 = `--decode cpu --scale-algo cuda-*`，链为 `hwupload_cuda → scale_cuda → 显式 hwdownload → CPU crop`。**吞吐未实测**（可能不如纯 CPU 缩放，因为多一次整帧上载），定位是「NVDEC 用不了 / 解不了该编码时的出路」。`--scale-algo auto` 在显式 `--decode cpu` 下也会走这条路，但会先跑功能探针确认真能跑通。
+> ⁴ 软解 + 显存内缩放 = `--decode cpu --scale-algo cuda-*`，链为 `hwupload_cuda → scale_cuda → 显式 hwdownload → CPU crop`。**已实测（T4，两轮一致）：比「软解 + CPU 缩放」快 2.9%~3.2%**（45.9s→44.6s / 46.0s→44.6s），画质与零拷贝链逐位相同（PSNR 同为 46.603743 dB）。
+> 但要看清**绝对值**：软解链路整体是 44~46s，而硬解零拷贝只要 12.8s —— 上传链再快也只是「NVDEC 用不了 / 解不了该编码时的出路」，**不是**用来替代硬解的。`--scale-algo auto` 只在显式 `--decode cpu` 下才会自动走它，且会先跑功能探针。
 
 > **如何选择？**
 > - 有多核 CPU、无 GPU、批量大 → **v2**（默认选择，功能最全）
@@ -1371,7 +1372,7 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 | cover 的 CUDA 缩放需自建 FFmpeg | 只有 `--enable-cuda-nvcc` 编出来的 FFmpeg 才有 `scale_cuda`，发行版 gpl 构建通常没有 | 没有就自动退回 CPU 侧 `scale`（结果正确、只是慢）；要拿那 51.9% 的提速需自建 |
 | `--decode cpu` 不再等于纯 CPU | 旧 `--hwaccel none` 会把整块 GPU 一起关掉；现在 `--decode cpu` 只关解码，`--scale-algo auto` 仍会优先尝试显存内缩放（软解时走 `hwupload_cuda`），`--codec` 默认仍是 `h264_nvenc` | 要纯 CPU 用三轴写法 `--decode cpu --scale-algo libswscale-lanczos --codec libx264`（会跳过全部 GPU 探测） |
 | 旧名 `--hwaccel` 与三个旧 `--fallback-policy` 值已删除 | `--hwaccel` 硬更名成 `--decode`；`strict-cuda` / `nvenc-only` / `cpu-only` 不是"策略"而是"三轴预设"，已移除 | 用旧名/旧值都会报错退出 2，并在提示里给出可直接抄的等价写法 |
-| **软解 + `hwupload_cuda` 的吞吐未实测** | 该链要把整帧从内存上载到显存，成本可能吃掉显存缩放的好处（memory 里有 `cuvid + hwupload_cuda` 比软解还慢的前科）。定位是"NVDEC 用不了/解不了该编码时的出路"，**不是**吞吐优化 | 只在你确实没有可用的硬解时用；`--scale-algo auto` 只在显式 `--decode cpu` 下才会自动走它，且会先跑功能探针 |
+| **软解 + `hwupload_cuda` 收益很小（已实测 +2.9%~3.2%）** | 该链要把整帧从内存上载到显存，两轮 T4 实测只比「软解 + CPU 缩放」快约 3%。更关键的是**绝对值**：软解链路整体 44~46s，而硬解零拷贝只要 12.8s | 只在**确实没有可用硬解**时用（NVDEC 用不了 / 解不了该编码）。有硬解时永远该走硬解；`--scale-algo auto` 只在显式 `--decode cpu` 下才自动走它，且要先过功能探针 |
 | 显式 `cuda-*` 执行失败要等到运行期才发现 | `--scale-algo cuda-*` **不跑功能探针**（按设计直接执行） | `--fallback-policy auto`（默认）会自动降级到 `libswscale-<同档>`；要"不可用就报错"用 `strict` |
 | `crop-cover` 不走 CUDA 缩放 | 它必须先裁剪，而裁剪只能在 CPU（无 `crop_cuda`）→ GPU 缩放要额外一次 `hwupload_cuda` | 保留 CPU 侧 `crop,scale`（该路径未实测）；要用 CUDA 缩放请改用 `--mode cover` |
 | CPU 侧缩放是 lanczos（比旧版慢） | `cover` / `crop-cover` 默认用 `flags=lanczos`（原先是 libswscale 默认的 bicubic），抽头更多 → CPU 侧吞吐略降 | 这是为了与 GPU 侧同档、避免降级时画质变软。换档用 `--scale-algo`（如 `--scale-algo bicubic`） |
@@ -1557,7 +1558,11 @@ vidutils/
 
 - **零拷贝**（有硬解、编码器是 NVENC）：`scale_cuda → 显式 hwdownload → CPU crop → NVENC`（策略 2）——实测 4K→1440×1080 比 CPU 侧 `scale` 快 **51.9%~52.9%**（对着旧 bicubic 基准是 44.5%），
 质量门 `PSNR(GPU lanczos vs CPU lanczos) = 46.60 dB`、`VMAF = 97.21`（差异在感知上可忽略）。
-- **软解 + 上载**（`--decode cpu --scale-algo cuda-*`）：`hwupload_cuda → scale_cuda → 显式 hwdownload → CPU crop`（策略 2b）。缩放轴与解码轴正交，硬解用不了时也能把重采样放进显存；**但吞吐未实测**，可能不如纯 CPU 缩放。
+- **软解 + 上载**（`--decode cpu --scale-algo cuda-*`）：`hwupload_cuda → scale_cuda → 显式 hwdownload → CPU crop`（策略 2b）。缩放轴与解码轴正交，硬解用不了时也能把重采样放进显存。
+  T4 实测（两轮一致）：比「软解 + CPU 缩放」**快 2.9%~3.2%**；判据 C 确认 crop 尺寸协商正确（输出 640×360，
+  没被静默丢弃）；判据 E 确认画质与零拷贝链**逐位相同**（PSNR 都是 46.603743 dB）。
+  ⚠ 但**绝对值**要看清：软解链路整体 44~46s，硬解零拷贝只要 12.8s —— 这条链的定位是
+  「NVDEC 用不了 / 解不了该编码时的出路」，不是替代硬解。
 
 两处细节是刻意的：**必须显式写 `hwdownload,format=…`**（依赖 FFmpeg 自动插入时 `crop` 会被静默丢弃——实测
 `scale_cuda=1280:720,crop=iw/2:ih/2` 输出 1280×720 而不是 640×360，且没有任何报错）；`interp_algo` 也显式钉

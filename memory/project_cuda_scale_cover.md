@@ -1,6 +1,6 @@
 ---
 name: cover 模式的 CUDA 缩放（scale_cuda）——实测数据、两条硬约束、以及一个被激活的老 bug
-description: 2026-09-20 给 vidcrop_hwaccel.py 的 cover 模式加了「CUDA 缩放 + CPU 裁剪」策略；真实 4K→1440x1080 实测快 51.9~52.9%（对着 lanczos 基准；对旧 bicubic 基准是 44.5%）；质量门已完整通过（PSNR 46.60dB + VMAF 97.21）；必须显式写 hwdownload 否则 crop 被静默丢弃；crop_cuda 上游不存在；顺带修掉 _src_download_fmt 的 p010/p012 非法 pix_fmt 名；探针的 awk 跨行三元在 T4 的 mawk 上炸过（gawk 兼容 ≠ mawk 兼容）；软解+hwupload 链的吞吐与画质（判据 D/E）仍是空白
+description: 2026-09-20 给 vidcrop_hwaccel.py 的 cover 模式加了「CUDA 缩放 + CPU 裁剪」策略；真实 4K→1440x1080 实测快 51.9~52.9%（对着 lanczos 基准；对旧 bicubic 基准是 44.5%）；质量门已完整通过（PSNR 46.60dB + VMAF 97.21）；必须显式写 hwdownload 否则 crop 被静默丢弃；crop_cuda 上游不存在；顺带修掉 _src_download_fmt 的 p010/p012 非法 pix_fmt 名；探针的 awk 跨行三元在 T4 的 mawk 上炸过（gawk 兼容 ≠ mawk 兼容）；软解+hwupload 链已实测（尺寸协商正确、比软解+CPU缩放快 2.9~3.2%、画质与零拷贝逐位相同，但绝对值是 44~46s vs 硬解零拷贝 12.8s，定位仍是「NVDEC 用不了时的出路」）；10bit p010le 路径仍空白
 type: project
 ---
 
@@ -153,11 +153,41 @@ awk 程序（判词 + 汇总 + 上传链判词）提成变量，SELFTEST 用假�
   `VMAF 新链(GPU) vs CPU lanczos = 97.21`、`VMAF CPU lanczos vs bicubic = 97.88`
   → **质量门完整通过**（PSNR ≥ 40 且 VMAF > 95），GPU lanczos 与 CPU lanczos 的差异在感知上可忽略
 
-**⚠ 这一轮仍没有判据 C/D/E**：T4 上的 `temp/` 是它自己的副本（`temp/` 被 `.gitignore` 覆盖，
-不会随 git 同步），判据 C/D/E（软解 + `hwupload_cuda` 链的 device、尺寸协商、吞吐、画质）
-是新增的，要**把更新后的 `temp/probe_scale_cuda_crop.sh` 拷过去再跑**。
-→ **软解 + `hwupload_cuda` 那条链的吞吐至今仍是空白**；在判据 D 出结果前，`--scale-algo auto`
-只在显式 `--decode cpu` 下才会走它（且要先过功能探针）。
+### 第五轮（2026-09-20，判据 C/D/E 首次实测：**软解 + `hwupload_cuda` 链出结果**）
+
+把更新后的 `temp/probe_scale_cuda_crop.sh` 拷到 T4 后连跑两轮，结果一致。
+
+**判据 C（device 与 crop 尺寸协商，源 1920x1080，`crop=iw/2:ih/2` 自我报告）**
+
+| 变体 | 结果 | 判读 |
+|---|---|---|
+| `C1_hwupload_cuda` | **640,360** | crop 看到 1280×720，**尺寸协商正确**，没被静默丢弃 |
+| `C2_hwupload_no_device` | 失败 | 通用 `hwupload` 不配 device 确实不行 → `hwupload_cuda` 的"自带 device"是真优势 |
+| `C3_hwupload_explicit_device` | **640,360** | 通用 `hwupload` + `-init_hw_device cuda=cu:0 -filter_hw_device cu` 这条路也可用（退路） |
+
+**判据 D（软解路径吞吐对照，4K→1440x1080，min of 3）**
+
+| 变体 | 第一轮 | 第二轮 |
+|---|---|---|
+| D1 软解 + CPU scale（lanczos） | 45.91s | 46.02s |
+| D2 软解 + `hwupload_cuda` + `scale_cuda` | **44.57s** | **44.56s** |
+| 差 | +1.34s（**2.9%**） | +1.46s（**3.2%**） |
+
+→ **上传链确实更快，判读过（保留）**。但两轮都只有约 3%，别当成一个大数字引用。
+
+**判据 E（画质）**：`PSNR(软解+上传链 vs CPU lanczos) = 46.603743 dB`
+—— **与硬解零拷贝链的数字逐位相同**（两者用的是同一个 `scale_cuda` + lanczos，
+所以本来就该一致；这反过来说明上传路径没引入任何额外差异）。
+
+**⚠ 别误读判据 D（这是本轮最容易被带偏的地方）**
+
+- 上传链"快 3%"是**在软解这个大前提下**的对比。看**绝对值**：
+  软解链路整体 44~46s，而硬解零拷贝（B3）只要 **12.8s** —— 差 3.5 倍。
+- 所以这条链的定位**仍然是**「NVDEC 用不了 / 解不了该编码时的出路」，
+  **不是**用来替代硬解的吞吐优化。`--scale-algo auto` 只在显式 `--decode cpu`
+  下才自动走它（且要先过功能探针），这个保守选择是对的。
+- memory 里那条 `cuvid + hwupload_cuda` 比软解还慢的前科**没有被推翻**——那说的是
+  「硬解后再上传」这种多一次拷贝的组合；这里比的是「软解后上传缩放」vs「软解后 CPU 缩放」。
 
 ## 两条硬约束（都有实测编号，改动时别踩）
 
@@ -224,9 +254,12 @@ A2 那格是本次最值钱的发现：尺寸 1280x720 本身**合法**、ffmpeg
   **引用收益时用第三轮的 51.9%**（B1 已含 lanczos），别再用对着旧 bicubic 基准的 44.5%。
 - 改这条链时守住两条：**显式 `hwdownload,format=`**（否则画面静默错）、**显式 `interp_algo`**
   （`scale_cuda` 的默认值是 0，未映射到具名档，而 CPU 侧 `scale` 默认是 bicubic）。
-- **质量门已过**：PSNR 46.60 dB（≥40）+ VMAF 97.21（>95），GPU lanczos ≈ CPU lanczos；
-  但 **软解 + `hwupload_cuda` 那条链（判据 D/E）与 `10bit p010le` 路径仍是空白**；
-  再动缩放算法/档位时要重跑判据 Q（+`PROBE_VMAF=1`）。
+- **质量门已完整通过**：PSNR 46.60 dB（≥40）+ VMAF 97.21（>95），GPU lanczos ≈ CPU lanczos。
+- **软解 + `hwupload_cuda` 链已实测**（判据 C/D/E）：尺寸协商正确、**比软解+CPU缩放快 2.9%~3.2%**、
+  画质与零拷贝链逐位相同。但**绝对值是 44~46s vs 硬解零拷贝的 12.8s** → 定位仍是
+  「NVDEC 用不了时的出路」，别当吞吐优化卖。仍未测的只有 **10bit p010le 下载路径**。
+- **引用收益用 B1 vs B3 = 51.9%~52.9%**（B1 已含 lanczos）。别引用「换 lanczos 让 CPU 慢多少」
+  ——四轮测出 9.4% / 1.2% / 13.0% / 11.8%，完全落在噪声里。
 - **引用收益用 B1 vs B3 = 51.9%~52.9%**（B1 已含 lanczos）。别引用「换 lanczos 让 CPU 慢多少」
   ——三轮测出 9.4% 与 1.2%，落在噪声里。
 - **T4 的 `temp/` 不会随 git 同步**（被 `.gitignore` 覆盖）：换了探针/工装要**手动拷过去**。

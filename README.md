@@ -351,7 +351,7 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--ffmpeg-bin` | `ffmpeg` | 自定义 FFmpeg 路径；ffprobe 自动从同目录推导 |
 | `--dry-run` / `--log` / `--extra-args` | — | 预览 / 日志 / 追加参数 |
 
-> ¹ `cover` 模式在带 `scale_cuda` 的构建上把缩放放进显存（`scale_cuda → 显式 hwdownload → CPU crop`，实测快 44.5%），否则 `scale,crop` 在 CPU 侧执行；`crop-cover` 始终在 CPU 侧（它要先裁剪）。解码与编码仍可走 GPU。
+> ¹ `cover` 模式在带 `scale_cuda` 的构建上把缩放放进显存（`scale_cuda → 显式 hwdownload → CPU crop`，实测快 44.5%），否则 `scale,crop` 在 CPU 侧执行；`crop-cover` 始终在 CPU 侧（它要先裁剪）。解码与编码仍可走 GPU。两条路的缩放算法都显式钉 `lanczos`（GPU 侧 `interp_algo=lanczos`、CPU 侧 `flags=lanczos`）——`scale_cuda` 只到 lanczos 一档，取两者交集里的最高档并显式钉死，免得 GPU 更锐、降级到 CPU 反而变软。
 
 ---
 
@@ -1291,6 +1291,7 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 | `crop_cuda` 缺失 | 该滤镜**在 FFmpeg 上游并不存在**（不是编译选项问题），crop 模式的全 GPU 流水线（策略 1）始终跳过 | 仍走"硬解 + CPU 裁剪 + NVENC 硬编"；代价是**吞吐对 CPU 敏感**，见 [FAQ Q13](#常见问题faq) |
 | cover 的 CUDA 缩放需自建 FFmpeg | 只有 `--enable-cuda-nvcc` 编出来的 FFmpeg 才有 `scale_cuda`，发行版 gpl 构建通常没有 | 没有就自动退回 CPU 侧 `scale`（结果正确、只是慢）；要拿那 44.5% 的提速需自建 |
 | `crop-cover` 不走 CUDA 缩放 | 它必须先裁剪，而裁剪只能在 CPU（无 `crop_cuda`）→ GPU 缩放要额外一次 `hwupload` | 保留 CPU 侧 `crop,scale`（该路径未实测）；要用 CUDA 缩放请改用 `--mode cover` |
+| CPU 侧缩放是 lanczos（比旧版慢） | 两个脚本的 `cover` / `crop-cover` 都显式用 `flags=lanczos`（原先是 libswscale 默认的 bicubic），抽头更多 → CPU 侧吞吐略降 | 这是为了与 GPU 侧同档、避免降级时画质变软。若要换回更快但略软的档，改 `_SW_SCALE_FLAGS`（两个脚本里各一份，必须一致） |
 | `--crop-ratio` + **只给一个**维度（非 crop-cover） | 互斥判据是"两个维度都给才算同时指定"，只给一个不算 → 那个维度被**静默忽略**（`--mode crop --crop-ratio 16:9 --output-width 320` 里 `320` 不生效）。两个脚本行为一致 | 按比例裁剪就别给尺寸；要指定最终尺寸用 `--mode crop-cover`（该模式明确支持单维度） |
 | hwaccel 不校验 `--original-width/height` | 只有 `vidcrop_cpu_v2.py` 校验正整数；hwaccel 传负值会一路带进尺寸计算 | 手填源尺寸时自己保证为正；不确定就用默认的 ffprobe 探测 |
 | `librav1e` 无 `-crf` | 编码器本身只支持 `-qp` | 脚本自动换算（实测标定） |
@@ -1448,6 +1449,11 @@ vidutils/
 | `cover` | `scale=…,crop=W:H`（先缩放再居中裁剪） | 任意尺寸，比例按目标算 |
 | `crop-cover` | `crop=…,scale=…`（先裁剪再缩放覆盖） | 任意尺寸，裁剪比例由 `--crop-ratio` 单独决定 |
 
+> 两条涉及缩放的链里的 `scale` **显式带 `:flags=lanczos`**（`scale=…:flags=lanczos,crop=…`）。
+> libswscale 的默认是 `bicubic`（实测：`scale=W:H` 与 `scale=W:H:flags=bicubic` 的帧级 MD5 完全相同），
+> 而 `scale_cuda` 只到 `lanczos` 一档——取两边交集里的最高档并显式钉死，让 GPU 路径与 CPU 降级路径同档。
+> 代价：CPU 侧比 bicubic 略慢（`lanczos` 抽头更多）。
+
 `crop-cover` 与 `cover` 的区别是**裁剪比例可以独立于最终尺寸**：`--crop-ratio` 定裁剪比例，
 `--output-width/height` 定缩放后的最终尺寸。因此该模式下两者可以并用，且**只给一个维度即可**
 （另一个按比例推导为偶数）：
@@ -1465,7 +1471,11 @@ vidutils/
 `scale_cuda → 显式 hwdownload → CPU crop → NVENC`（策略 2）——实测 4K→1440×1080 比 CPU 侧 `scale` 快 **44.5%**。
 两处细节是刻意的：**必须显式写 `hwdownload,format=…`**（依赖 FFmpeg 自动插入时 `crop` 会被静默丢弃——实测
 `scale_cuda=1280:720,crop=iw/2:ih/2` 输出 1280×720 而不是 640×360，且没有任何报错）；`interp_algo` 也显式钉
-`lanczos`（`scale_cuda` 的默认值是 0，未映射到具名档，而 CPU 侧 `scale` 默认是 bicubic）。
+`lanczos`（`scale_cuda` 的默认值是 0，未映射到具名档）。
+
+CPU 侧同一天也钉成了 `:flags=lanczos`（两个脚本一起改），**两条路同档**——否则同一批文件会在 GPU 上更锐、
+一旦降级到 CPU（无 `scale_cuda` 的构建 / `--hwaccel none` / `cpu-only` / 新链失败）就变软。这也意味着上面那个
+44.5% 是对着**旧的 bicubic 基准**测的：CPU 侧换成 lanczos 后基准更慢，新链的相对收益只会更大。
 
 `crop-cover` 仍是 CPU 侧 `crop,scale`：它要先裁剪，而裁剪只能在 CPU（`crop_cuda` 不存在），GPU 缩放得额外
 `hwupload` 一次。crop 模式的全 GPU 流水线（策略 1）因为 `crop_cuda` 不存在，实际永远跳过。

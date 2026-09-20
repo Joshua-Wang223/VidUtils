@@ -12,8 +12,46 @@ type: project
 NVDEC → scale_cuda=W:H:interp_algo=lanczos → 显式 hwdownload,format=… → CPU crop → NVENC
 ```
 
-只动 `vidcrop_hwaccel.py`。**没有新增任何 CLI 参数**，所以两脚本的对齐矩阵不受影响；
-`vidcrop_cpu_v2.py` 一字未动，仍是 CPU 侧 `scale,crop`。
+只动 `vidcrop_hwaccel.py` 的策略/滤镜层。**没有新增任何 CLI 参数**，所以两脚本的对齐矩阵不受影响。
+`vidcrop_cpu_v2.py` 在第一版里一字未动；随后同一天又按「两条路同档」把**两个脚本的 CPU 侧缩放算法
+一并钉成 lanczos**（见下一节），那一处是两边同时改的。
+
+## 缩放档位：两条路都显式钉 lanczos（CPU 侧不再是默认的 bicubic）
+
+**事实（实测，2026-09-20）**：libswscale 的默认缩放算法是 **bicubic**——`scale` 滤镜自身的 `flags`
+默认是空串、继承全局 `-sws_flags`，而后者 help 里写着 `(default bicubic)`。证据是帧级 MD5：
+`scale=1280:720` 与 `scale=1280:720:flags=bicubic` 解出来的像素**逐位相同**（`psnr` 三平面全 `inf`；
+注意**文件级** md5 会因容器差异不同，不能用它判断）。
+
+于是两个脚本里都加了 `_SW_SCALE_FLAGS = 'lanczos'`，`cover` / `crop-cover` 的 `scale` 一律带
+`:flags=lanczos`。为什么是 lanczos：
+
+- **`scale_cuda` 的档位只有 4 个**（`interp_algo` 量程 0~4：nearest / bilinear / bicubic / lanczos，
+  默认 0 未映射到具名档），lanczos 是它的最高档；
+- libswscale 侧还有 `spline` / `sinc` / `gauss` / `area` / `bicublin` 等更多档，但 **GPU 侧没有对应档可选**
+  → 取两者交集里的最高档 = lanczos；
+- 用户明确要求「默认按 scale_cuda 的最高档算法 lanczos，确保画质」。
+
+**"最高档"的边界**：这只是**档位维度**上的最高，不等于普适最优——lanczos 锐度导向、边缘有轻微振铃；
+`scale_cuda` 还有个子旋钮 `param`（默认 999999 = 内置默认，对 lanczos 是 taps 数）**未碰也未实测**；
+`scale_npp` 另有一套档位（含 `cubic2p_*` / `super`），要 `--enable-nonfree`，也没实测。
+
+**一致性验证（两脚本滤镜链矩阵，同一组参数喂两边 + 各自专有参数）**：一致 8 / 失败 0，覆盖
+
+| 用例 | 滤镜链 |
+|---|---|
+| cover 横 1920x1080→1440x1080（源更宽） | `scale=-2:1080:flags=lanczos,crop=1440:1080:(iw-1440)/2:0` |
+| cover 竖 1080x1920→1280x720（源更高） | `scale=1280:-2:flags=lanczos,crop=1280:720:0:(ih-720)/2` |
+| cover 比例相同 | `scale=1280:720:flags=lanczos` |
+| crop-cover（有/无 `--crop-ratio`） | `crop=1920:1080:0:0,scale=640:360:flags=lanczos` |
+| crop（无 scale） | `crop=640:360:640:360` |
+| cover 同尺寸 + `--no-skip-same-size` | `scale=1920:1080:flags=lanczos` |
+
+**写这类"比对命令行"的 harness 有个坑**：`shlex.join` 是**按需加引号**的——含括号/`-2` 的链会被
+`'…'` 包住，`scale=1280:720:flags=lanczos,…` 这种不含 shell 特殊字符的**不加引号**。按"必须有单引号"
+去 sed 提取，会只匹配上一部分用例、剩下的静默返回空串，而空串相等会被误判成"一致"。
+→ 解析要按 token 取（引号可有可无），且**空值必须判失败**。
+
 
 ## 实测数据（2026-09-20，T4 + 自建 FFmpeg 7.1，`-f null -` 去 IO）
 
@@ -79,9 +117,12 @@ A2 那格是本次最值钱的发现：尺寸 1280x720 本身**合法**、ffmpeg
 ## 还没做 / 还没过
 
 - **质量门未过**：GPU `lanczos` 与 libswscale 的缩放在数值上不逐像素相同，44.5% 目前只是
-  "尺寸对、计时快"。探针脚本 `temp/probe_scale_cuda_crop.sh` 已加判据 Q（ref=lanczos 参考 /
-  cur=现行 bicubic / gpu=新链，各出一份 ffv1 无损后比 PSNR，`PROBE_VMAF=1` 可加 VMAF），
-  但**尚未在 T4 上跑**。
+  "尺寸对、计时快"。探针 `temp/probe_scale_cuda_crop.sh` 的判据 Q 已按"两条路同档"重写成：
+  `ref`=CPU `flags=lanczos`（现在就是发货的 CPU 链）/ `gpu`=新链 / `bic`=CPU bicubic（旧基准，仅参照），
+  各出一份 ffv1 无损后比 PSNR；**主判据是 `PSNR(gpu vs ref) ≥ 40dB`**（GPU lanczos 复现 CPU lanczos），
+  按 token 解析 psnr 的 `average:`。`PROBE_VMAF=1` 可加 libvmaf。**尚未在 T4 上跑**。
+  判据 B 也加了 `B1b`（CPU bicubic）——用来量"换 lanczos 让 CPU 慢了多少"，
+  因为那 44.5% 的收益是对着**旧 bicubic 基准**测的，换成 lanczos 后基准更慢、相对收益只会更大。
 - 10bit + `h264_nvenc`（8bit-only 编码器）走新链时，`-pix_fmt yuv420p` 仍由 `build_ffmpeg_cmd`
   追加——因为链里已显式 `hwdownload` 成软件帧，这一步是合法的降位深（与旧行为一致），但**未实测**。
 - 新链的下载格式烘在滤镜串里，`process_file` 那套 `hw_download_fmt` 重试够不到它；

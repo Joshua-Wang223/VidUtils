@@ -1973,6 +1973,19 @@ def _setparams_from_color_args(extra_args: List[str]) -> Optional[str]:
 #  滤镜
 # ═══════════════════════════════════════════════════════════════════
 
+# CPU 侧 scale 滤镜的缩放算法。**显式钉 lanczos**，理由两条：
+#   ① 不吃 libswscale 的默认值。`scale` 滤镜自身的 flags 默认是空串、继承全局
+#      `-sws_flags`，而后者默认是 bicubic——实测 `scale=W:H` 与
+#      `scale=W:H:flags=bicubic` 的帧级 MD5 完全相同（psnr 三个平面全 inf）。
+#      默认值等于"没指定、随实现走"，画质不可预期。
+#   ② 与 GPU 侧同档。vidcrop_hwaccel.py 的新链用
+#      `scale_cuda=…:interp_algo=lanczos`（scale_cuda 的最高档，量程 0~4 只到
+#      lanczos），若本脚本留 bicubic，同一批文件会在 GPU 上更锐、在 CPU 上变软。
+#      → 本常量必须与 vidcrop_hwaccel.py 的同名常量保持一致（孪生实现约定）。
+# 注意：libswscale 还有 spline / sinc / gauss / area 等档，但 scale_cuda 没有
+# 对应档可选，取两者交集里最高的那个 → lanczos。
+_SW_SCALE_FLAGS = "lanczos"
+
 def build_crop_filter(src_w: int, src_h: int, dst_w: int, dst_h: int) -> str:
     if dst_w > src_w or dst_h > src_h:
         raise ValueError(
@@ -1985,19 +1998,25 @@ def build_crop_filter(src_w: int, src_h: int, dst_w: int, dst_h: int) -> str:
 
 
 def build_cover_filter(src_w: int, src_h: int, dst_w: int, dst_h: int) -> str:
+    """等比缩放+居中裁剪（cover 模式）。
+
+    缩放算法显式用 lanczos（见 _SW_SCALE_FLAGS 的注释：不吃 libswscale 的
+    默认 bicubic，且与 hwaccel 侧 scale_cuda 的 lanczos 同档）。
+    """
+    sfx = f":flags={_SW_SCALE_FLAGS}"
     if src_w <= 0 or src_h <= 0:
-        return f"scale={dst_w}:{dst_h}"
+        return f"scale={dst_w}:{dst_h}{sfx}"
 
     src_ratio = src_w / src_h
     dst_ratio = dst_w / dst_h
 
     if abs(src_ratio - dst_ratio) < 1e-3:
-        return f"scale={dst_w}:{dst_h}"
+        return f"scale={dst_w}:{dst_h}{sfx}"
 
     if src_ratio > dst_ratio:
-        return f"scale=-2:{dst_h},crop={dst_w}:{dst_h}:(iw-{dst_w})/2:0"
+        return f"scale=-2:{dst_h}{sfx},crop={dst_w}:{dst_h}:(iw-{dst_w})/2:0"
 
-    return f"scale={dst_w}:-2,crop={dst_w}:{dst_h}:0:(ih-{dst_h})/2"
+    return f"scale={dst_w}:-2{sfx},crop={dst_w}:{dst_h}:0:(ih-{dst_h})/2"
 
 
 def build_crop_cover_filter(src_w: int, src_h: int, dst_w: int, dst_h: int,

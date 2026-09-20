@@ -2026,6 +2026,19 @@ def collect_video_files(input_path: Path, recursive: bool = False) -> List[Path]
 #  视频滤镜（crop / cover，含 CUDA 支持）
 # ═══════════════════════════════════════════════════════════════════
 
+# CPU 侧 scale 滤镜的缩放算法。**显式钉 lanczos**，理由两条：
+#   ① 不吃 libswscale 的默认值。`scale` 滤镜自身的 flags 默认是空串、继承全局
+#      `-sws_flags`，而后者默认是 bicubic——实测 `scale=W:H` 与
+#      `scale=W:H:flags=bicubic` 的帧级 MD5 完全相同（psnr 三个平面全 inf）。
+#      默认值等于"没指定、随实现走"，画质不可预期。
+#   ② 与 GPU 侧同档。新链用 `scale_cuda=…:interp_algo=lanczos`（scale_cuda 的
+#      最高档，量程 0~4 只到 lanczos），若 CPU 侧留 bicubic，同一批文件会在
+#      GPU 上更锐、一旦降级到 CPU（无 scale_cuda 的构建 / --hwaccel none /
+#      新链失败）就变软。
+# 注意：libswscale 还有 spline / sinc / gauss / area 等档，但 scale_cuda 没有
+# 对应档可选，取两者交集里最高的那个 → lanczos。
+_SW_SCALE_FLAGS = 'lanczos'
+
 def _build_crop_filter_str(orig_w: int, orig_h: int, out_w: int, out_h: int,
                             use_cuda: bool = False) -> str:
     """
@@ -2046,24 +2059,26 @@ def _build_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int) -> s
     """
     生成等比缩放+居中裁剪滤镜字符串（cover 模式）。
     策略：比较宽高比，确定缩放方向，再裁剪到目标区域。
-    cover 模式始终使用 CPU 侧滤镜，不支持 crop_cuda（crop_cuda 无法替代 scale 步骤）。
+    缩放算法显式用 lanczos（见 _SW_SCALE_FLAGS 的注释：不吃 libswscale 的
+    默认 bicubic，且与 GPU 侧 scale_cuda 的 lanczos 同档）。
     """
+    sfx = f':flags={_SW_SCALE_FLAGS}'
     if src_w <= 0 or src_h <= 0:
-        return f'scale={dst_w}:{dst_h}'
+        return f'scale={dst_w}:{dst_h}{sfx}'
 
     src_ratio = src_w / src_h
     dst_ratio = dst_w / dst_h
 
     if abs(src_ratio - dst_ratio) < 1e-3:
         # 比例完全一致，直接缩放
-        return f'scale={dst_w}:{dst_h}'
+        return f'scale={dst_w}:{dst_h}{sfx}'
 
     if src_ratio > dst_ratio:
         # 源比目标更宽：以高度为基准缩放，左右裁剪
-        return f'scale=-2:{dst_h},crop={dst_w}:{dst_h}:(iw-{dst_w})/2:0'
+        return f'scale=-2:{dst_h}{sfx},crop={dst_w}:{dst_h}:(iw-{dst_w})/2:0'
     else:
         # 源比目标更高（或更窄）：以宽度为基准缩放，上下裁剪
-        return f'scale={dst_w}:-2,crop={dst_w}:{dst_h}:0:(ih-{dst_h})/2'
+        return f'scale={dst_w}:-2{sfx},crop={dst_w}:{dst_h}:0:(ih-{dst_h})/2'
 
 
 def _build_cover_cuda_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,

@@ -1466,6 +1466,73 @@ def resolve_pix_fmt_for_depth(codec: str, depth: int,
         return _PIXFMT_BY_DEPTH[8].get(c, _DEFAULT_PIXFMT_BY_DEPTH[8])
     return _PIXFMT_BY_DEPTH.get(depth, {}).get(c, _DEFAULT_PIXFMT_BY_DEPTH[depth])
 
+
+# ── --hdr 相关 ────────────────────────────────────────────────────────
+# `--hdr sdr` 用的滤镜配方：先转到线性光（zscale），做 tone mapping，再转回
+# BT.709 的 SDR。tonemap 滤镜要求线性输入，不能直接对 gamma 编码的帧做。
+#   · npl=100      标称峰值亮度（HLG/PQ 内容的常用取值）
+#   · desat=0      ffmpeg 的 desat 默认 2 会明显掉饱和度，做 HDR→SDR 时通常关掉
+# ⚠ `tonemap_cuda` **在上游不存在**（实测 `ffmpeg -h filter=tonemap_cuda` →
+#   Unknown filter，与 crop_cuda 同款），所以没有 CUDA 侧的硬件 tone mapping：
+#   CUDA 链必须先把帧下载成软件帧再做（cover 链本来就在 crop 前 hwdownload，
+#   因此直接接在链尾即可，且应保留 p010le 下载以免提前丢精度）。
+_HDR_TONEMAP_ALGOS = ('none', 'linear', 'gamma', 'clip', 'reinhard', 'hable',
+                      'mobius')
+_HDR_TONEMAP_DEFAULT = 'mobius'
+_HDR_MODES = ('auto', 'keep', 'drop', 'sdr')
+# 需要"把色彩标签按 SDR 重写"的两种模式（像素层面 drop 不改、sdr 会真转换）
+_HDR_SDR_TAGGING_MODES = ('drop', 'sdr')
+
+
+def parse_hdr_spec(spec: Optional[str]) -> Tuple[str, str]:
+    """解析 --hdr → (mode, tonemap_algo)。
+
+    auto  沿用今天的行为（元数据尽力透传）
+    keep  尽力保留 HDR 静态元数据（写不进去时提示换 libx265）
+    drop  不写 HDR 静态元数据，色彩标签按 SDR(bt709) 写；**像素不动**
+    sdr   真的做 HDR→SDR tone mapping，色彩标签写 bt709
+    后两者都可以带算法：`--hdr sdr:hable`（默认 mobius）。
+    """
+    if not spec or not spec.strip():
+        return 'auto', _HDR_TONEMAP_DEFAULT
+    s = spec.strip().lower()
+    mode, sep, algo = s.partition(':')
+    if mode not in _HDR_MODES:
+        raise ValueError(
+            f"--hdr '{spec}' 无效：只支持 {' / '.join(_HDR_MODES)}"
+            f"（sdr 可带算法，如 sdr:hable）。")
+    if algo:
+        if mode != 'sdr':
+            raise ValueError(f"--hdr '{spec}'：只有 sdr 模式能带 tone mapping 算法。")
+        if algo not in _HDR_TONEMAP_ALGOS:
+            raise ValueError(
+                f"--hdr '{spec}' 无效：未知 tone mapping 算法 '{algo}'，"
+                f"可用 {' / '.join(_HDR_TONEMAP_ALGOS)}。")
+    else:
+        algo = _HDR_TONEMAP_DEFAULT
+    return mode, algo
+
+
+def _filter_exists(ffmpeg_bin: str, name: str) -> bool:
+    """惰性探测单个滤镜是否存在（只在 --hdr sdr 时才跑）。"""
+    try:
+        r = subprocess.run(
+            [ffmpeg_bin, '-nostdin', '-hide_banner', '-loglevel', 'error',
+             '-f', 'lavfi', '-i', 'nullsrc=s=16x16:d=0.04:r=25',
+             '-vf', name, '-frames:v', '1', '-f', 'null', '-'],
+            capture_output=True, text=True, timeout=15,
+            stdin=subprocess.DEVNULL, env=_ffmpeg_env())
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def build_tonemap_filter(algo: str) -> str:
+    """HDR→SDR 的滤镜串（zscale → tonemap → zscale）。"""
+    return (f'zscale=t=linear:npl=100,'
+            f'tonemap=tonemap={algo}:desat=0,'
+            f'zscale=t=bt709:m=bt709:r=tv')
+
 # ── --pix-fmt 相关 ──────────────────────────────────────────────────────
 # 4:2:0 系（含高位深）要求宽高**均为**偶数；4:2:2 系只要求宽为偶数。
 # 与 vidcrop_cpu_v2.py 的同名集合逐字一致（孪生约定）。
@@ -1889,16 +1956,23 @@ def resolve_subtitle_codec(src_subs: List[Optional[str]], container: str,
 
 
 def build_hdr_args(meta: Dict, codec: str,
-                   warn: Optional[Callable[[str], None]] = None) -> List[str]:
+                   warn: Optional[Callable[[str], None]] = None,
+                   hdr_mode: str = 'auto') -> List[str]:
     """
     HDR10 静态元数据写入。色彩三参数由 build_color_args 从源透传，此处不重复指定。
 
+    hdr_mode 由 --hdr 给出：
+      auto / keep  沿用既有行为（libx265 显式写；NVENC 与其它的告警）
+      drop / sdr   **不写** HDR 静态元数据（这两种模式都按 SDR 打标签；
+                   sdr 还会在滤镜链里真做 tone mapping，见 build_tonemap_filter）
     - libx265：显式 -x265-params，可靠。
     - NVENC：依赖帧 side_data 自动传播；走 hwdownload/CPU 回退链路时会丢失，故告警。
     - 其余编码器：只能保住色彩三参数与位深。
     """
     d = meta['derived']
     if not d['is_hdr']:
+        return []
+    if hdr_mode in _HDR_SDR_TAGGING_MODES:
         return []
     c = (codec or '').lower()
     out: List[str] = []
@@ -2128,7 +2202,8 @@ def build_range_convert_filter(meta: Optional[Dict], color_range: Optional[str],
 
 def build_color_args(video_file: Path, ffmpeg_bin: str = 'ffmpeg',
                      meta: Optional[Dict] = None,
-                     color_range: Optional[str] = None) -> List[str]:
+                     color_range: Optional[str] = None,
+                     hdr_mode: str = 'auto') -> List[str]:
     """
     构造 ffmpeg 输出端色彩参数列表。
 
@@ -2189,6 +2264,11 @@ def build_color_args(video_file: Path, ffmpeg_bin: str = 'ffmpeg',
 
     # 输出端 -color_trc 不接受 bt470bg/bt470m，需换成 libavutil 规范名
     trc = _TRC_OUTPUT_NAMES.get(trc, trc)
+
+    # --hdr drop / sdr：整条按 SDR 交付，色彩标签必须跟着改成 BT.709，
+    # 否则容器里还写着 bt2020/arib-std-b67，播放器会当成 HDR 去解释 SDR 像素。
+    if hdr_mode in _HDR_SDR_TAGGING_MODES:
+        space, prim, trc = 'bt709', 'bt709', 'bt709'
 
     return [
         '-colorspace', space,
@@ -3086,6 +3166,7 @@ def build_ffmpeg_cmd(
     color_range: Optional[str] = None,
     pix_fmt: Optional[str] = 'auto',
     bit_depth: Optional[int] = None,
+    hdr: str = 'auto',
     policy: str = 'auto',
 ) -> List[str]:
     """
@@ -3104,6 +3185,8 @@ def build_ffmpeg_cmd(
 
     def _warn(msg: str) -> None:
         print(f'  ⚠ {msg}', file=sys.stderr)
+
+    _hdr_mode, _hdr_algo = parse_hdr_spec(hdr)
 
     # [META-KEEP] 元数据探测（带缓存，全文件只探一次）
     meta = probe_full_metadata(input_file, ffmpeg_bin)
@@ -3136,7 +3219,7 @@ def build_ffmpeg_cmd(
     # 需在滤镜链末尾追加 setparams；GPU 编码器（NVENC/AMF/QSV）靠输出端参数写 VUI，
     # 且 crop_cuda 全 GPU 流水线不应被 CPU 滤镜破坏，故仅软件编码器追加。
     color_args = build_color_args(input_file, ffmpeg_bin, meta=meta,
-                                  color_range=color_range)
+                                  color_range=color_range, hdr_mode=_hdr_mode)
     _sp = _setparams_from_color_args(color_args)
     _is_sw_codec = codec.lower() not in CQ_SUPPORTED_CODECS and codec.lower() != 'copy'
     # 强制 --color-range tv|pc 且与源实际值域不同 → 自动做真正的像素值域转换。
@@ -3147,6 +3230,10 @@ def build_ffmpeg_cmd(
         warn=_warn)
     if _conv:
         vf_filter = f'{vf_filter},{_conv}'
+    # --hdr sdr：真做 HDR→SDR。接在链尾（此时帧已是软件帧：CUDA cover 链在 crop 前
+    # 就 hwdownload 过），且必须在 setparams 之前——setparams 写的是转换后的 SDR 属性。
+    if _hdr_mode == 'sdr':
+        vf_filter = f'{vf_filter},{build_tonemap_filter(_hdr_algo)}'
     if _sp and _is_sw_codec:
         vf_filter = f'{vf_filter},{_sp}'
 
@@ -3266,7 +3353,7 @@ def build_ffmpeg_cmd(
 
     # [META-KEEP] HDR10 静态元数据（libx265 走 -x265-params，其余尽力而为）
     if meta is not None:
-        cmd += build_hdr_args(meta, codec, warn=_warn)
+        cmd += build_hdr_args(meta, codec, warn=_warn, hdr_mode=_hdr_mode)
 
     # mp4/mov 快速启动
     if output_file.suffix.lower() in ('.mp4', '.m4v', '.mov'):
@@ -3547,6 +3634,7 @@ def process_file(
     policy: str = 'auto',
     pix_fmt: Optional[str] = 'auto',
     bit_depth: Optional[int] = None,
+    hdr: str = 'auto',
     queue_rest: Optional[float] = None,
     queue_cur: Optional[float] = None,
 ) -> Dict[str, object]:
@@ -3711,6 +3799,7 @@ def process_file(
             color_range=color_range,
             pix_fmt=pix_fmt,
             bit_depth=bit_depth,
+            hdr=hdr,
             policy=policy,
         )
         print('  ' + _label('输出文件') + str(output_file))
@@ -3789,6 +3878,7 @@ def process_file(
                 color_range=color_range,
                 pix_fmt=pix_fmt,
                 bit_depth=bit_depth,
+                hdr=hdr,
                 policy=policy,
             )
 
@@ -4106,6 +4196,16 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                              '（--fallback-policy strict 下改为报错）。'
                              '注意：与 --pix-fmt 语义重叠——显式给了 --pix-fmt 时'
                              '以 --pix-fmt 为准，本参数被忽略（会提示）')
+    parser.add_argument('--hdr', default='auto', metavar='MODE',
+                        help='HDR 处理（默认 auto）：'
+                             'auto/keep=尽力保留 HDR10 静态元数据'
+                             '（libx265 会写 master-display/max-cll；NVENC 写不进去，会告警）；'
+                             'drop=不写 HDR 静态元数据、色彩标签按 SDR(bt709) 写，'
+                             '**像素不动**；sdr=真的做 HDR→SDR tone mapping'
+                             '（zscale+tonemap，可带算法：sdr:hable / sdr:reinhard …，'
+                             '默认 mobius）。'
+                             '注意：tonemap_cuda 上游不存在，所以 CUDA 链上没有硬件 '
+                             'tone mapping —— 会先下载成软件帧再做')
 
     # 可观测性
     parser.add_argument('--dry-run', action='store_true',
@@ -4249,6 +4349,24 @@ def main() -> int:
     if args.bit_depth is not None and _pf_arg not in ('auto', 'none'):
         print(f'提示：--pix-fmt {args.pix_fmt} 与 --bit-depth {args.bit_depth} 语义重叠，'
               f'已按 --pix-fmt 为准，忽略 --bit-depth。')
+    # --hdr：解析校验 + 能力探测（tone mapping 需要 zscale 与 tonemap 两个滤镜）
+    try:
+        _hdr_mode, _hdr_algo = parse_hdr_spec(args.hdr)
+    except ValueError as exc:
+        print(f'[ERROR] {exc}', file=sys.stderr)
+        return 2
+    if _hdr_mode == 'sdr':
+        for _f in ('tonemap', 'zscale'):
+            if _filter_exists(ffmpeg_bin, _f):
+                continue
+            if args.fallback_policy == 'strict':
+                print(f'[ERROR] --hdr sdr 需要 {_f} 滤镜，但 {ffmpeg_bin} 没有'
+                      f'（--fallback-policy strict 不降级）。', file=sys.stderr)
+                return 2
+            print(f'  ⚠ --hdr sdr 需要 {_f} 滤镜，但 {ffmpeg_bin} 没有；'
+                  f'已降级为 --hdr drop（只改写色彩标签、不做像素转换）', file=sys.stderr)
+            args.hdr = 'drop'
+            break
 
     if args.crf is not None and not (0 <= args.crf <= 63):
         print('[ERROR] --crf 建议范围为 0-63。', file=sys.stderr)
@@ -4568,6 +4686,7 @@ def main() -> int:
                 policy=args.fallback_policy,
                 pix_fmt=args.pix_fmt,
                 bit_depth=args.bit_depth,
+                hdr=args.hdr,
                 queue_rest=q_rest,
                 queue_cur=q_cur,
             )

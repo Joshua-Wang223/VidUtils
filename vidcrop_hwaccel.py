@@ -35,24 +35,46 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
   • --extra-args 在 FFmpeg 命令末尾追加自定义参数
   • Ctrl+C 安全中断，自动清理 FFmpeg 子进程
 
-硬件加速
+三个正交轴（互不干涉，可任意组合）
+────────────────────────────────────────────────────────────────────
+  解码 --decode       auto(默认) / cuda / vulkan / vaapi / opencl / cpu
+  缩放 --scale-algo   auto(默认) / libswscale-<algo> / cuda-<algo>
+  编码 --codec        任意编码器（默认 h264_nvenc）
+  策略 --fallback-policy  auto(默认) / strict —— 只回答「显式点名的后端
+                      不可用/失败时降级还是报错」，与前三个轴正交。
+
+  轴之间没有任何冲突检查：--decode cpu --codec h264_nvenc（软解 + NVENC 硬编）
+  与 --decode cuda --codec libx264（硬解 + 软编）都合法。
+  ⚠ --decode cpu 只关解码，**不再等于纯 CPU**；纯 CPU 请写
+    --decode cpu --scale-algo libswscale-lanczos --codec libx264
+  ⚠ 旧名 --hwaccel 已硬更名为 --decode（取值 none → cpu），用旧名直接报错。
+
+硬件加速运行时行为
 ────────────────────────────────────────────────────────────────────
   • 运行时探测（非编译字符串匹配）下列能力：
         CUDA 解码、h264_nvenc、hevc_nvenc、crop_cuda / scale_cuda 滤镜、
-        Vulkan、VA-API、OpenCL
-  • 按优先级自动生成策略链并依次尝试，前一级失败自动降级：
+        Vulkan、VA-API、OpenCL。
+        探测按轴按需进行：三轴都显式指向 CPU 时跳过全部 GPU 探测。
+  • --scale-algo auto（默认）= 优先 cuda、失败回退 cpu。判定用**功能探针**
+    （真跑 1 帧 hwupload_cuda,scale_cuda → null），只在 auto 且零拷贝路径
+    不可用时才跑；显式 --scale-algo cuda-* / libswscale-* 不探针、直接执行。
+  • 按优先级自动生成策略链并依次尝试，前一级失败自动降级（--fallback-policy
+    strict 时不追加降级策略，失败即报错退出 2）：
         1) CUDA 全流水线（硬解 + crop_cuda + NVENC 硬编）—— 仅 crop 模式。
            注意 crop_cuda 在 FFmpeg 上游并不存在（与编译选项无关），
            所以这条在本项目所有环境下都会跳过
         2) CUDA 缩放 + CPU 裁剪（硬解 + scale_cuda + 显式 hwdownload + CPU crop
            + NVENC 硬编）—— 仅 cover 模式；crop 只能回 CPU，因为 crop_cuda 不存在
-        3) 自动硬解 + NVENC 硬编（CPU 做 vf 滤镜）
+        2b) CUDA 缩放 + CPU 裁剪（**软件解码** + hwupload_cuda + scale_cuda +
+           显式 hwdownload + CPU crop）—— 仅 cover 模式，且只在
+           1) / 2) 都没法用、而功能探针证明 CUDA 缩放能跑时才插入
+        3) 解码轴给的后端（auto → -hwaccel auto）+ NVENC 硬编（CPU 做 vf 滤镜）
         4) 指定硬解（cuda/vulkan/vaapi/opencl）+ 软件编码
         5) auto 模式下的最佳硬解 + 软件编码
         6) 纯 CPU 处理
 
         注：crop 模式从第 1 条起、cover 从第 2 条起、crop-cover 从第 3 条起
-            （crop-cover 要先裁剪，GPU 缩放得额外 hwupload 一次，未纳入）。
+            （crop-cover 要先裁剪，GPU 缩放得额外 hwupload_cuda 一次，未纳入）。
 
 编码器智能处理
 ────────────────────────────────────────────────────────────────────
@@ -107,7 +129,7 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
   python vidcrop_hwaccel.py \\
       --input video.mp4 --output out.webm \\
       --output-width 1280 --output-height 720 \\
-      --codec vp9 --crf 32 --hwaccel cuda
+      --codec vp9 --crf 32 --decode cuda
 
   # 2e) 统一质量基准：--crf-ref 以 libx264 CRF 为轴，按等效表换算到目标编码器
   python vidcrop_hwaccel.py \\
@@ -138,11 +160,18 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
       --input ./videos --output ./out \\
       --output-width 1280 --output-height 720 --dry-run
 
-  # 5) 指定日志文件 + 禁用硬件加速（CI/容器环境）
+  # 5) 指定日志文件 + 三轴全 CPU（CI/容器环境；也等价于旧的 --hwaccel none）
   python vidcrop_hwaccel.py \\
       --input ./clips --output ./out \\
       --output-width 1280 --output-height 720 \\
-      --hwaccel none --log process.log
+      --decode cpu --scale-algo libswscale-lanczos --codec libx264 \\
+      --log process.log
+
+  # 5b) 软解 + 显存内缩放（需要自带 scale_cuda 的自建 FFmpeg）
+  python vidcrop_hwaccel.py \\
+      --input ./clips --output ./out \\
+      --output-width 1280 --output-height 720 \\
+      --decode cpu --scale-algo cuda-lanczos --codec hevc_nvenc
 
   # 6) 显式提供原始分辨率（跳过 ffprobe 探测，适合超大批量）
   python vidcrop_hwaccel.py \\
@@ -501,6 +530,9 @@ class HardwareCapabilities:
         self.has_encoder_av1   = False
         self.has_crop_cuda     = False
         self.has_cuda_scale    = False
+        # 功能探针：软解路径的「hwupload_cuda → scale_cuda → hwdownload」真能跑通吗。
+        # 与 has_cuda_scale（只是 `-filters` 里有这个滤镜名）是两件事，见下面谓词的注释。
+        self.cuda_scale_upload_ok = False
         self.has_vulkan        = False
         self.has_vaapi         = False
         self.has_opencl        = False
@@ -525,13 +557,31 @@ class HardwareCapabilities:
         """全 GPU 流水线：硬解 + crop_cuda + NVENC 编码（仅 crop 模式可用）。"""
         return self.has_decoder and self.has_crop_cuda and self.has_nvenc(codec)
 
-    def can_cuda_scale(self, codec: str) -> bool:
-        """CUDA 缩放流水线：硬解 + scale_cuda + NVENC 编码（仅 cover 模式）。
+    def can_cuda_scale_zerocopy(self, codec: str) -> bool:
+        """零拷贝 CUDA 缩放：硬解供 CUDA 帧 + scale_cuda + NVENC（仅 cover 模式）。
 
         只把【缩放】留在显存里，裁剪仍回 CPU——crop_cuda 在 FFmpeg 上游并不存在，
         所以链路必然是 scale_cuda → hwdownload → crop（一次下载，与现状次数相同）。
         """
         return self.has_decoder and self.has_cuda_scale and self.has_nvenc(codec)
+
+    def can_cuda_scale_upload(self) -> bool:
+        """软解 CUDA 缩放：软件帧 → hwupload_cuda → scale_cuda → hwdownload → crop。
+
+        与零拷贝路径的关键区别：**不要求 has_decoder**——缩放轴与解码轴正交，硬解
+        不可用（或解不了该编码）时照样能把重采样放进显存。也不要求 NVENC：链尾已经
+        是软件帧（hwdownload + CPU crop），任何编码器都能接。
+
+        判据用功能探针 cuda_scale_upload_ok，而不是 has_cuda_scale（滤镜名存在）：
+        「ffmpeg 带 scale_cuda 但机器没有 N 卡 / 容器没挂设备」是真实存在的组合，
+        只查滤镜名会把这种情况误判成可用，而策略链不跨文件记忆失败 →
+        每个文件都要先跑一次必然失败的链才回退。
+        """
+        return self.cuda_scale_upload_ok
+
+    def can_cuda_scale(self, codec: str) -> bool:
+        """兼容别名（等价于 can_cuda_scale_zerocopy，保留给既有调用方/单测）。"""
+        return self.can_cuda_scale_zerocopy(codec)
 
     def has_hwaccel(self, hwaccel_type: str) -> bool:
         return {
@@ -549,6 +599,7 @@ class HardwareCapabilities:
             ('av1_nvenc',  self.has_encoder_av1,   'has_encoder_av1'),
             ('crop_cuda',  self.has_crop_cuda,     'has_crop_cuda'),
             ('scale_cuda', self.has_cuda_scale,    'has_cuda_scale'),
+            ('hwupload缩放', self.cuda_scale_upload_ok, 'cuda_scale_upload_ok'),
             ('Vulkan',     self.has_vulkan,         'has_vulkan'),
             ('VA‑API',     self.has_vaapi,          'has_vaapi'),
             ('OpenCL',     self.has_opencl,         'has_opencl'),
@@ -573,7 +624,7 @@ def _check_nvenc_available(ffmpeg_bin: str = 'ffmpeg', codec: str = 'h264_nvenc'
         # 既不关闭也无数据的管道（CI / 后台任务 / 工具托管执行），它会一直阻塞在
         # read() 上，CPU 占用 0%，且 Python 的 timeout= 也兜不住（实测：kill 之后
         # communicate() 同样不返回，只能靠外部强杀）。转码命令里已有 -nostdin，
-        # 探测命令此前漏了，导致 --hwaccel auto 卡在"正在检测硬件加速能力…"。
+        # 探测命令此前漏了，导致 --decode auto 卡在"正在检测硬件加速能力…"。
         ffmpeg_bin, '-nostdin', '-y', '-hide_banner', '-loglevel', 'error',
         '-f', 'lavfi', '-i', 'nullsrc=s=160x160:d=0.04:r=25',
         '-frames:v', '1', '-c:v', codec, '-f', 'null', '-',
@@ -824,12 +875,31 @@ def validate_cuda_environment(ffmpeg_bin: str = 'ffmpeg',
 
 
 def detect_cuda_capabilities(ffmpeg_bin: str = 'ffmpeg',
-                              hwaccel: Optional[str] = None,
+                              decode: Optional[str] = None,
                               diagnostics: bool = False,
-                              cuda_device_id: int = 0) -> HardwareCapabilities:
-    """运行时全面探测硬件加速能力，根据 --hwaccel 选择性探测。"""
+                              cuda_device_id: int = 0,
+                              *,
+                              probe_encoders: bool = True,
+                              probe_filters: bool = False) -> HardwareCapabilities:
+    """运行时全面探测硬件加速能力。
+
+    **探测也按轴分开**（三轴正交的必然要求）：
+      · decode 轴（--decode）只决定探不探**解码器**；
+      · 编码器探不探由 probe_encoders 决定（--codec 与 --scale-algo 需要 NVENC 时才探）；
+      · 滤镜（crop_cuda / scale_cuda）探不探由 probe_filters 决定。
+
+    旧实现把编码器与滤镜探测全塞在 `if detect_cuda:` 里，于是
+    「软解 + NVENC」这类组合（今天写成 --decode cpu）根本不探滤镜，
+    还会在下面印出「当前 FFmpeg 里没有 scale_cuda」这种**假**结论。
+
+    注意 has_cuda_scale 只代表「`-filters` 里有这个滤镜名」；能否真跑要看
+    HardwareCapabilities.can_cuda_scale_upload()（功能探针，见 _probe_cuda_scale_upload）。
+    """
     caps = HardwareCapabilities()
-    if hwaccel == 'none':
+    # 解码轴归一化：None / 'none'（旧值）/ 'cpu' 都是「软解」
+    _decode = 'cpu' if decode in (None, 'none', 'cpu') else decode
+    # 一件都不探就直接返回：调用方在「三轴全显式 CPU」时走这条路，省掉全部 GPU 探测
+    if _decode == 'cpu' and not probe_encoders and not probe_filters:
         return caps
 
     # 新增：先做主动环境验证（仅在诊断模式下打印详细结果）
@@ -844,11 +914,11 @@ def detect_cuda_capabilities(ffmpeg_bin: str = 'ffmpeg',
             print('    环境验证：无明显缺陷（nvidia-smi 可访问、设备节点存在、库路径可用、FFmpeg 支持 cuda）。')
 
     print('正在检测硬件加速能力...')
-    detect_all   = hwaccel in (None, 'auto')
-    detect_cuda  = detect_all or hwaccel == 'cuda'
-    detect_vulkan = detect_all or hwaccel == 'vulkan'
-    detect_vaapi = detect_all or hwaccel == 'vaapi'
-    detect_opencl = detect_all or hwaccel == 'opencl'
+    detect_all   = _decode == 'auto'
+    detect_cuda  = detect_all or _decode == 'cuda'
+    detect_vulkan = detect_all or _decode == 'vulkan'
+    detect_vaapi = detect_all or _decode == 'vaapi'
+    detect_opencl = detect_all or _decode == 'opencl'
 
     if detect_cuda:
         print('  CUDA 解码:  ', end='', flush=True)
@@ -859,6 +929,8 @@ def detect_cuda_capabilities(ffmpeg_bin: str = 'ffmpeg',
         caps._mark_detected('has_decoder')
         print('可用 ✓' if caps.has_decoder else '不可用 ✗')
 
+    # 编码器与解码轴无关：软解照样可以 NVENC 编码
+    if probe_encoders:
         print('  h264_nvenc: ', end='', flush=True)
         caps.has_encoder_h264 = _check_nvenc_available(ffmpeg_bin, 'h264_nvenc')
         caps._mark_detected('has_encoder_h264')
@@ -876,11 +948,14 @@ def detect_cuda_capabilities(ffmpeg_bin: str = 'ffmpeg',
         caps._mark_detected('has_encoder_av1')
         print('可用 ✓' if caps.has_encoder_av1 else '不可用 ✗')
 
+    # 滤镜同样与解码轴无关：软解 + hwupload_cuda 一样能用 scale_cuda
+    if probe_filters:
         try:
             r = subprocess.run(
                 [ffmpeg_bin, '-hide_banner', '-filters'],
                 capture_output=True, text=True, timeout=10,
-                env=_ffmpeg_env(),
+                encoding='utf-8', errors='replace',
+                stdin=subprocess.DEVNULL, env=_ffmpeg_env(),
             )
             _flist = r.stdout or ''
             caps.has_crop_cuda = 'crop_cuda' in _flist
@@ -917,22 +992,52 @@ def detect_cuda_capabilities(ffmpeg_bin: str = 'ffmpeg',
     #   · crop_cuda —— **该滤镜在 FFmpeg 上游并不存在**（不是"没编译"），
     #                  所以 crop 模式的全 GPU 流水线（策略 1）永远跳过；
     #   · scale_cuda —— 自建（--enable-cuda-nvcc）才有，cover 的 CUDA 缩放策略依赖它。
+    # 注意每条都要求「该项本轮确实探过」——否则会像旧实现那样，在没探滤镜的组合下
+    # （如旧的 nvenc-only 分支）印出「当前 FFmpeg 里没有 scale_cuda」这种假结论。
     _notes: List[str] = []
-    if detect_cuda and not caps.has_encoder_av1:
+    if probe_encoders and not caps.has_encoder_av1:
         _notes.append('av1_nvenc 不可用：AV1 硬编需 8 代 NVENC（Ada / RTX 40 / L40 及以上）；'
                       '--codec av1_nvenc 会自动降级为 libsvtav1 CPU 编码')
-    if detect_cuda and not caps.has_crop_cuda:
+    if probe_filters and not caps.has_crop_cuda:
         _notes.append('crop_cuda 不可用：该滤镜在 FFmpeg 上游并不存在（与编译选项无关），'
-                      'crop 模式的全 GPU 流水线跳过；实际走「硬解 + CPU 裁剪 + NVENC 硬编」')
-    if detect_cuda and not caps.has_cuda_scale:
-        _notes.append('scale_cuda 不可用：cover 模式的「CUDA 缩放 + CPU 裁剪」策略跳过，'
-                      '退回「硬解 + CPU 缩放裁剪 + NVENC 硬编」（需 --enable-cuda-nvcc 的自建 FFmpeg）')
+                      'crop 模式的全 GPU 流水线跳过；裁剪实际在 CPU 侧完成')
+    if probe_filters and not caps.has_cuda_scale:
+        _notes.append('scale_cuda 不可用：显存内缩放（--scale-algo cuda-*）走不了，'
+                      '退回 CPU 缩放（需 --enable-cuda-nvcc 的自建 FFmpeg）')
     if _notes:
         print('  ── 说明 ──')
         for _n in _notes:
             print(f'  · {_n}')
 
     return caps
+
+
+def _probe_cuda_scale_upload(ffmpeg_bin: str = 'ffmpeg') -> bool:
+    """功能探针：软解路径的「上传 → 显存缩放 → 下载」真能跑通吗。
+
+    为什么不复用 `-filters` 里有没有 scale_cuda：那只证明滤镜**编进了二进制**。
+    「ffmpeg 带 scale_cuda 但机器没有 N 卡 / 容器没挂设备」是真实存在的组合
+    （本项目的 Windows 开发机就是这样），此时生成的链必然失败。而策略链
+    **不跨文件记忆**失败（process_file 每个文件重新生成并逐级尝试），
+    误判一次 = 每个文件一次失败尝试 + 噪声日志。
+
+    为什么用 hwupload_cuda 而不是通用 hwupload：后者必须配 -filter_hw_device
+    （否则报 "A hardware device reference is required"），而 hwupload_cuda
+    自带 device，不需要给 build_ffmpeg_cmd 增加任何新参数。
+    """
+    test_cmd = [
+        ffmpeg_bin, '-nostdin', '-y', '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'nullsrc=s=160x160:d=0.04:r=25',
+        '-vf', 'format=nv12,hwupload_cuda,scale_cuda=128:128,hwdownload,format=nv12',
+        '-frames:v', '1', '-f', 'null', '-',
+    ]
+    try:
+        r = subprocess.run(test_cmd, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.PIPE, text=True, timeout=20,
+                           stdin=subprocess.DEVNULL, env=_ffmpeg_env())
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -2041,8 +2146,8 @@ def collect_video_files(input_path: Path, recursive: bool = False) -> List[Path]
 #      默认值等于"没指定、随实现走"，画质不可预期。
 #   ② 与 GPU 侧同档。新链用 `scale_cuda=…:interp_algo=lanczos`（scale_cuda 的
 #      最高档，量程 0~4 只到 lanczos），若 CPU 侧留 bicubic，同一批文件会在
-#      GPU 上更锐、一旦降级到 CPU（无 scale_cuda 的构建 / --hwaccel none /
-#      新链失败）就变软。
+#      GPU 上更锐、一旦降级到 CPU（无 scale_cuda 的构建 / 显式 --scale-algo
+#      libswscale-* / 三轴全 CPU / 新链失败）就变软。
 # 注意：libswscale 还有 spline / sinc / gauss / area 等档，但 scale_cuda 没有
 # 对应档可选，取两者交集里最高的那个 → lanczos。
 _SW_SCALE_FLAGS = 'lanczos'
@@ -2186,16 +2291,20 @@ def _build_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
 
 def _build_cover_cuda_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
                                  download_fmt: str,
-                                 cuda_algo: str = _CUDA_SCALE_ALGO) -> str:
+                                 cuda_algo: str = _CUDA_SCALE_ALGO,
+                                 upload: bool = False) -> str:
     """
     生成 cover 模式的 CUDA 缩放链：scale_cuda → hwdownload,format=… → crop。
+
+    upload=True 时在前面加 hwupload_cuda——那是「软件解码」这一侧用的形态
+    （缩放轴与解码轴正交：硬解不可用时也能把重采样放进显存）。
 
     几何与 CPU 侧 _build_cover_filter_str 完全一致，只把重采样搬到显存：
       源更宽   → 先按高度缩放（宽按比例取偶），再左右居中裁剪
       源更高   → 先按宽度缩放（高按比例取偶），再上下居中裁剪
       比例相同 → 只缩放、不裁剪
 
-    两处刻意的选择：
+    三处刻意的选择：
 
     · **显式写 hwdownload,format=…**，不依赖 FFmpeg 自动插入。实测（2026-09-20，
       T4）自动插入那条路下 crop 会被静默丢弃：scale_cuda=1280:720,crop=iw/2:ih/2
@@ -2203,18 +2312,25 @@ def _build_cover_cuda_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
     · **中间尺寸在 Python 侧算成偶数**，不吃 scale_cuda 的 -2 取偶语义；
       interp_algo 显式指定（scale_cuda 的默认值是 0、未映射到具名档，
       默认取 _CUDA_SCALE_ALGO，可用 --scale-algo 覆盖）。
+    · upload 用 **hwupload_cuda**（自带 device）而不是通用 hwupload：后者必须配
+      `-filter_hw_device`，否则报 "A hardware device reference is required"；
+      hwupload_cuda 不需要给 build_ffmpeg_cmd 加任何新参数。
     """
-    sc = f'scale_cuda={dst_w}:{dst_h}:interp_algo={cuda_algo}'
+    prefix = 'hwupload_cuda,' if upload else ''
+
+    def _sc(w: int, h: int) -> str:
+        return f'{prefix}scale_cuda={w}:{h}:interp_algo={cuda_algo}'
+
     dl = f'hwdownload,format={download_fmt}'
     if src_w <= 0 or src_h <= 0:
-        return f'{sc},{dl}'
+        return f'{_sc(dst_w, dst_h)},{dl}'
 
     src_ratio = src_w / src_h
     dst_ratio = dst_w / dst_h
 
     if abs(src_ratio - dst_ratio) < 1e-3:
         # 比例完全一致：只缩放不裁剪
-        return f'{sc},{dl}'
+        return f'{_sc(dst_w, dst_h)},{dl}'
     if src_ratio > dst_ratio:
         # 源比目标更宽：以高度为基准缩放，左右裁剪
         sw = derive_even_dimension(src_w * dst_h / src_h)
@@ -2225,8 +2341,7 @@ def _build_cover_cuda_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
         sw = dst_w
         sh = derive_even_dimension(src_h * dst_w / src_w)
         crop = f',crop={dst_w}:{dst_h}:0:(ih-{dst_h})/2'
-    return (f'scale_cuda={sw}:{sh}:interp_algo={cuda_algo},'
-            f'hwdownload,format={download_fmt}{crop}')
+    return f'{_sc(sw, sh)},{dl}{crop}'
 
 
 def _build_crop_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
@@ -2254,6 +2369,7 @@ def build_video_filter(mode: str, src_w: int, src_h: int, dst_w: int, dst_h: int
                        use_cuda: bool = False,
                        crop_ratio: Optional[Tuple[int, int]] = None,
                        cuda_scale: bool = False,
+                       cuda_upload: bool = False,
                        src_bits: int = 8,
                        sw_algo: str = _SW_SCALE_FLAGS,
                        cuda_algo: str = _CUDA_SCALE_ALGO) -> str:
@@ -2263,22 +2379,28 @@ def build_video_filter(mode: str, src_w: int, src_h: int, dst_w: int, dst_h: int
     mode='crop': 直接居中裁剪，use_cuda=True 时使用 crop_cuda（全 GPU 流水线专用）。
     mode='cover': 等比缩放+裁剪。
                   cuda_scale=True 时走「CUDA 缩放 + CPU 裁剪」（scale_cuda →
-                  显式 hwdownload,format=… → crop），需要 -hwaccel_output_format cuda；
-                  否则用 CPU 侧 scale（此时忽略 use_cuda：crop_cuda 不是 scale 的替代品）。
+                  显式 hwdownload,format=… → crop）；此时若 cuda_upload=True 则在
+                  链首加 hwupload_cuda（软件解码路径），否则要求 -hwaccel_output_format
+                  cuda 由解码器直接供 CUDA 帧（零拷贝路径）。
+                  两者都不给则用 CPU 侧 scale（此时忽略 use_cuda：crop_cuda 不是 scale 的替代品）。
     mode='crop-cover': 先按 crop_ratio（未给出时即目标宽高比 dst_w:dst_h）最大化
                   居中裁剪，再把裁剪结果等比缩放覆盖到 dst_w×dst_h。含两步变换，
-                  不走 CUDA 缩放链（要先裁剪 → GPU 缩放需额外 hwupload，未实测）。
+                  不走 CUDA 缩放链（要先裁剪 → GPU 缩放需额外 hwupload_cuda，未实测）。
 
     Args:
         crop_ratio: (分子, 分母)，crop-cover 的裁剪步骤所用比例；None 时用目标宽高比。
         cuda_scale: 是否使用 scale_cuda 做缩放（仅 cover 模式；cover 之外传 True 报错）。
+        cuda_upload: cuda_scale 的软解形态——链首加 hwupload_cuda（仅 cover 模式）。
         src_bits:   源位深，决定 hwdownload 的下载格式（8bit→nv12，10bit→p010le）。
     """
+    if cuda_upload and not cuda_scale:
+        raise ValueError('cuda_upload=True 必须同时 cuda_scale=True（上传是为了给 scale_cuda 用）')
     if cuda_scale:
         if mode != 'cover':
             raise ValueError('CUDA 缩放链（scale_cuda）目前只支持 cover 模式')
         return _build_cover_cuda_filter_str(src_w, src_h, dst_w, dst_h,
-                                            _src_download_fmt(src_bits), cuda_algo)
+                                            _src_download_fmt(src_bits), cuda_algo,
+                                            upload=cuda_upload)
     if mode == 'cover':
         return _build_cover_filter_str(src_w, src_h, dst_w, dst_h, sw_algo)
     if mode == 'crop-cover':
@@ -2510,25 +2632,83 @@ def _select_best_hwaccel(hw_caps: HardwareCapabilities) -> Optional[str]:
     return None
 
 
+# 用了这些解码后端时，解码器产出的仍是**软件帧**（vulkan/vaapi/opencl 都是先下载回
+# 系统内存，opencl 那点 nv12 也是软件帧）→ 可以再接 hwupload_cuda 上载到显存。
+_DECODE_SW_FRAME_BACKENDS = ('vulkan', 'vaapi', 'opencl')
+
+
+def _decode_hwaccel(decode: str, hw_caps: HardwareCapabilities) -> Optional[str]:
+    """解码轴 → `-hwaccel` 的实际取值（None = 软解、不下发）。
+
+    auto → 'auto'（保持现状：交给 ffmpeg 自己挑）；cpu → None；其余后端不可用时
+    也退化为 None —— 要不要因为这次「够不到」而报错，由上层按 --fallback-policy 决定，
+    这一层只负责给出「实际能用哪个」。
+    """
+    if decode == 'auto':
+        return 'auto'
+    if decode == 'cpu':
+        return None
+    return decode if hw_caps.has_hwaccel(decode) else None
+
+
+def _decode_output_format(hw: Optional[str]) -> Optional[str]:
+    """`-hwaccel_output_format`：opencl 需要 nv12，其余留空（与既有策略 3/4 一致）。"""
+    return 'nv12' if hw == 'opencl' else None
+
+
+def _combo_hint(hwaccel: Optional[str], cuda_scale: bool, hwupload: bool,
+                codec: str) -> str:
+    """按（实际生效的解码后端, 缩放形态, 编码器）给一句「这个组合大概会怎样」。
+
+    三轴可自由组合，所以有些组合能跑但没有收益甚至更慢。脚本只负责把话说明白，
+    实际效果由用户判断（不阻断执行）。返回空串表示这个组合没什么特别要提醒的。
+    hwaccel 传**策略实际会用的**值（可能是降级后的），不是用户请求的轴值——
+    否则概览说的和真正跑的对不上。
+    """
+    if cuda_scale and hwupload:
+        return ('软解 + hwupload_cuda + 显存内缩放：要多一次整帧上载，'
+                '可能不如「软解 + CPU 缩放」；只在 NVDEC 用不了/解不了该编码时更优')
+    if cuda_scale:
+        if codec in NVENC_CODECS:
+            return ('硬解 + 显存内缩放 + 硬编：全 GPU 零拷贝，最快路径'
+                    '（4K→1440x1080 实测快 51.9%）')
+        return '硬解 + 显存内缩放，但编码在 CPU：链尾仍要下载一次，收益有限'
+    if hwaccel in ('cuda', 'vulkan', 'vaapi', 'opencl'):
+        return '硬解 + CPU 缩放：CPU 段在关键路径上，并发 CPU 作业会直接把它拖慢'
+    if codec not in NVENC_CODECS:
+        return '纯 CPU：没有 GPU 参与'
+    if hwaccel is None:
+        return '软解 + GPU 硬编：解码开销在 CPU，编码在 GPU'
+    return ''
+
+
 def _generate_strategies(
     user_codec: str,
     hw_caps: HardwareCapabilities,
-    hw_mode: str,
+    decode: str = 'auto',
     mode: str = 'crop',
     scale_backend: str = 'auto',
+    policy: str = 'auto',
 ) -> List[Dict]:
     """
-    根据硬件能力、用户意图和处理模式生成策略列表（优先级从高到低）。
+    根据**三个正交轴**（解码 --decode / 缩放 --scale-algo / 编码 --codec）与处理模式
+    生成策略列表（优先级从高到低）。
+
+    轴之间没有冲突检查：每个轴各自决定「要用哪个后端」，本函数只把它们拼成链。
+    policy='strict' 时**不追加降级策略**（只留首选策略），执行失败由上层直接报错退出；
+    policy='auto' 时逐级降级。
 
     每个策略字段：
         name                  描述名称
         hwaccel               None / 'auto' / 'cuda' 等
-        hwaccel_output_format None / 'cuda'
+        hwaccel_output_format None / 'cuda' / 'nv12'
         use_hw_filter         是否使用 crop_cuda 滤镜（仅 crop 模式 + 全 GPU 流水线）
         cuda_scale            是否使用 scale_cuda 做缩放（仅 cover 模式的 CUDA 缩放链）
+        hwupload              cuda_scale 的软解形态：链首加 hwupload_cuda
         codec                 实际编码器名称
         fallback              是否为降级策略
     """
+    decode = 'cpu' if decode in (None, 'none') else decode
     strategies = []
 
     # ── 确定首选编码器 ──
@@ -2544,10 +2724,12 @@ def _generate_strategies(
     # 用户显式指定非 NVENC 的具体编码器，软件策略沿用该编码器
     sw_codec = user_codec if (not is_nvenc and user_codec != 'auto') else sw_fallback
 
+    decode_hw = _decode_hwaccel(decode, hw_caps)
+
     # ── 策略 1：全 GPU 流水线（硬解 + crop_cuda + NVENC 编码）──
     # cover / crop-cover 模式需要 scale 步骤，crop_cuda 不支持，
-    # 此策略仅在 crop 模式下可用。
-    if (hw_mode != 'none'
+    # 此策略仅在 crop 模式下可用。（crop_cuda 上游不存在，实际永不命中。）
+    if (decode != 'cpu'
             and mode == 'crop'
             and is_nvenc
             and hw_caps.can_full_pipeline(preferred_codec)):
@@ -2560,41 +2742,82 @@ def _generate_strategies(
             'fallback':              False,
         })
 
-    # ── 策略 1b：CUDA 缩放 + CPU 裁剪（仅 cover 模式）──
+    # ── 策略 1b / 1c：CUDA 缩放 + CPU 裁剪（仅 cover 模式）──
     # 为什么不是全 GPU：crop_cuda 在 FFmpeg 上游不存在（不是编译选项问题），
-    # 所以 crop 只能回 CPU，链路必然是 scale_cuda → hwdownload → crop ——
-    # 下载次数与现状相同（1 次），省掉的是 CPU 侧的重采样。
+    # 所以 crop 只能回 CPU，链路必然是 [hwupload_cuda →] scale_cuda → 显式
+    # hwdownload → crop —— 下载次数与现状相同（1 次），省掉的是 CPU 侧的重采样。
     #
     # 实测依据（2026-09-20，T4 + 自建 7.1，4K→1440x1080 覆盖链，-f null 去 IO）：
-    #   现行「硬解+CPU scale+crop+NVENC」23.11s  →  本策略 12.83s，快 44.5%；
-    #   CPU 侧 scale 单独成本从 4.03s（占现行 17.2%）降到 0。
+    #   现行「硬解+CPU scale(lanczos)+crop+NVENC」26.65s → 零拷贝形态 12.82s，快 51.9%
+    #   （对着旧 bicubic 基准 24.35s 则是 44.5%）；质量 PSNR(GPU vs CPU lanczos)=46.60dB。
     #   同轮判据：scale_cuda 之后若依赖 FFmpeg【自动插入】的 hwdownload，
     #   crop 会被静默丢弃（实测 scale_cuda=1280:720,crop=iw/2:ih/2 输出 1280x720
     #   而不是 640x360）→ 所以链里必须显式写 hwdownload,format=...
     #
-    # crop-cover 不纳入：它必须先裁剪，GPU 缩放要额外 hwupload 一次，未实测。
-    # --scale-algo 显式指定 libswscale-* 时也不插（用户强制走 CPU 链）。
-    if (hw_mode != 'none'
-            and mode == 'cover'
-            and scale_backend != 'libswscale'
-            and is_nvenc
-            and hw_caps.can_cuda_scale(preferred_codec)):
-        strategies.append({
-            'name':                  'CUDA 缩放 + CPU 裁剪（显存内缩放）',
-            'hwaccel':               'cuda',
-            'hwaccel_output_format': 'cuda',
-            'use_hw_filter':         False,
-            'cuda_scale':            True,
-            'codec':                 preferred_codec,
-            'fallback':              False,
-        })
+    # 两种形态二选一：
+    #   零拷贝（hwaccel='cuda' + hof='cuda'）——解码器直接供 CUDA 帧，要求有硬解
+    #   hwupload（链首 hwupload_cuda，hwaccel=None）——软件帧上载，**不要求硬解**
+    #     （缩放轴与解码轴正交：NVDEC 用不了或解不了该编码时照样能用 GPU 缩放）
+    #
+    # 何时插 hwupload 形态：显式 --scale-algo cuda-*，或者显式要了软解
+    # （--decode cpu，用户已确认「auto 缩放优先 cuda，与 --decode cpu 不矛盾」）
+    # 且零拷贝不可用。**纯默认（--decode auto + --scale-algo auto）不插**：
+    # 那条链的吞吐尚未实测（判据 D 未跑），不该在用户什么都没点时自动启用。
+    #
+    # crop-cover 不纳入：它必须先裁剪，GPU 缩放要额外 hwupload_cuda 一次，未实测。
+    if mode == 'cover' and scale_backend != 'libswscale':
+        _want_cuda = (scale_backend == 'cuda'
+                      or (scale_backend == 'auto' and decode == 'cpu'))
+        # auto 缩放保持既有判据（含 NVENC 门，字节级不变）；显式 cuda-* 时放宽到
+        # 「任何编码器」——链尾本来就是软件帧，硬编/软编都接得住。
+        _zc_direct = (hw_caps.has_decoder and hw_caps.has_cuda_scale
+                      and (is_nvenc if scale_backend == 'auto' else True))
+        _zc = decode != 'cpu' and _zc_direct
+        # auto 缩放要求功能探针通过（免得自动选到一条必然失败的链）；
+        # 显式 cuda-* 只要求滤镜存在——直接执行，失败由 --fallback-policy 处理。
+        _up_ok = (hw_caps.can_cuda_scale_upload() if scale_backend == 'auto'
+                  else hw_caps.has_cuda_scale)
+        _up = _want_cuda and not _zc and _up_ok
+        if _zc:
+            strategies.append({
+                'name':                  'CUDA 缩放 + CPU 裁剪（显存内缩放）',
+                'hwaccel':               'cuda',
+                'hwaccel_output_format': 'cuda',
+                'use_hw_filter':         False,
+                'cuda_scale':            True,
+                'codec':                 preferred_codec,
+                'fallback':              False,
+            })
+        elif _up:
+            # hwupload 形态必须不带 -hwaccel_output_format cuda：帧是软件帧。
+            # 解码轴若显式点了会产生软件帧的后端（vulkan/vaapi/opencl）就沿用，
+            # 否则（cpu / auto 但拿不到硬解）走纯软解。
+            _up_hw = (decode if (decode in _DECODE_SW_FRAME_BACKENDS
+                                 and hw_caps.has_hwaccel(decode)) else None)
+            strategies.append({
+                'name':                  'CUDA 缩放 + CPU 裁剪（软件解码 + hwupload）',
+                'hwaccel':               _up_hw,
+                'hwaccel_output_format': None,
+                'use_hw_filter':         False,
+                'cuda_scale':            True,
+                'hwupload':              True,
+                'codec':                 preferred_codec,
+                'fallback':              False,
+            })
 
-    # ── 策略 2：自动硬解 + NVENC 编码（CPU 侧 vf 滤镜）──
-    if hw_mode != 'none' and is_nvenc and nvenc_available:
+    # ── 策略 2：解码轴后端 + NVENC 编码（CPU 侧 vf 滤镜）──
+    # 这里不再硬写 'auto'：显式 --decode cuda 就该拿到 -hwaccel cuda。
+    if is_nvenc and nvenc_available:
+        if decode_hw == 'auto':
+            _n2 = '自动硬件解码 + GPU 编码'          # 默认路径的字面量，保持不变
+        elif decode_hw is None:
+            _n2 = '软件解码 + GPU 编码'
+        else:
+            _n2 = f'{decode_hw} 硬件解码 + GPU 编码'
         strategies.append({
-            'name':                  '自动硬件解码 + GPU 编码',
-            'hwaccel':               'auto',
-            'hwaccel_output_format': None,
+            'name':                  _n2,
+            'hwaccel':               decode_hw,
+            'hwaccel_output_format': _decode_output_format(decode_hw),
             'use_hw_filter':         False,
             'codec':                 preferred_codec,
             'fallback':              False,
@@ -2602,26 +2825,24 @@ def _generate_strategies(
 
     # ── 策略 3：指定硬件加速解码 + 软件编码 ──
     specific_hwaccels = ('cuda', 'vulkan', 'vaapi', 'opencl')
-    if hw_mode in specific_hwaccels and hw_caps.has_hwaccel(hw_mode):
-        hof = 'nv12' if hw_mode == 'opencl' else None
+    if decode in specific_hwaccels and hw_caps.has_hwaccel(decode):
         strategies.append({
-            'name':                  f'{hw_mode} 硬件解码 + CPU 编码',
-            'hwaccel':               hw_mode,
-            'hwaccel_output_format': hof,
+            'name':                  f'{decode} 硬件解码 + CPU 编码',
+            'hwaccel':               decode,
+            'hwaccel_output_format': _decode_output_format(decode),
             'use_hw_filter':         False,
             'codec':                 sw_codec,
             'fallback':              False,
         })
 
     # ── 策略 4：auto 模式下选最佳硬解 + 软件编码 ──
-    if hw_mode == 'auto':
+    if decode == 'auto':
         best_hw = _select_best_hwaccel(hw_caps)
         if best_hw is not None:
-            hof = 'nv12' if best_hw == 'opencl' else None
             strategies.append({
                 'name':                  f'{best_hw} 硬件解码 + CPU 编码',
                 'hwaccel':               best_hw,
-                'hwaccel_output_format': hof,
+                'hwaccel_output_format': _decode_output_format(best_hw),
                 'use_hw_filter':         False,
                 'codec':                 sw_codec,
                 'fallback':              is_nvenc,
@@ -2636,6 +2857,10 @@ def _generate_strategies(
         'codec':                 sw_codec,
         'fallback':              True,
     })
+
+    # --fallback-policy strict：不降级，只跑首选策略；失败由上层报错退出。
+    if policy == 'strict':
+        strategies = strategies[:1]
 
     return strategies
 
@@ -3098,7 +3323,7 @@ def process_file(
     container: Optional[str],
     batch_mode: bool,
     input_root: Optional[Path],
-    hw_mode: str,
+    decode: str,
     hw_caps: HardwareCapabilities,
     crf_ref: Optional[int] = None,
     cq_ref: Optional[int] = None,
@@ -3117,6 +3342,7 @@ def process_file(
     scale_backend: str = 'auto',
     sw_algo: str = _SW_SCALE_FLAGS,
     cuda_algo: str = _CUDA_SCALE_ALGO,
+    policy: str = 'auto',
     queue_rest: Optional[float] = None,
     queue_cur: Optional[float] = None,
 ) -> Dict[str, object]:
@@ -3239,8 +3465,8 @@ def process_file(
     total_frames = _get_total_frames(str(input_file), ffmpeg_bin)
 
     # ── 生成策略链 ──
-    all_strategies = _generate_strategies(codec, hw_caps, hw_mode, mode=mode,
-                                          scale_backend=scale_backend)
+    all_strategies = _generate_strategies(codec, hw_caps, decode, mode=mode,
+                                          scale_backend=scale_backend, policy=policy)
 
     # ── Dry-run 模式：打印最优策略命令后返回 ──
     if dry_run:
@@ -3250,6 +3476,7 @@ def process_file(
                 mode, actual_width, actual_height, out_width, out_height,
                 use_cuda=strategy['use_hw_filter'], crop_ratio=crop_ratio,
                 cuda_scale=bool(strategy.get('cuda_scale', False)),
+                cuda_upload=bool(strategy.get('hwupload', False)),
                 src_bits=_src_bits,
                 sw_algo=sw_algo, cuda_algo=cuda_algo,
             )
@@ -3292,6 +3519,7 @@ def process_file(
         current_codec    = strategy['codec']
         use_hw_filter    = strategy['use_hw_filter']
         use_cuda_scale   = bool(strategy.get('cuda_scale', False))
+        use_cuda_upload  = bool(strategy.get('hwupload', False))
         hwaccel          = strategy.get('hwaccel')
         hwaccel_out_fmt  = strategy.get('hwaccel_output_format')
 
@@ -3300,7 +3528,8 @@ def process_file(
             vf_filter = build_video_filter(
                 mode, actual_width, actual_height, out_width, out_height,
                 use_cuda=use_hw_filter, crop_ratio=crop_ratio,
-                cuda_scale=use_cuda_scale, src_bits=_src_bits,
+                cuda_scale=use_cuda_scale, cuda_upload=use_cuda_upload,
+                src_bits=_src_bits,
                 sw_algo=sw_algo, cuda_algo=cuda_algo,
             )
         except ValueError as exc:
@@ -3402,7 +3631,11 @@ def process_file(
             except Exception:
                 pass
 
-    print('  ✘ 失败：所有策略均失败，放弃处理。', file=sys.stderr)
+    if policy == 'strict':
+        print('  ✘ 失败：--fallback-policy strict 不降级，首选策略失败即终止。\n'
+              '     去掉 strict（或改用 auto）可逐级降级重试。', file=sys.stderr)
+    else:
+        print('  ✘ 失败：所有策略均失败，放弃处理。', file=sys.stderr)
     return _result('failed')
 
 
@@ -3410,15 +3643,86 @@ def process_file(
 #  命令行解析与主入口
 # ═══════════════════════════════════════════════════════════════════
 
+# ── 三个正交轴 ──────────────────────────────────────────────────────
+# 解码（--decode）/ 缩放（--scale-algo）/ 编码（--codec）互不干涉、可任意组合：
+# 轴之间不再有任何「冲突检查」——`--decode cpu --codec h264_nvenc`（软解 + NVENC 硬编）
+# 与 `--decode cuda --codec libx264`（硬解 + 软编）都是合法组合。
+# 唯一横跨三者的开关是 --fallback-policy，且它只回答一个问题：
+# 「显式点名的后端不可用/执行失败时，降级继续还是报错退出」。
+_DECODE_BACKENDS = ('auto', 'cuda', 'vulkan', 'vaapi', 'opencl', 'cpu')
+# 旧值 none 是 cpu 的同义词。它来自旧的 `--hwaccel none`——那个参数当年把整块 GPU
+# （含 NVENC 编码与 scale_cuda 缩放）一起关掉；拆成三轴后 `none` 的字面意思只剩下
+# 「不要硬件解码」，因此归一为 cpu，保留它是为了不让既有命令直接失效。
+_DECODE_LEGACY_VALUES = {'none': 'cpu'}
+
+_FALLBACK_POLICIES = ('auto', 'strict')
+# 已删除的旧值 → 等价的三轴写法（报错文案里直接给可抄的命令，省得用户查文档）
+_FALLBACK_LEGACY_VALUES = {
+    'cpu-only':    '--decode cpu --scale-algo libswscale-lanczos --codec libx264',
+    'nvenc-only':  '--decode cpu --codec h264_nvenc',
+    'strict-cuda': '--decode cuda --fallback-policy strict',
+}
+
+
+def _decode_value(spec: str) -> str:
+    """--decode 的取值校验（把旧值 none 归一为 cpu）。"""
+    v = spec.strip().lower()
+    v = _DECODE_LEGACY_VALUES.get(v, v)
+    if v not in _DECODE_BACKENDS:
+        raise argparse.ArgumentTypeError(
+            f"'{spec}' 无效：只支持 {'/'.join(_DECODE_BACKENDS)}"
+            f"（旧值 none 等价于 cpu）")
+    return v
+
+
+def _fallback_policy_value(spec: str) -> str:
+    """--fallback-policy 的取值校验（旧值给出等价三轴写法）。"""
+    v = spec.strip().lower()
+    if v in _FALLBACK_LEGACY_VALUES:
+        raise argparse.ArgumentTypeError(
+            f"'{spec}' 已删除：--fallback-policy 现在只回答「显式点名的后端不可用时"
+            f"降级还是报错」，只接受 {'/'.join(_FALLBACK_POLICIES)}。\n"
+            f"  等价的三轴写法：{_FALLBACK_LEGACY_VALUES[v]}")
+    if v not in _FALLBACK_POLICIES:
+        raise argparse.ArgumentTypeError(
+            f"'{spec}' 无效：只支持 {'/'.join(_FALLBACK_POLICIES)}")
+    return v
+
+
+class _RejectRenamedFlag(argparse.Action):
+    """旧名 --hwaccel 命中即报错退出 2（硬改名，不做静默兼容）。"""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.exit(
+            2,
+            '\n[ERROR] --hwaccel 已更名为 --decode（该轴的语义也收窄为「只管解码」）。\n'
+            '  取值改名：none → cpu，auto / cuda / vulkan / vaapi / opencl 不变。\n'
+            '  例：--hwaccel none → --decode cpu     （只关硬解，编码/缩放仍可走 GPU）\n'
+            '      --hwaccel cuda → --decode cuda\n'
+            '  想要旧的「纯 CPU」行为，请用三轴写法：\n'
+            '      --decode cpu --scale-algo libswscale-lanczos --codec libx264\n')
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description='批量裁剪视频，支持 NVIDIA CUDA 硬件加速及智能降级。',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-硬件加速选项：
-  --hwaccel auto   自动检测并启用 CUDA 组件（默认）
-  --hwaccel cuda   强制启用 CUDA（若缺失组件则降级）
-  --hwaccel none   禁用硬件加速，纯 CPU 处理
+三个正交轴（互不干涉，可任意组合）：
+  --decode auto/cuda/vulkan/vaapi/opencl/cpu
+                    只决定「帧在哪解出来」（默认 auto）。
+                    cpu=纯软解，但不影响编码与缩放：--decode cpu --codec h264_nvenc
+                    = 软解 + NVENC 硬编；--decode cpu --scale-algo cuda-lanczos
+                    = 软解 + 显存内缩放（自动加 hwupload_cuda）。
+                    注意：--decode cpu 不再等于「纯 CPU」，纯 CPU 请写
+                    --decode cpu --scale-algo libswscale-lanczos --codec libx264
+  --scale-algo auto/libswscale-<algo>/cuda-<algo>
+                    只决定「重采样在哪、用什么算法」（默认 auto=优先 cuda，失败回退 cpu）
+  --codec <编码器> 只决定「用哪个编码器」（默认 h264_nvenc）
+  --fallback-policy auto/strict
+                    只决定「显式点名的后端不可用/失败时降级还是报错」（默认 auto=降级）
+
+  旧名 --hwaccel 已更名为 --decode（取值 none → cpu），用旧名会直接报错。
 
 处理模式：
   --mode crop       直接居中裁剪（默认，目标尺寸不能大于源尺寸）
@@ -3542,11 +3846,16 @@ preset 映射（NVENC ↔ libx264 自动转换）：
     parser.add_argument('--no-skip-same-size', action='store_true',
                         help='即使源尺寸等于目标尺寸也强制转码（默认同尺寸跳过）')
 
-    # 硬件加速
-    parser.add_argument('--hwaccel',
-                        choices=['auto', 'cuda', 'vulkan', 'vaapi', 'opencl', 'none'],
-                        default='auto',
-                        help='硬件加速模式（默认 auto）')
+    # 解码轴（只管解码；编码看 --codec，缩放看 --scale-algo，三者互不干涉）
+    parser.add_argument('--decode', type=_decode_value, default='auto', metavar='BACKEND',
+                        help='硬件解码后端（默认 auto）：auto / cuda / vulkan / vaapi / '
+                             'opencl / cpu。cpu=纯软解，但**不影响** --codec 与 '
+                             '--scale-algo（这两轴仍可走 GPU）；旧值 none 等价于 cpu。'
+                             '注意 --decode cpu 不再等于「纯 CPU」——要纯 CPU 请用'
+                             ' --decode cpu --scale-algo libswscale-lanczos --codec libx264')
+    # 旧名硬拒绝：注册成无操作、被隐藏的参数，命中即由 Action 报错退出 2
+    parser.add_argument('--hwaccel', nargs='?', action=_RejectRenamedFlag,
+                        default=None, help=argparse.SUPPRESS)
     parser.add_argument('--ffmpeg-bin', default='ffmpeg',
                         help='FFmpeg 可执行文件路径（默认 ffmpeg）')
     parser.add_argument('--cuda-diagnostics', action='store_true',
@@ -3555,12 +3864,13 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                              '库路径问题、容器设备映射缺失等）')
     parser.add_argument('--cuda-device-id', type=int, default=0,
                         help='CUDA 设备 ID（默认 0），用于多 GPU 环境选择解码设备')
-    parser.add_argument('--fallback-policy',
-                        choices=['auto', 'strict-cuda', 'nvenc-only', 'cpu-only'],
-                        default='auto',
-                        help='策略降级控制（默认 auto）：'
-                             'auto=完整策略链；strict-cuda=无 CUDA 则退出；'
-                             'nvenc-only=仅用 NVENC，跳过硬解；cpu-only=纯 CPU')
+    parser.add_argument('--fallback-policy', type=_fallback_policy_value,
+                        default='auto', metavar='POLICY',
+                        help='显式点名的后端不可用/执行失败时怎么办（默认 auto）：'
+                             'auto=降级到下一档并提示；strict=报错退出 2，不降级。'
+                             '它只回答这一个问题，与三个轴正交。'
+                             '已删除的旧值：cpu-only / nvenc-only / strict-cuda'
+                             '（用旧值会报错并给出等价的三轴写法）')
 
     # 可观测性
     parser.add_argument('--dry-run', action='store_true',
@@ -3679,16 +3989,11 @@ def main() -> int:
         return 2
     if args.mode == 'crop' and args.scale_algo:
         print('提示：--mode crop 不做缩放，--scale-algo 不生效。')
-    # 明确要 CUDA 缩放、却又显式禁用了 GPU → 参数矛盾（与 --crf-ref/--crf 同类），报错
-    if args.scale_backend == 'cuda':
-        if args.hwaccel == 'none':
-            print('[ERROR] --scale-algo cuda-* 与 --hwaccel none 冲突：'
-                  '前者要 CUDA 缩放，后者显式禁用了 GPU。请二选一。', file=sys.stderr)
-            return 2
-        if args.fallback_policy == 'cpu-only':
-            print('[ERROR] --scale-algo cuda-* 与 --fallback-policy cpu-only 冲突：'
-                  '前者要 CUDA 缩放，后者显式走了纯 CPU 路径。请二选一。', file=sys.stderr)
-            return 2
+    # 三个轴之间**不做任何冲突检查**（解码 / 缩放 / 编码各自独立、可任意组合：
+    # `--decode cpu --codec h264_nvenc` 与 `--decode cuda --codec libx264` 都合法）。
+    # --fallback-policy 也不再与轴冲突——它只回答「够不到时降级还是报错」。
+    # 旧的 `--fallback-policy cpu-only|nvenc-only|strict-cuda` 已在 argparse 层
+    # 报错并给出等价的三轴写法，所以到这里不会再有「轴 vs 策略」的矛盾组合。
 
     if args.crf is not None and not (0 <= args.crf <= 63):
         print('[ERROR] --crf 建议范围为 0-63。', file=sys.stderr)
@@ -3728,78 +4033,76 @@ def main() -> int:
     if args.crf is not None and args.cq is not None:
         print('提示：同时指定了 --crf 和 --cq，将根据实际编码器自动选用对应参数。')
 
-    # 探测硬件能力（传入诊断模式与设备 ID）
-    if args.hwaccel == 'none':
+    # ── 探测硬件能力：**按轴按需探测**（三轴正交，探测也必须正交）──
+    # 解码轴决定探不探解码器；编码轴（--codec）与缩放轴（--scale-algo）都可能需要
+    # NVENC，所以由它们决定探不探编码器；滤镜与解码轴无关，只要不是「三轴全 CPU」就探。
+    #
+    # 编码轴要不要 NVENC：--codec auto 可能落到 NVENC，所以也算需要。
+    want_nvenc = (args.codec == 'auto' or args.codec in NVENC_CODECS
+                  or args.scale_backend == 'cuda')
+    # 三轴都显式指向 CPU → 一件都不探（这是旧 --hwaccel none / cpu-only 的快速路径）
+    all_cpu = (args.decode == 'cpu'
+               and args.scale_backend == 'libswscale'
+               and not want_nvenc)
+
+    if all_cpu:
         hw_caps = HardwareCapabilities()
-        print('硬件加速已禁用，使用纯 CPU 处理。')
+        print('三轴都显式指向 CPU（--decode cpu + libswscale-* + CPU 编码器），跳过全部 GPU 探测。')
     else:
-        # 新增：根据 --fallback-policy 调整探测行为
-        if args.fallback_policy == 'cpu-only':
-            hw_caps = HardwareCapabilities()
-            print('已指定纯 CPU 路径 (--fallback-policy cpu-only)，跳过 GPU 探测。')
-        elif args.fallback_policy == 'nvenc-only':
-            # 仅探测 NVENC 编码能力，不尝试硬解
-            print('已指定 NVENC-only 路径 (--fallback-policy nvenc-only)，仅探测编码器。')
-            hw_caps = HardwareCapabilities()
-            hw_caps.has_encoder_h264 = _check_nvenc_available(ffmpeg_bin, 'h264_nvenc')
-            hw_caps.has_encoder_hevc = _check_nvenc_available(ffmpeg_bin, 'hevc_nvenc')
-            hw_caps.has_encoder_av1 = _check_nvenc_available(ffmpeg_bin, 'av1_nvenc')
-            hw_caps._mark_detected('has_encoder_h264')
-            hw_caps._mark_detected('has_encoder_hevc')
-            hw_caps._mark_detected('has_encoder_av1')
-            # 对 NVENC-only 模式，不尝试 CUDA 解码（避免环境缺陷导致不必要失败）
-            print(f'硬件能力总结：NVENC h264={"✓" if hw_caps.has_encoder_h264 else "✗"}, '
-                  f'hevc={"✓" if hw_caps.has_encoder_hevc else "✗"}, '
-                  f'av1={"✓" if hw_caps.has_encoder_av1 else "✗"}')
-        elif args.fallback_policy == 'strict-cuda':
-            # 强制 CUDA：若检测失败直接退出（不尝试其他策略）
-            print('已指定 strict-cuda 路径：若 CUDA 不可用则直接退出，不尝试降级。')
-            hw_caps = detect_cuda_capabilities(
-                ffmpeg_bin, args.hwaccel,
-                diagnostics=args.cuda_diagnostics,
-                cuda_device_id=args.cuda_device_id,
-            )
-            if args.cuda_diagnostics:
-                print(f'  [诊断] CUDA 解码状态: {"可用" if hw_caps.has_decoder else "不可用"}')
-        else:
-            # 默认 auto 模式
-            hw_caps = detect_cuda_capabilities(
-                ffmpeg_bin, args.hwaccel,
-                diagnostics=args.cuda_diagnostics,
-                cuda_device_id=args.cuda_device_id,
-            )
-            # 详细结果已由 detect_cuda_capabilities 逐项打印；汇总行统一放在
-            # 概览块的「硬件加速」字段，避免与逐项输出重复。
+        hw_caps = detect_cuda_capabilities(
+            ffmpeg_bin, args.decode,
+            diagnostics=args.cuda_diagnostics,
+            cuda_device_id=args.cuda_device_id,
+            probe_encoders=want_nvenc,
+            probe_filters=True,
+        )
+        if args.cuda_diagnostics:
+            print(f'  [诊断] CUDA 解码状态: {"可用" if hw_caps.has_decoder else "不可用"}')
 
-        if args.hwaccel == 'cuda' and args.fallback_policy != 'strict-cuda':
-            # 当未强制 strict-cuda 时：仅当完全无 CUDA 组件才退出；否则正确降级
-            if not hw_caps.has_decoder and not hw_caps.has_any_encoder():
-                print('错误：强制启用 CUDA 但未检测到任何可用的 CUDA 组件。', file=sys.stderr)
-                if args.cuda_diagnostics:
-                    print('  提示：使用 --cuda-diagnostics 查看详细环境诊断信息。', file=sys.stderr)
-                return 1
+        # CUDA 缩放的功能探针：只在 **auto** 缩放、且零拷贝路径拿不到 CUDA 帧、
+        # 且滤镜确实存在时才跑。显式 --scale-algo cuda-* 不探针（用户已确认：
+        # 「直接执行，如遇失败则按 --fallback-policy 处理」）。
+        # 默认路径（T4：有 NVDEC + scale_cuda → 走零拷贝 1b）不会多这一次 ffmpeg 调用。
+        _zc_possible = hw_caps.has_decoder and hw_caps.has_cuda_scale
+        if (args.mode == 'cover' and args.scale_backend == 'auto'
+                and hw_caps.has_cuda_scale and not _zc_possible):
+            print('  hwupload缩放: ', end='', flush=True)
+            hw_caps.cuda_scale_upload_ok = _probe_cuda_scale_upload(ffmpeg_bin)
+            hw_caps._mark_detected('cuda_scale_upload_ok')
+            print('可用 ✓' if hw_caps.cuda_scale_upload_ok else '不可用 ✗')
 
-        # 新增：保存探测结果到缓存（仅在非诊断模式下快速参考）
-        # ffmpeg_version_hint 只做记录、没有任何读取方，故不再为此 fork 一次
-        # `ffmpeg -version`；这里沿用原先写入的编码器路径。
-        if args.hwaccel != 'none' and args.fallback_policy != 'cpu-only':
-            try:
-                _save_hw_cache(hw_caps, ffmpeg_version=ffmpeg_bin)
-            except Exception:
-                pass  # 缓存写入失败不影响主流程
+        try:
+            _save_hw_cache(hw_caps, ffmpeg_version=ffmpeg_bin)
+        except Exception:
+            pass  # 缓存写入失败不影响主流程
 
-    # --scale-algo cuda-*：显式要 CUDA 缩放，但环境给不了 → 两档处理
-    # （复刻 --hwaccel cuda 的既有行为：一件 CUDA 组件都没有才报错，其余退回并告警）
-    if args.scale_backend == 'cuda':
-        if not hw_caps.has_decoder and not hw_caps.has_any_encoder():
-            print('[ERROR] --scale-algo cuda-* 需要 CUDA 组件，但一件都没检测到'
-                  '（无 NVDEC / 无 NVENC）。\n'
-                  f'  改用 --scale-algo libswscale-{args.sw_algo}（或裸 {args.sw_algo}）'
-                  '走 CPU 缩放；或先修好驱动 / ffmpeg / 显存占用。', file=sys.stderr)
+    # ── 显式点名的后端够不到时：auto 降级并提示 / strict 直接报错退出 ──
+    # 这是 `--fallback-policy` 唯一的作用，与三个轴都正交。
+    _downgrades: List[str] = []
+    _strict_fail: List[str] = []
+
+    if args.decode in ('cuda', 'vulkan', 'vaapi', 'opencl') \
+            and not hw_caps.has_hwaccel(args.decode):
+        _strict_fail.append(f'--decode {args.decode}：该后端不可用')
+        _downgrades.append(f'--decode {args.decode} 不可用，已改为软解')
+
+    if args.scale_backend == 'cuda' and not hw_caps.has_cuda_scale:
+        _strict_fail.append('--scale-algo cuda-*：当前 FFmpeg 里没有 scale_cuda 滤镜')
+        _downgrades.append(f'--scale-algo cuda-* 不可用（无 scale_cuda 滤镜），'
+                           f'已改用 libswscale-{args.sw_algo}')
+
+    if _strict_fail:
+        if args.fallback_policy == 'strict':
+            print('[ERROR] --fallback-policy strict：显式点名的后端不可用，不降级。',
+                  file=sys.stderr)
+            for _m in _strict_fail:
+                print(f'  · {_m}', file=sys.stderr)
+            print('  改用 --fallback-policy auto 可自动降级；或按提示改轴参数。',
+                  file=sys.stderr)
             return 2
-        if not hw_caps.has_cuda_scale:
-            print(f'  ⚠ --scale-algo cuda-{args.cuda_algo} 不可用（当前 FFmpeg 里没有 '
-                  f'scale_cuda），已改用 libswscale-{args.sw_algo}')
+        for _m in _downgrades:
+            print(f'  ⚠ {_m}', file=sys.stderr)
+        if args.scale_backend == 'cuda' and not hw_caps.has_cuda_scale:
             args.scale_backend = 'libswscale'
 
     # 收集输入文件
@@ -3854,13 +4157,17 @@ def main() -> int:
         quality_parts.append(f'CRF-ref: {args.crf_ref}（libx264 基准，按等效表换算）')
     if args.cq_ref is not None:
         quality_parts.append(f'CQ-ref: {args.cq_ref}（h264_nvenc 基准，按等效表换算）')
-    # 概览块展示**实际会生效**的编码器：直接取策略链的第一条，这样
+    # 概览块展示**实际会生效**的编码器与缩放链：直接看策略链首条，这样
     #   · --codec auto 会被解析成具体编码器（h264_nvenc 或 libx264），不再显示 "auto"；
     #   · 请求的 NVENC 编码器不可用时也已反映为 CPU 编码器（见 _get_software_fallback）。
     # 概览块整批只打印一次，策略层那次才逐文件重复。
-    _effective_codec = str(_generate_strategies(
-        args.codec, hw_caps, args.hwaccel, mode=args.mode,
-        scale_backend=args.scale_backend)[0]['codec'])
+    _strategies = _generate_strategies(
+        args.codec, hw_caps, args.decode, mode=args.mode,
+        scale_backend=args.scale_backend, policy=args.fallback_policy)
+    _primary = _strategies[0] if _strategies else {}
+    _effective_codec = str(_primary.get('codec', args.codec))
+    _eff_cuda_scale = bool(_primary.get('cuda_scale'))
+    _eff_hwupload = bool(_primary.get('hwupload'))
     # 未指定 --preset 时按"请求的编码器"的默认档位换算，降级前后档位等效
     # （见 strategy_preset），避免概览显示 p5 而命令里却是 libsvtav1 的 8。
     # quiet：换算提示留给逐策略那次打印，概览块只展示结果值。
@@ -3881,19 +4188,29 @@ def main() -> int:
           + f'{_effective_codec}   {_preset_field}' + '   '.join(quality_parts))
     # 只展示真正会生效的缩放档：crop 模式不缩放；cover 模式看策略链首条用的是哪条链
     if args.mode != 'crop':
-        _has_cuda_scale = any(s.get('cuda_scale') for s in _generate_strategies(
-            args.codec, hw_caps, args.hwaccel, mode=args.mode,
-            scale_backend=args.scale_backend))
-        print(_label('缩放')
-              + (f'cuda-{args.cuda_algo}（显存内）' if _has_cuda_scale
-                 else f'libswscale-{args.sw_algo}（CPU）'))
+        if _eff_cuda_scale:
+            _scale_desc = (f'cuda-{args.cuda_algo}（显存内'
+                           + ('，+hwupload_cuda' if _eff_hwupload else '') + '）')
+        elif args.scale_backend == 'auto' and hw_caps.has_cuda_scale:
+            # auto 缩放想用 cuda 但没落成：把原因说清，别让人以为参数没生效
+            _scale_desc = (f'libswscale-{args.sw_algo}（CPU；'
+                           + ('CUDA 缩放探针未通过' if not hw_caps.has_decoder
+                              else '编码器不是 NVENC') + '，已按 auto 回退）')
+        else:
+            _scale_desc = f'libswscale-{args.sw_algo}（CPU）'
+        print(_label('缩放') + _scale_desc)
     elif args.scale_algo:
         print(_label('缩放') + '不适用（crop 模式不缩放）')
+    # 组合效果评估：三轴怎么搭会得到什么，说一句就够（效果本身用户自负）。
+    _combo = _combo_hint(_primary.get('hwaccel'), _eff_cuda_scale, _eff_hwupload,
+                         _effective_codec)
+    if _combo:
+        print(_label('组合') + _combo)
     # 只在"用户点名要的 NVENC 编码器"被换掉时才提示；--codec auto 解析出的具体
     # 编码器属正常自适应，不是降级。
     if args.codec in NVENC_CODECS and _effective_codec != args.codec:
-        _why = ('已禁用 GPU 处理（--hwaccel none / --fallback-policy cpu-only）'
-                if args.hwaccel == 'none' or args.fallback_policy == 'cpu-only'
+        _why = ('硬件加速不可用或未探测到该 NVENC 编码器'
+                if not hw_caps.has_any_encoder()
                 else '当前环境未检测到该 NVENC 编码器')
         print(_label('降级提示')
               + f'{args.codec} 不可用（{_why}），实际将改用 CPU 编码器 {_effective_codec}。')
@@ -3903,10 +4220,24 @@ def main() -> int:
         print(_label('color_range') + args.color_range + '（必要时自动做值域转换）')
     if extra_args:
         print(_label('额外参数') + shlex.join(extra_args))
-    if args.hwaccel == 'none':
-        print(_label('硬件加速') + '已禁用（--hwaccel none）')
+    if all_cpu:
+        print(_label('解码') + '软件（三轴全 CPU，已跳过 GPU 探测）')
     else:
-        print(_label('硬件加速') + (hw_caps.summary(only_detected=True) or '无可用加速组件'))
+        # 展示**策略实际会用的**解码后端，而不是光回显请求值——否则
+        # `--decode vulkan` 明明降级成软解了，概览却还写着 vulkan。
+        _want_hw = args.decode
+        _eff_hw = _primary.get('hwaccel')
+        if _want_hw == 'cpu':
+            _dec_desc = '软件（--decode cpu；只关解码，编码/缩放仍可能走 GPU）'
+        elif _eff_hw is None:
+            _dec_desc = ('软件（无可用硬解）' if _want_hw == 'auto'
+                         else f'软件（--decode {_want_hw} 不可用，已降级）')
+        elif _eff_hw == _want_hw or _eff_hw == 'auto':
+            _dec_desc = _want_hw
+        else:
+            _dec_desc = f'{_want_hw} → {_eff_hw}'
+        print(_label('解码') + f'{_dec_desc}   '
+              + (hw_caps.summary(only_detected=True) or '无可用加速组件'))
     print(_label('运行模式') + '顺序执行（细粒度实时进度条）')
     if args.dry_run:
         print(_SEP)
@@ -3960,7 +4291,7 @@ def main() -> int:
                 container=container_ext,
                 batch_mode=batch_mode,
                 input_root=input_root,
-                hw_mode=args.hwaccel,
+                decode=args.decode,
                 hw_caps=hw_caps,
                 crf_ref=args.crf_ref,
                 cq_ref=args.cq_ref,
@@ -3979,6 +4310,7 @@ def main() -> int:
                 scale_backend=args.scale_backend,
                 sw_algo=args.sw_algo,
                 cuda_algo=args.cuda_algo,
+                policy=args.fallback_policy,
                 queue_rest=q_rest,
                 queue_cur=q_cur,
             )

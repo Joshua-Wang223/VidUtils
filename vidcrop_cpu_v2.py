@@ -602,6 +602,26 @@ def normalize_extra_args(extra: Optional[List[str]]) -> List[str]:
     return extra
 
 
+def _pix_fmt_exists(pix_fmt: str) -> bool:
+    """惰性校验像素格式名是否为 ffmpeg 认识的名字（ffmpeg -pix_fmts）。
+
+    只在用户**显式**给出 --pix-fmt 时才跑：拼错一个格式名原本要等到 ffmpeg 才报
+    （"Unrecognized pixel format"），早一步拦住并给出查列表的方法。
+    探测本身失败（找不到 ffmpeg / 超时）时放行，不因此阻塞正常任务。
+    与 vidcrop_hwaccel.py 的同名函数语义一致（那边多传一个 ffmpeg_bin）。
+    """
+    try:
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-pix_fmts"],
+                           capture_output=True, text=True, timeout=10, check=False)
+        if r.returncode != 0:
+            return True
+        import re
+        return re.search(r"^\S+\s+" + re.escape(pix_fmt) + r"\s",
+                         r.stdout or "", re.M) is not None
+    except Exception:
+        return True
+
+
 def resolve_pix_fmt(codec: str, pix_fmt_arg: str,
                     src_bits: Optional[int] = None,
                     warn: Optional[Callable[[str], None]] = None) -> Optional[str]:
@@ -3396,6 +3416,14 @@ def validate_and_finalize_args(args: argparse.Namespace) -> None:
             "要走 CUDA 缩放请用 vidcrop_hwaccel.py。")
     if args.mode == "crop" and args.scale_algo:
         print("提示：--mode crop 不做缩放，--scale-algo 不生效。")
+
+    # --pix-fmt：只在**显式**给出（非 auto / none）时才惰性校验格式名，避免拼错
+    # 要等到 ffmpeg 才报。位置与 vidcrop_hwaccel.py 一致（--scale-algo 之后、
+    # 量程检查之前）。
+    _pf_arg = (args.pix_fmt or "auto").strip().lower()
+    if _pf_arg not in ("auto", "none") and not _pix_fmt_exists(_pf_arg):
+        raise ValueError(f"--pix-fmt {args.pix_fmt} 不是 ffmpeg 认识的像素格式。\n"
+                         f"  用 `ffmpeg -pix_fmts` 查看可用列表（取 NAME 列）。")
 
     # 量程检查必须排在 _resolve_quality_params 之前：否则 --crf-ref 99 这类超范围
     # 输入会先被换算并打印出一行"-crf 51"的建议值，紧接着才报范围错误，自相矛盾。

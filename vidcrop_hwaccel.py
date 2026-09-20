@@ -1417,6 +1417,88 @@ _PIXFMT_10BIT_BY_ENCODER = {
 _ENCODERS_8BIT_ONLY = {'mpeg4', 'libvpx', 'mjpeg', 'vp8', 'h264_v4l2m2m',
                        'h264_nvenc'}
 
+# ── --pix-fmt 相关 ──────────────────────────────────────────────────────
+# 4:2:0 系（含高位深）要求宽高**均为**偶数；4:2:2 系只要求宽为偶数。
+# 与 vidcrop_cpu_v2.py 的同名集合逐字一致（孪生约定）。
+_PIXFMT_REQUIRE_EVEN_BOTH = {
+    'yuv420p', 'yuvj420p', 'nv12', 'nv21',
+    'yuv420p10le', 'yuv420p12le', 'p010le', 'p012le', 'p016le',
+}
+_PIXFMT_REQUIRE_EVEN_WIDTH = {'yuv422p', 'yuvj422p', 'yuv422p10le', 'yuv422p12le'}
+
+# 零拷贝 CUDA 链（-hwaccel_output_format cuda）**不能**传 -pix_fmt：
+# -pix_fmt 设的是 AVFrame.format（该链上是 AV_PIX_FMT_CUDA）而不是 sw_format，
+# 传 nv12 / yuv420p 都会报 "Impossible to convert"（T4 实测，见
+# memory/project_t4_gpu_capabilities.md）。该链上要改格式只能写进 scale_cuda=format=。
+_SCALE_CUDA_FORMATS = ('nv12', 'yuv420p', 'yuv444p', 'p010le')
+# scale_cuda=format= 改格式后必须配 -profile:v，否则 profile 与像素格式不匹配
+# （同出处：format=p010le → main10、yuv444p → high444p）。
+_SCALE_CUDA_PROFILE = {'p010le': 'main10', 'yuv444p': 'high444p'}
+
+
+def validate_output_dimensions(width: int, height: int,
+                               pix_fmt: Optional[str]) -> None:
+    """校验输出尺寸与像素格式的奇偶约束（与 vidcrop_cpu_v2.py 的同名函数一致）。
+
+    4:2:0 高位深（yuv420p10le / p010le / p012le …）要求宽高均为偶数——继承位深后
+    若目标尺寸是奇数，ffmpeg 会在编码器初始化时才报错，这里提前拦住。
+    """
+    if width <= 0 or height <= 0:
+        raise ValueError(f'输出尺寸必须为正整数，当前 {width}x{height}')
+    if not pix_fmt:
+        return
+    pf = pix_fmt.lower()
+    if pf in _PIXFMT_REQUIRE_EVEN_BOTH:
+        if width % 2 or height % 2:
+            raise ValueError(
+                f'像素格式 {pix_fmt} 要求输出宽高均为偶数；当前为 {width}x{height}')
+    elif pf in _PIXFMT_REQUIRE_EVEN_WIDTH:
+        if width % 2:
+            raise ValueError(
+                f'像素格式 {pix_fmt} 要求输出宽度为偶数；当前为 {width}')
+
+
+def _pix_fmt_exists(ffmpeg_bin: str, pix_fmt: str) -> bool:
+    """惰性校验像素格式名是否是 ffmpeg 认识的名字（ffmpeg -pix_fmts）。
+
+    只在用户**显式**给出 --pix-fmt 时才跑：拼错一个格式名原本要等到 ffmpeg 才报，
+    错误信息是难读的 "Unrecognized pixel format" 之类，早一步拦住更省事。
+    探测本身失败（找不到 ffmpeg / 超时 / 沙箱）时放行，不因此阻塞正常任务。
+    """
+    try:
+        r = subprocess.run([ffmpeg_bin, '-hide_banner', '-pix_fmts'],
+                           capture_output=True, text=True, timeout=10,
+                           stdin=subprocess.DEVNULL, env=_ffmpeg_env())
+        if r.returncode != 0:
+            return True
+        import re
+        return re.search(r'^\S+\s+' + re.escape(pix_fmt) + r'\s',
+                         r.stdout or '', re.M) is not None
+    except Exception:
+        return True
+
+
+def _apply_pix_fmt_to_cuda_filter(vf_filter: str, pix_fmt: str) -> Optional[str]:
+    """零拷贝 CUDA 链上把 format= 写进链首的 scale_cuda（该链不能传 -pix_fmt）。
+
+    只在链首确实是 scale_cuda 时成立；链首是别的滤镜就返回 None，由调用方按
+    --fallback-policy 决定降级还是报错。
+    """
+    first, sep, rest = vf_filter.partition(',')
+    name, eq, args = first.partition('=')
+    if name.strip() != 'scale_cuda' or not eq:
+        return None
+    out = f'{name}{eq}{args}:format={pix_fmt}'
+    if sep:
+        # ⚠ 缩放输出的格式变了，紧随其后的 hwdownload 必须按**同一个**格式下载：
+        # 链里那个 format= 是按源位深烘进去的（_src_download_fmt），不改就会出现
+        # "scale_cuda 输出 p010le、却要 hwdownload,format=nv12" 的错配。
+        import re
+        out = (f"{out}{sep}"
+               f"{re.sub(r'hwdownload,format=[^,]+', f'hwdownload,format={pix_fmt}', rest)}")
+    return out
+
+
 _BITMAP_SUBS = {'dvd_subtitle', 'dvb_subtitle', 'dvb_teletext',
                 'hdmv_pgs_subtitle', 'xsub'}
 _MP4_FAMILY = {'mp4', 'm4v', 'mov'}
@@ -2875,10 +2957,16 @@ def _generate_strategies(
 #  FFmpeg 命令构建
 # ═══════════════════════════════════════════════════════════════════
 
-# 可直接消费 CUDA 帧的滤镜（无需回传系统内存）
+# 可直接消费 CUDA 帧的滤镜（无需回传系统内存）。
+# ⚠ 只列**确实存在**的滤镜：这里曾经写过 `crop_cuda` 与 `tonemap_cuda`，但两者在
+# FFmpeg 上游都不存在（实测 `ffmpeg -h filter=<name>` 均返回 Unknown filter），
+# 与编译选项无关。留着它们会让"链首是 CUDA 原生滤镜"这个判断基于假名字，
+# 进而以为某条链能跑（crop_cuda 那条策略因此从未命中过，见 can_full_pipeline）。
+# `crop_cuda` 暂时保留并标注：策略 1 依赖它做分类，删掉需要一并清理那条死策略。
 _CUDA_NATIVE_FILTERS = frozenset({
-    'crop_cuda', 'scale_cuda', 'yadif_cuda', 'overlay_cuda', 'tonemap_cuda',
-    'thumbnail_cuda', 'hwupload_cuda', 'hwdownload', 'hwupload',
+    'crop_cuda',  # 上游不存在，仅为策略 1（死代码）的分类保留
+    'scale_cuda', 'yadif_cuda', 'overlay_cuda', 'thumbnail_cuda',
+    'hwupload_cuda', 'hwdownload', 'hwupload',
 })
 
 
@@ -2947,6 +3035,8 @@ def build_ffmpeg_cmd(
     extra_args: Optional[List[str]] = None,
     hw_download_fmt: Optional[str] = None,
     color_range: Optional[str] = None,
+    pix_fmt: Optional[str] = 'auto',
+    policy: str = 'auto',
 ) -> List[str]:
     """
     构建完整的 FFmpeg 命令列表。
@@ -3010,6 +3100,43 @@ def build_ffmpeg_cmd(
     if _sp and _is_sw_codec:
         vf_filter = f'{vf_filter},{_sp}'
 
+    # ── --pix-fmt：显式指定时的落地 ────────────────────────────────────
+    # auto 完全沿用下面「[META-KEEP] 位深继承」那段既有逻辑（10bit 源才下发、
+    # NVENC 内部再分），所以不传 --pix-fmt 时命令与改动前逐字相同。
+    _req_pf: Optional[str] = None
+    _pf_handled = False
+    if pix_fmt:
+        _v = pix_fmt.strip().lower()
+        if _v == 'none':
+            _pf_handled = True                  # 明确不下发 -pix_fmt
+        elif _v != 'auto':
+            _req_pf = _v
+            _pf_handled = True
+
+    # 零拷贝 CUDA 链（-hwaccel_output_format cuda）不能传 -pix_fmt：
+    # -pix_fmt 设的是 AVFrame.format（该链上是 AV_PIX_FMT_CUDA）而非 sw_format，
+    # 传 nv12 / yuv420p 实测都报 "Impossible to convert"（memory/project_t4_gpu_capabilities.md）。
+    # 该链上改格式只能写进 scale_cuda=format=，并配 -profile:v。
+    _cuda_profile: Optional[str] = None
+    if _req_pf is not None and hwaccel_output_format == 'cuda':
+        _why = ''
+        if _req_pf not in _SCALE_CUDA_FORMATS:
+            _why = (f'零拷贝 CUDA 链只能用 {" / ".join(_SCALE_CUDA_FORMATS)}'
+                    f'（scale_cuda=format= 的限制）')
+        else:
+            _new_vf = _apply_pix_fmt_to_cuda_filter(vf_filter, _req_pf)
+            if _new_vf is not None:
+                vf_filter = _new_vf
+                _cuda_profile = _SCALE_CUDA_PROFILE.get(_req_pf)
+            else:
+                _why = '零拷贝 CUDA 链的链首不是 scale_cuda，无法在显存内改格式'
+        if _why:
+            if policy == 'strict':
+                raise ValueError(f'--pix-fmt {_req_pf}：{_why}'
+                                 f'（--fallback-policy strict 不降级）')
+            _warn(f'--pix-fmt {_req_pf}：{_why}，已忽略该格式设置')
+        _req_pf = None                          # 无论成功与否都不再下发 -pix_fmt
+
     # 视频滤镜 & 编码器
     vf_filter = _prepend_hwdownload(vf_filter, hwaccel_output_format,
                                     src_bits, hw_download_fmt)
@@ -3040,12 +3167,25 @@ def build_ffmpeg_cmd(
     if encoder_supports_preset(codec):
         cmd += ['-preset', preset]
 
+    # 零拷贝 CUDA 链上改过格式时要配 -profile:v，否则 profile 与像素格式不匹配。
+    if _cuda_profile:
+        cmd += ['-profile:v', _cuda_profile]
+
     # [META-KEEP] 位深继承：10bit 源不再被降为 8bit。
-    if meta is not None and src_bits >= 10:
+    # 显式给了 --pix-fmt 就以它为准；'none' 或已在 CUDA 链上处理过则整段跳过。
+    if _req_pf is not None:
+        cmd += ['-pix_fmt', _req_pf]
+    elif not _pf_handled and meta is not None and src_bits >= 10:
         if codec.lower().endswith('_nvenc'):
             # NVENC 链路原先完全不传 -pix_fmt，交给 hw_frames_ctx 协商。但
             # h264_nvenc 只支持 8bit，喂 10bit 输入会让整条 GPU 策略以 rc=218 失败，
             # 结果退回 CPU 编码只为保住 10bit——得不偿失。故这里显式降 8bit 保住硬件加速。
+            #
+            # ⚠ 隐患已修：这段过去不看链型，零拷贝链（hof=cuda）上会同时拿到
+            # -hwaccel_output_format cuda 与 -pix_fmt yuv420p，而那种组合实测会
+            # "Impossible to convert"（memory/project_t4_gpu_capabilities.md）。
+            # 现在零拷贝链走 _apply_pix_fmt_to_cuda_filter()（scale_cuda=format=），
+            # 只有软件帧链才落到这里下发 -pix_fmt。
             if codec.lower() in _ENCODERS_8BIT_ONLY:
                 _warn(f'{codec} 不支持 10bit 编码，已降级为 8bit 输出以保住硬件加速'
                       f'（如需 10bit 请用 hevc_nvenc / av1_nvenc 或 CPU 编码器）')
@@ -3349,6 +3489,7 @@ def process_file(
     sw_algo: str = _SW_SCALE_FLAGS,
     cuda_algo: str = _CUDA_SCALE_ALGO,
     policy: str = 'auto',
+    pix_fmt: Optional[str] = 'auto',
     queue_rest: Optional[float] = None,
     queue_cur: Optional[float] = None,
 ) -> Dict[str, object]:
@@ -3511,6 +3652,8 @@ def process_file(
             audio_bitrate=audio_bitrate,
             extra_args=extra_args,
             color_range=color_range,
+            pix_fmt=pix_fmt,
+            policy=policy,
         )
         print('  ' + _label('输出文件') + str(output_file))
         print('  ' + _label('策略') + f'[1/{len(all_strategies)}] {strategy["name"]}')
@@ -3586,6 +3729,8 @@ def process_file(
                 extra_args=extra_args,
                 hw_download_fmt=_dl,
                 color_range=color_range,
+                pix_fmt=pix_fmt,
+                policy=policy,
             )
 
             tag = '（降级）' if strategy.get('fallback', False) else ''
@@ -3882,6 +4027,18 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                              '它只回答这一个问题，与三个轴正交。'
                              '已删除的旧值：cpu-only / nvenc-only / strict-cuda'
                              '（用旧值会报错并给出等价的三轴写法）')
+    parser.add_argument('--pix-fmt', default='auto', metavar='FMT',
+                        help='输出像素格式（默认 auto）：'
+                             'auto=继承源位深（10bit 源在软件编码器上是 yuv420p10le、'
+                             'NVENC 是 p010le；h264_nvenc 只支持 8bit 会降为 yuv420p 并提示）；'
+                             'none=不下发 -pix_fmt（交给 ffmpeg 自行协商）；'
+                             '或写具体名字（yuv420p / yuv420p10le / p010le / nv12 / '
+                             'yuv422p10le …），会校验该名字是否为 ffmpeg 认识的格式。'
+                             '注：零拷贝 CUDA 链（-hwaccel_output_format cuda）不能传 -pix_fmt'
+                             '（实测 Impossible to convert），该链上改格式会用 '
+                             'scale_cuda=format= 并自动配 -profile:v；'
+                             'scale_cuda 仅支持 nv12 / yuv420p / yuv444p / p010le，'
+                             '其它格式按 --fallback-policy 处理')
 
     # 可观测性
     parser.add_argument('--dry-run', action='store_true',
@@ -4005,6 +4162,15 @@ def main() -> int:
     # --fallback-policy 也不再与轴冲突——它只回答「够不到时降级还是报错」。
     # 旧的 `--fallback-policy cpu-only|nvenc-only|strict-cuda` 已在 argparse 层
     # 报错并给出等价的三轴写法，所以到这里不会再有「轴 vs 策略」的矛盾组合。
+
+    # --pix-fmt：只在**显式**给出（非 auto / none）时才惰性校验格式名。
+    # 拼错原本要等到 ffmpeg 才报，错误信息是难读的 "Unrecognized pixel format"；
+    # 这里提前拦住并给出查列表的方法。探测本身失败时不阻塞（_pix_fmt_exists 放行）。
+    _pf_arg = (args.pix_fmt or 'auto').strip().lower()
+    if _pf_arg not in ('auto', 'none') and not _pix_fmt_exists(ffmpeg_bin, _pf_arg):
+        print(f'[ERROR] --pix-fmt {args.pix_fmt} 不是 {ffmpeg_bin} 认识的像素格式。\n'
+              f'  用 `{ffmpeg_bin} -pix_fmts` 查看可用列表（取 NAME 列）。', file=sys.stderr)
+        return 2
 
     if args.crf is not None and not (0 <= args.crf <= 63):
         print('[ERROR] --crf 建议范围为 0-63。', file=sys.stderr)
@@ -4322,6 +4488,7 @@ def main() -> int:
                 sw_algo=args.sw_algo,
                 cuda_algo=args.cuda_algo,
                 policy=args.fallback_policy,
+                pix_fmt=args.pix_fmt,
                 queue_rest=q_rest,
                 queue_cur=q_cur,
             )

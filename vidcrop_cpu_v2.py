@@ -48,6 +48,11 @@ vidcrop_cpu_v2.py – 批量视频裁剪/覆盖缩放工具（CPU 多任务并�
                        （crop-cover 模式下与 --output-width/height 并用，前者定
                        裁剪比例、后者定最终尺寸）
 --mode                 crop | cover | crop-cover（默认 crop）
+--scale-algo           缩放算法，写法 libswscale-<algo> 或裸 <algo>（本脚本是纯 CPU 路径，
+                       前缀可省）：fast_bilinear bilinear bicubic neighbor area bicublin
+                       gauss sinc lanczos spline。默认裸 lanczos（不吃 libswscale 的
+                       默认 bicubic）。crop 模式不做缩放、该参数不生效；
+                       cuda-* 请用 vidcrop_hwaccel.py
 --codec                视频编码器（默认 libx264，支持别名自动归一化；auto 等同 libx264）
 --crf                  CRF 质量值（默认 21，仅对支持 CRF 的编码器生效；字面量原样下发）
 --cq                   CQ 质量值（默认 23，仅对 NVENC/AMF/QSV 等 GPU 编码器生效，
@@ -1985,6 +1990,100 @@ def _setparams_from_color_args(extra_args: List[str]) -> Optional[str]:
 # 注意：libswscale 还有 spline / sinc / gauss / area 等档，但 scale_cuda 没有
 # 对应档可选，取两者交集里最高的那个 → lanczos。
 _SW_SCALE_FLAGS = "lanczos"
+# CUDA 侧 scale_cuda 的【默认】档（--scale-algo 未指定时用）。
+# 本脚本是纯 CPU 路径、用不到它，但保留同名常量以便与 vidcrop_hwaccel.py 逐字对照
+# （--scale-algo 的两张取值表必须两个脚本一致，否则同一条命令两边行为不同）。
+_CUDA_SCALE_ALGO = "lanczos"
+
+# ── --scale-algo 的取值表 ─────────────────────────────────────────────
+# libswscale 侧只收 `scale` 滤镜 flags 里【真的能当算法用】的那些：
+#   不收 experimental（要配 +unstable 才生效，收了等于给一个必然报错的取值）；
+#   也不收 accurate_rnd / full_chroma_int / full_chroma_inp / bitexact /
+#   error_diffusion / print_info / unstable 这些修饰位。
+_SW_SCALE_ALGOS = (
+    "fast_bilinear", "bilinear", "bicubic", "neighbor", "area",
+    "bicublin", "gauss", "sinc", "lanczos", "spline",
+)
+# CUDA 侧 = scale_cuda 的 interp_algo 全部具名档（量程 0~4，0 未映射到具名档）
+_CUDA_SCALE_ALGOS = ("nearest", "bilinear", "bicubic", "lanczos")
+# 两个后端唯一的"同名不同字"：libswscale 叫 neighbor、scale_cuda 叫 nearest
+_SW_ALGO_ALIAS = {"nearest": "neighbor"}
+_CUDA_ALGO_ALIAS = {"neighbor": "nearest"}
+
+_SCALE_ALGO_HELP = ("libswscale：" + " ".join(_SW_SCALE_ALGOS)
+                    + "\n  cuda      ：" + " ".join(_CUDA_SCALE_ALGOS)
+                    + "（需自带 scale_cuda 的自建 FFmpeg）")
+
+
+def parse_scale_algo(spec: Optional[str]) -> Tuple[str, str, str]:
+    """
+    解析 --scale-algo → (backend, sw_algo, cuda_algo)。
+
+    与本文件同为孪生实现的 vidcrop_hwaccel.py 里的同名函数**逐字对应**（两张取值表
+    与全部报错文案都一致），只有两点是**有意不同**：
+      · 裸名字的解析：本脚本没有第二个后端，**任何 libswscale 算法都可以省前缀**
+        （`--scale-algo spline` 可用）。hwaccel 侧裸名字要求两个后端都认，
+        所以那条命令在 hwaccel 上得写成 `libswscale-spline`。
+      · 本脚本随后在 validate_and_finalize_args() 里拒绝 cuda-*（纯 CPU 路径）。
+
+    规则：
+      · 未指定 / 空串      → ('auto', 默认, 默认)，即保持既有行为（不传就等于裸 lanczos）
+      · 'libswscale-<a>'  → 强制 CPU 链 + 该算法（本脚本的唯一后端）
+      · 'cuda-<a>'        → 解析得出来，但本脚本会在校验阶段报错
+      · 裸 '<a>'          → 只定算法；本脚本按 libswscale 解析（前缀可省）
+    前缀大小写不敏感；nearest / neighbor 互为别名。
+    """
+    if not spec:
+        return "auto", _SW_SCALE_FLAGS, _CUDA_SCALE_ALGO
+    s = spec.strip().lower()
+    backend, algo = "auto", s
+    # 算法名里没有连字符（多词用下划线，如 fast_bilinear），所以出现 '-' 就说明
+    # 用户想写前缀 → 前缀不认识就直接点明，别退化成"裸名字"给一句绕的报错。
+    head, sep, tail = s.partition("-")
+    if sep:
+        if head not in ("libswscale", "cuda"):
+            raise ValueError(
+                f"--scale-algo '{spec}' 无效：未知后端前缀 '{head}-'"
+                f"（只支持 libswscale- / cuda-）。\n"
+                f"  可用值：<backend>-<algo>，或裸 <algo>（后端自动）。\n  {_SCALE_ALGO_HELP}")
+        backend, algo = head, tail
+    if not algo:
+        raise ValueError(
+            f"--scale-algo '{spec}' 无效：前缀 '{backend}-' 后面缺少算法名。\n"
+            f"  可用值：<backend>-<algo>，或裸 <algo>（后端自动）。\n  {_SCALE_ALGO_HELP}")
+
+    def _sw(name: str) -> Optional[str]:
+        n = _SW_ALGO_ALIAS.get(name, name)
+        return n if n in _SW_SCALE_ALGOS else None
+
+    def _cuda(name: str) -> Optional[str]:
+        n = _CUDA_ALGO_ALIAS.get(name, name)
+        return n if n in _CUDA_SCALE_ALGOS else None
+
+    if backend == "libswscale":
+        sw = _sw(algo)
+        if sw is None:
+            raise ValueError(
+                f"--scale-algo '{spec}' 无效：libswscale 没有算法 '{algo}'。\n"
+                f"  可用值：<backend>-<algo>，或裸 <algo>（后端自动）。\n  {_SCALE_ALGO_HELP}")
+        return backend, sw, _CUDA_SCALE_ALGO
+    if backend == "cuda":
+        cuda = _cuda(algo)
+        if cuda is None:
+            raise ValueError(
+                f"--scale-algo '{spec}' 无效：cuda 没有算法 '{algo}'。\n"
+                f"  可用值：<backend>-<algo>，或裸 <algo>（后端自动）。\n  {_SCALE_ALGO_HELP}")
+        return backend, _SW_SCALE_FLAGS, cuda
+
+    sw, cuda = _sw(algo), _cuda(algo)
+    # 裸名字：本脚本没有第二个后端 → 只要有 libswscale 这个算法就认（前缀可省）。
+    # （hwaccel 侧同名函数在这里要求两表都认，因为那边真有两个后端可选。）
+    if sw is None:
+        raise ValueError(
+            f"--scale-algo '{spec}' 无效：未知算法 '{algo}'。\n"
+            f"  可用值：libswscale-<algo>，或裸 <algo>。\n  {_SCALE_ALGO_HELP}")
+    return backend, sw, cuda or _CUDA_SCALE_ALGO
+
 
 def build_crop_filter(src_w: int, src_h: int, dst_w: int, dst_h: int) -> str:
     if dst_w > src_w or dst_h > src_h:
@@ -1997,13 +2096,14 @@ def build_crop_filter(src_w: int, src_h: int, dst_w: int, dst_h: int) -> str:
     return f"crop={dst_w}:{dst_h}:{x}:{y}"
 
 
-def build_cover_filter(src_w: int, src_h: int, dst_w: int, dst_h: int) -> str:
+def build_cover_filter(src_w: int, src_h: int, dst_w: int, dst_h: int,
+                       sw_algo: str = _SW_SCALE_FLAGS) -> str:
     """等比缩放+居中裁剪（cover 模式）。
 
-    缩放算法显式用 lanczos（见 _SW_SCALE_FLAGS 的注释：不吃 libswscale 的
-    默认 bicubic，且与 hwaccel 侧 scale_cuda 的 lanczos 同档）。
+    缩放算法由 --scale-algo 决定（默认见 _SW_SCALE_FLAGS 的注释：不吃 libswscale
+    的默认 bicubic，且与 hwaccel 侧 scale_cuda 的默认档一致）。
     """
-    sfx = f":flags={_SW_SCALE_FLAGS}"
+    sfx = f":flags={sw_algo}"
     if src_w <= 0 or src_h <= 0:
         return f"scale={dst_w}:{dst_h}{sfx}"
 
@@ -2020,7 +2120,8 @@ def build_cover_filter(src_w: int, src_h: int, dst_w: int, dst_h: int) -> str:
 
 
 def build_crop_cover_filter(src_w: int, src_h: int, dst_w: int, dst_h: int,
-                            crop_ratio: Optional[Tuple[int, int]] = None) -> str:
+                            crop_ratio: Optional[Tuple[int, int]] = None,
+                            sw_algo: str = _SW_SCALE_FLAGS) -> str:
     """
     生成「先裁剪、后缩放覆盖」滤镜字符串（crop-cover 模式）。
 
@@ -2033,18 +2134,19 @@ def build_crop_cover_filter(src_w: int, src_h: int, dst_w: int, dst_h: int,
     rn, rd = crop_ratio if crop_ratio else (dst_w, dst_h)
     crop_w, crop_h = calculate_auto_crop_size(src_w, src_h, rn, rd)
     crop = build_crop_filter(src_w, src_h, crop_w, crop_h)
-    cover = build_cover_filter(crop_w, crop_h, dst_w, dst_h)
+    cover = build_cover_filter(crop_w, crop_h, dst_w, dst_h, sw_algo)
     return f"{crop},{cover}" if cover else crop
 
 
 def build_video_filter(mode: str, src_w: int, src_h: int, dst_w: int, dst_h: int,
-                       crop_ratio: Optional[Tuple[int, int]] = None) -> str:
+                       crop_ratio: Optional[Tuple[int, int]] = None,
+                       sw_algo: str = _SW_SCALE_FLAGS) -> str:
     if mode == "crop":
         return build_crop_filter(src_w, src_h, dst_w, dst_h)
     if mode == "cover":
-        return build_cover_filter(src_w, src_h, dst_w, dst_h)
+        return build_cover_filter(src_w, src_h, dst_w, dst_h, sw_algo)
     if mode == "crop-cover":
-        return build_crop_cover_filter(src_w, src_h, dst_w, dst_h, crop_ratio)
+        return build_crop_cover_filter(src_w, src_h, dst_w, dst_h, crop_ratio, sw_algo)
     raise ValueError(f"未知处理模式：{mode}")
 
 
@@ -2233,11 +2335,12 @@ def build_ffmpeg_cmd(
     keep_metadata: bool = True,
     color_range: Optional[str] = None,
     crop_ratio: Optional[Tuple[int, int]] = None,
+    sw_algo: str = _SW_SCALE_FLAGS,
 ) -> List[str]:
     if codec.lower() == "copy":
         raise ValueError("使用视频滤镜时不能使用 -c:v copy，请改用 libx264 / libx265 等编码器")
 
-    vf = build_video_filter(mode, src_w, src_h, dst_w, dst_h, crop_ratio)
+    vf = build_video_filter(mode, src_w, src_h, dst_w, dst_h, crop_ratio, sw_algo)
 
     # [META-KEEP] 复用 ffprobe_info 的探测结果（带缓存），拿不到时自行探测一次
     meta = (info or {}).get("meta") if info else None
@@ -2834,6 +2937,7 @@ def prepare_job_command(
             info=info,
             color_range=args.color_range,
             crop_ratio=crop_ratio,
+            sw_algo=args.sw_algo,
         )
     except Exception as exc:
         job.status = "failed"
@@ -3075,6 +3179,18 @@ def parse_args() -> argparse.Namespace:
     )
 
     ap.add_argument(
+        "--scale-algo",
+        default=None,
+        metavar="SPEC",
+        help="缩放算法，写法 <backend>-<algo> 或裸 <algo>。本脚本是纯 CPU 路径，"
+             "只支持 libswscale-*（前缀可省）：" + " ".join(_SW_SCALE_ALGOS) + "。"
+             f"默认裸 {_SW_SCALE_FLAGS}（= libswscale-{_SW_SCALE_FLAGS}，"
+             "不吃 libswscale 的默认 bicubic）。"
+             "裸名字要求两个后端都认（只在一个后端有的算法必须带前缀，如 libswscale-spline）；"
+             "cuda-* 请用 vidcrop_hwaccel.py。crop 模式不做缩放、该参数不生效",
+    )
+
+    ap.add_argument(
         "--codec",
         default=DEFAULT_CODEC,
         help="视频编码器，默认 libx264 (支持别名: x264, x265, h264, h265, hevc, "
@@ -3265,6 +3381,22 @@ def validate_and_finalize_args(args: argparse.Namespace) -> None:
               f"{args.crop_ratio_num}:{args.crop_ratio_den} 补全为 "
               f"{args.output_width}x{args.output_height}。")
 
+    # --scale-algo：解析成 (backend, sw_algo, cuda_algo)。位置固定在
+    # 「尺寸/crop-ratio 那一组校验之后、质量参数之前」——与 vidcrop_hwaccel.py 同顺序。
+    try:
+        args.scale_backend, args.sw_algo, args.cuda_algo = parse_scale_algo(args.scale_algo)
+    except ValueError as exc:
+        raise ValueError(str(exc))
+    if args.scale_backend == "cuda":
+        # 有意的两脚本不对称：本脚本没有 GPU 缩放链（也就没有 --hwaccel/--fallback-policy），
+        # 直接点明该用哪个脚本，而不是默默按 CPU 跑出不同结果。
+        raise ValueError(
+            "--scale-algo 不支持 'cuda-*'：vidcrop_cpu_v2.py 是纯 CPU 路径。\n"
+            f"  改用 libswscale-<algo>（或裸 <algo>，默认 {_SW_SCALE_FLAGS}）；"
+            "要走 CUDA 缩放请用 vidcrop_hwaccel.py。")
+    if args.mode == "crop" and args.scale_algo:
+        print("提示：--mode crop 不做缩放，--scale-algo 不生效。")
+
     # 量程检查必须排在 _resolve_quality_params 之前：否则 --crf-ref 99 这类超范围
     # 输入会先被换算并打印出一行"-crf 51"的建议值，紧接着才报范围错误，自相矛盾。
     if args.crf is not None and not (0 <= args.crf <= 63):
@@ -3432,6 +3564,11 @@ def main() -> int:
         + f"   pix_fmt: {args.pix_fmt_resolved or '不指定'}"
         + f"   color_range: {args.color_range}"
     )
+    # 只展示真正会生效的缩放档：crop 模式不缩放；给了 --scale-algo 但用不上时说清楚
+    if args.mode != "crop":
+        print(_label("缩放") + f"libswscale-{args.sw_algo}（CPU）")
+    elif args.scale_algo:
+        print(_label("缩放") + "不适用（crop 模式不缩放）")
     print(f"音频        : {args.audio_codec}" + (f" @ {args.audio_bitrate}" if args.audio_codec != "copy" else ""))
 
     if pending:

@@ -78,6 +78,7 @@
 | 硬件解码（CUDA / Vulkan / VA-API / OpenCL） | ❌ | ❌ | ❌ | ✅ |
 | `crop_cuda` 全 GPU 流水线 | ❌ | ❌ | ❌ | ✅¹ |
 | `scale_cuda` 显存内缩放（仅 cover，策略 2） | ❌ | ❌ | ❌ | ✅¹ |
+| `--scale-algo` 选缩放算法 | ❌ | ❌ | ✅（仅 libswscale） | ✅（含 `cuda-*`） |
 | 运行时硬件能力探测 | — | — | — | ✅ |
 | 策略链自动降级（6 级） | — | — | — | ✅ |
 | 编码器级降级（GPU 编码器 → CPU 软编） | — | — | ✅ | ✅ |
@@ -216,6 +217,7 @@ vidls.cmd --install       :: 在仓库里这样敲；装好之后从任何目录
 | `--output` | 必选 | 输出文件或目录 |
 | `--output-width` / `--output-height` | 必选 | 目标视频宽 / 高 |
 | `--mode` | `crop` | `crop`=直接居中裁剪；`cover`=等比缩放至完全覆盖后居中裁剪 |
+| `--scale-algo` | 裸 `lanczos` | 缩放算法。本脚本是纯 CPU 路径：写 `libswscale-<algo>` 或**裸 `<algo>`（前缀可省）**——`fast_bilinear` `bilinear` `bicubic` `neighbor` `area` `bicublin` `gauss` `sinc` `lanczos` `spline`。默认 `lanczos`（不吃 libswscale 的默认 `bicubic`）。`cuda-*` 请用 hwaccel 版（本脚本会直接报错） |
 | `--original-width/height` | 自动检测 | 手动指定源视频尺寸，可跳过 ffprobe 探测 |
 | `--codec` | `libx264` | 视频编码器 |
 | `--crf` | FFmpeg 内置默认 | CRF 质量值（0–63，越小质量越高） |
@@ -333,6 +335,7 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--output-width` / `--output-height` | 与 `--crop-ratio` 二选一 | 目标视频宽 / 高；`crop-cover` 模式下配合 `--crop-ratio` 时可只给一个维度（另一个按比例推导，取偶数） |
 | `--crop-ratio` | 无 | 目标宽高比，自动算最大化裁剪尺寸；`crop-cover` 模式下与 `--output-width/height` 并用（前者定裁剪比例、后者定最终尺寸） |
 | `--mode` | `crop` | `crop` / `cover` / `crop-cover`（`crop-cover`=先按 `--crop-ratio`（未给出时即目标宽高比）最大化裁剪，再缩放覆盖到最终尺寸）（注¹） |
+| `--scale-algo` | 裸 `lanczos` | 缩放算法，写法 `<backend>-<algo>` 或裸 `<algo>`（后端自动）。`libswscale-*`：同 v2 的那 10 个；`cuda-*`：`nearest` `bilinear` `bicubic` `lanczos`（**仅 cover 模式**，走显存内缩放，需自建 FFmpeg）。前缀用于**强制**后端；裸名字要求两表都认（只在一个后端有的必须带前缀，如 `libswscale-spline`）。降级与冲突处理见[硬件加速说明](#硬件加速说明) |
 | `--original-width/height` | 自动检测 | 手动指定源尺寸，跳过 ffprobe |
 | `--codec` | **`h264_nvenc`** | 支持 `auto`；无 NVENC 时自动降级为 **`libx264`** |
 | `--cq` | **`23`** | GPU 编码器质量（0–51）；字面量原样下发 |
@@ -1134,6 +1137,24 @@ python vidcrop_cpu_v2.py \
 5. auto 模式下最佳硬解 + CPU 软件编码
 6. 纯 CPU 兜底
 
+**`--scale-algo`：缩放算法怎么选、后端怎么定**
+
+写法 `<backend>-<algo>` 或裸 `<algo>`。前缀决定**强制**哪个后端，裸名字则交给自动选择。
+不传等价于裸 `lanczos`，也就是默认行为（GPU 可用走 `cuda-lanczos`，否则 `libswscale-lanczos`）。
+
+| 写法 | 含义 |
+|---|---|
+| `lanczos` / `bicubic` / `nearest` … | 只定算法、后端自动。hwaccel 下**要求两张表都认**（避免歧义）；v2 下只查 libswscale 表（所以能省前缀） |
+| `libswscale-<algo>` | 强制 CPU 侧 `scale=…:flags=<algo>`，**不插** CUDA 缩放策略 |
+| `cuda-<algo>` | 强制 CUDA 缩放链 `scale_cuda=…:interp_algo=<algo>`（仅 cover 模式） |
+
+- `libswscale` 侧：`fast_bilinear` `bilinear` `bicubic` `neighbor` `area` `bicublin` `gauss` `sinc` `lanczos` `spline`（= `scale` 滤镜 flags 里真能当算法用的那些；不收 `experimental`，它要配 `+unstable`）。
+- `cuda` 侧：`nearest` `bilinear` `bicubic` `lanczos`（= `scale_cuda` 的全部具名档，量程 0~4；默认值 0 未映射到具名档，所以必须显式给）。`nearest` ↔ `neighbor` 互为别名。
+- **`cuda-*` 的降级**（复刻 `--hwaccel cuda` 的两档行为）：一件 CUDA 组件都没有 → **报错退出 2**，并提示改用 `libswscale-<同档>`；有 CUDA 但当前 FFmpeg 没有 `scale_cuda` → **退回 `libswscale-<同档>` 并告警**。
+- **冲突**：`cuda-*` 与 `--hwaccel none` / `--fallback-policy cpu-only` 同时给 → **报错退出 2**（明确要 GPU 又显式禁用它）。
+- `crop` 模式不做缩放 → 给了只提示"不生效"，继续跑。
+- v2 **拒绝** `cuda-*`（纯 CPU 路径，没有 GPU 缩放链），并指向 hwaccel 版——这是有意的两脚本不对称。
+
 **策略降级示例：**
 
 > 用户请求 `--codec av1_nvenc --cq-ref 21`，但显卡不支持 AV1 硬编：
@@ -1291,7 +1312,9 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 | `crop_cuda` 缺失 | 该滤镜**在 FFmpeg 上游并不存在**（不是编译选项问题），crop 模式的全 GPU 流水线（策略 1）始终跳过 | 仍走"硬解 + CPU 裁剪 + NVENC 硬编"；代价是**吞吐对 CPU 敏感**，见 [FAQ Q13](#常见问题faq) |
 | cover 的 CUDA 缩放需自建 FFmpeg | 只有 `--enable-cuda-nvcc` 编出来的 FFmpeg 才有 `scale_cuda`，发行版 gpl 构建通常没有 | 没有就自动退回 CPU 侧 `scale`（结果正确、只是慢）；要拿那 44.5% 的提速需自建 |
 | `crop-cover` 不走 CUDA 缩放 | 它必须先裁剪，而裁剪只能在 CPU（无 `crop_cuda`）→ GPU 缩放要额外一次 `hwupload` | 保留 CPU 侧 `crop,scale`（该路径未实测）；要用 CUDA 缩放请改用 `--mode cover` |
-| CPU 侧缩放是 lanczos（比旧版慢） | 两个脚本的 `cover` / `crop-cover` 都显式用 `flags=lanczos`（原先是 libswscale 默认的 bicubic），抽头更多 → CPU 侧吞吐略降 | 这是为了与 GPU 侧同档、避免降级时画质变软。若要换回更快但略软的档，改 `_SW_SCALE_FLAGS`（两个脚本里各一份，必须一致） |
+| CPU 侧缩放是 lanczos（比旧版慢） | `cover` / `crop-cover` 默认用 `flags=lanczos`（原先是 libswscale 默认的 bicubic），抽头更多 → CPU 侧吞吐略降 | 这是为了与 GPU 侧同档、避免降级时画质变软。换档用 `--scale-algo`（如 `--scale-algo bicubic`） |
+| v0 / v1 与 v2/hwaccel 的缩放档位不同 | v0/v1 仍吃 libswscale 的默认 `bicubic`（它们定位是"对照旧行为"，这次没跟着改） | 要同档用 v2 / hwaccel；要对照旧输出用 v0/v1 |
+| `--scale-algo` 的裸名字在 v2 与 hwaccel 上不完全等价 | v2 只有一个后端 → **任何 libswscale 算法都能省前缀**（`--scale-algo spline` 可用）；hwaccel 有两个后端 → 裸名字要求两表都认，`spline` 这类只有 libswscale 有的**必须**写成 `libswscale-spline`，否则报错 | 想让同一条命令两边都能跑就统一带前缀（`libswscale-<algo>`）；只在 v2 上用才可省 |
 | `--crop-ratio` + **只给一个**维度（非 crop-cover） | 互斥判据是"两个维度都给才算同时指定"，只给一个不算 → 那个维度被**静默忽略**（`--mode crop --crop-ratio 16:9 --output-width 320` 里 `320` 不生效）。两个脚本行为一致 | 按比例裁剪就别给尺寸；要指定最终尺寸用 `--mode crop-cover`（该模式明确支持单维度） |
 | hwaccel 不校验 `--original-width/height` | 只有 `vidcrop_cpu_v2.py` 校验正整数；hwaccel 传负值会一路带进尺寸计算 | 手填源尺寸时自己保证为正；不确定就用默认的 ffprobe 探测 |
 | `librav1e` 无 `-crf` | 编码器本身只支持 `-qp` | 脚本自动换算（实测标定） |
@@ -1449,9 +1472,10 @@ vidutils/
 | `cover` | `scale=…,crop=W:H`（先缩放再居中裁剪） | 任意尺寸，比例按目标算 |
 | `crop-cover` | `crop=…,scale=…`（先裁剪再缩放覆盖） | 任意尺寸，裁剪比例由 `--crop-ratio` 单独决定 |
 
-> 两条涉及缩放的链里的 `scale` **显式带 `:flags=lanczos`**（`scale=…:flags=lanczos,crop=…`）。
+> 两条涉及缩放的链里的 `scale` **默认显式带 `:flags=lanczos`**（`scale=…:flags=lanczos,crop=…`）。
 > libswscale 的默认是 `bicubic`（实测：`scale=W:H` 与 `scale=W:H:flags=bicubic` 的帧级 MD5 完全相同），
 > 而 `scale_cuda` 只到 `lanczos` 一档——取两边交集里的最高档并显式钉死，让 GPU 路径与 CPU 降级路径同档。
+> 想换档用 `--scale-algo`（如 `--scale-algo libswscale-spline`）；
 > 代价：CPU 侧比 bicubic 略慢（`lanczos` 抽头更多）。
 
 `crop-cover` 与 `cover` 的区别是**裁剪比例可以独立于最终尺寸**：`--crop-ratio` 定裁剪比例，

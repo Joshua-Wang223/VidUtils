@@ -52,6 +52,36 @@ NVDEC → scale_cuda=W:H:interp_algo=lanczos → 显式 hwdownload,format=… �
 去 sed 提取，会只匹配上一部分用例、剩下的静默返回空串，而空串相等会被误判成"一致"。
 → 解析要按 token 取（引号可有可无），且**空值必须判失败**。
 
+## 2026-09-20 追加：`--scale-algo`（缩放算法/后端可选）
+
+在"两边都钉 lanczos"之上加了显式开关，写法 `<backend>-<algo>` 或裸 `<algo>`：
+
+| 写法 | 含义 |
+|---|---|
+| 不传 / 裸 `lanczos` | **默认 = 既有行为**（GPU 可用走 `cuda-lanczos`，否则 `libswscale-lanczos`） |
+| `libswscale-<algo>` | 强制 CPU 链，**不插** CUDA 缩放策略 |
+| `cuda-<algo>` | 强制 CUDA 缩放链（仅 cover 模式） |
+
+- 两张表：`libswscale` = `fast_bilinear bilinear bicubic neighbor area bicublin gauss sinc
+  lanczos spline`（不收 `experimental`，它要配 `+unstable`）；`cuda` = `nearest bilinear
+  bicubic lanczos`（`scale_cuda` 的全部具名档）。`nearest` ↔ `neighbor` 互为别名。
+- **裸名字的解析在两个脚本里是有意不同的**：hwaccel 有两个后端 → 要求两表都认，`spline`
+  这类必须写 `libswscale-spline`（否则报歧义）；v2 只有一个后端 → **任何 libswscale 算法
+  都能省前缀**（这是用户明确要的"v2 可以省去 libswscale- 前缀"）。所以同一条
+  `--scale-algo spline` 在 v2 能跑、在 hwaccel 报错——**要两边都能跑就统一带前缀**。
+- 降级/冲突（复刻 `--hwaccel cuda` 的两档行为）：一件 CUDA 组件都没有 → **报错退出 2**；
+  有 CUDA 但缺 `scale_cuda` → 退回 `libswscale-<同档>` + 告警；`cuda-*` 与 `--hwaccel none` /
+  `--fallback-policy cpu-only` 同时给 → **报错退出 2**；`crop` 模式给了 → 提示不生效、继续跑。
+- v2 **拒绝** `cuda-*`（纯 CPU 路径）并指向 hwaccel —— 与"v2 没有 `--hwaccel`"同类的既有权不对称。
+
+**验证（本机实测）**：`parse_scale_algo` 矩阵 15 组（合法/非法/别名/未知前缀/空 algo/大小写）；
+不传该参数时两脚本 8 个用例 × 2 脚本 = **16/16 行滤镜链与改动前逐字相同**（`git` 前基线
+对 diff）；`--scale-algo` 跨脚本矩阵 8/9 一致（第 9 个 `CUDA-Lanczos` 两边都按预期失败）；
+单元 22 项（策略链插不插、滤镜串落地、两脚本默认值/取值表/别名表一致、未知名字报错首行一致）。
+
+**为什么"不传 = 保持现状"是硬要求**：默认值一旦改成 `libswscale-lanczos`，就会把刚验证到的
+**44.5% 提速对所有现有用户静默关掉**。所以默认必须是"后端自动"，而不是某个具体后端。
+
 
 ## 实测数据（2026-09-20，T4 + 自建 FFmpeg 7.1，`-f null -` 去 IO）
 

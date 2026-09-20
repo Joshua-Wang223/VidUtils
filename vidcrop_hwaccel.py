@@ -15,6 +15,14 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
                     有 --crop-ratio 时最终尺寸只需给一个维度，另一个按比例推导。
   • --crop-ratio 自动按目标宽高比（如 16:9）最大化裁剪，无需指定输出尺寸
     （crop-cover 模式下与 --output-width/height 并用，用于指定最终的缩放尺寸）
+  • --scale-algo 选缩放算法，写法 <backend>-<algo> 或裸 <algo>（后端自动）：
+        libswscale-*  fast_bilinear bilinear bicubic neighbor area bicublin
+                      gauss sinc lanczos spline
+        cuda-*        nearest bilinear bicubic lanczos（仅 cover 模式，
+                      需 --enable-cuda-nvcc 的自建 FFmpeg，走显存内缩放）
+    默认裸 lanczos：GPU 可用则 cuda-lanczos、否则 libswscale-lanczos。
+    前缀用于**强制**后端；裸名字要求两个后端都认，只在一个后端有的算法
+    必须带前缀（如 libswscale-spline）。crop 模式不做缩放，该参数不生效。
   • 编码格式覆盖 H.264 / H.265 / VP9 / AV1：
       - H.264/HEVC：libx264 / libx265（CPU）、h264_nvenc / hevc_nvenc（GPU）
       - AV1：libsvtav1 / libaom-av1 / librav1e（CPU）、av1_nvenc（GPU 策略 1/2）
@@ -2038,6 +2046,100 @@ def collect_video_files(input_path: Path, recursive: bool = False) -> List[Path]
 # 注意：libswscale 还有 spline / sinc / gauss / area 等档，但 scale_cuda 没有
 # 对应档可选，取两者交集里最高的那个 → lanczos。
 _SW_SCALE_FLAGS = 'lanczos'
+# CUDA 侧 scale_cuda 的【默认】档（--scale-algo 未指定时用）
+_CUDA_SCALE_ALGO = 'lanczos'
+
+# ── --scale-algo 的取值表 ─────────────────────────────────────────────
+# libswscale 侧只收 `scale` 滤镜 flags 里【真的能当算法用】的那些：
+#   不收 experimental（要配 +unstable 才生效，收了等于给一个必然报错的取值）；
+#   也不收 accurate_rnd / full_chroma_int / full_chroma_inp / bitexact /
+#   error_diffusion / print_info / unstable 这些修饰位。
+_SW_SCALE_ALGOS = (
+    'fast_bilinear', 'bilinear', 'bicubic', 'neighbor', 'area',
+    'bicublin', 'gauss', 'sinc', 'lanczos', 'spline',
+)
+# CUDA 侧 = scale_cuda 的 interp_algo 全部具名档（量程 0~4，0 未映射到具名档）
+_CUDA_SCALE_ALGOS = ('nearest', 'bilinear', 'bicubic', 'lanczos')
+# 两个后端唯一的"同名不同字"：libswscale 叫 neighbor、scale_cuda 叫 nearest
+_SW_ALGO_ALIAS = {'nearest': 'neighbor'}
+_CUDA_ALGO_ALIAS = {'neighbor': 'nearest'}
+
+_SCALE_ALGO_HELP = ('libswscale：' + ' '.join(_SW_SCALE_ALGOS)
+                    + '\n  cuda      ：' + ' '.join(_CUDA_SCALE_ALGOS)
+                    + '（需自带 scale_cuda 的自建 FFmpeg）')
+
+
+def parse_scale_algo(spec: Optional[str]) -> Tuple[str, str, str]:
+    """
+    解析 --scale-algo → (backend, sw_algo, cuda_algo)。
+
+    backend ∈ 'auto' | 'libswscale' | 'cuda'。sw_algo / cuda_algo **两个都给全**——
+    这样"强制 cuda 但环境不可用"时能直接拿 sw_algo 退回，不必再解析一遍。
+
+    规则：
+      · 未指定 / 空串      → ('auto', 默认, 默认)，即保持既有行为（不传就等于裸 lanczos）
+      · 'libswscale-<a>'  → 强制 CPU 链 + 该算法
+      · 'cuda-<a>'        → 强制 CUDA 缩放链 + 该算法
+      · 裸 '<a>'          → 只定算法、后端自动；**要求两表都认**，
+                            只在一个后端存在的算法必须带前缀（如 libswscale-spline）
+    前缀大小写不敏感；nearest / neighbor 互为别名。
+    """
+    if not spec:
+        return 'auto', _SW_SCALE_FLAGS, _CUDA_SCALE_ALGO
+    s = spec.strip().lower()
+    backend, algo = 'auto', s
+    # 算法名里没有连字符（多词用下划线，如 fast_bilinear），所以出现 '-' 就说明
+    # 用户想写前缀 → 前缀不认识就直接点明，别退化成"裸名字"给一句绕的报错。
+    head, sep, tail = s.partition('-')
+    if sep:
+        if head not in ('libswscale', 'cuda'):
+            raise ValueError(
+                f"--scale-algo '{spec}' 无效：未知后端前缀 '{head}-'"
+                f"（只支持 libswscale- / cuda-）。\n"
+                f"  可用值：<backend>-<algo>，或裸 <algo>（后端自动）。\n  {_SCALE_ALGO_HELP}")
+        backend, algo = head, tail
+    if not algo:
+        raise ValueError(
+            f"--scale-algo '{spec}' 无效：前缀 '{backend}-' 后面缺少算法名。\n"
+            f"  可用值：<backend>-<algo>，或裸 <algo>（后端自动）。\n  {_SCALE_ALGO_HELP}")
+
+    def _sw(name: str) -> Optional[str]:
+        n = _SW_ALGO_ALIAS.get(name, name)
+        return n if n in _SW_SCALE_ALGOS else None
+
+    def _cuda(name: str) -> Optional[str]:
+        n = _CUDA_ALGO_ALIAS.get(name, name)
+        return n if n in _CUDA_SCALE_ALGOS else None
+
+    if backend == 'libswscale':
+        sw = _sw(algo)
+        if sw is None:
+            raise ValueError(
+                f"--scale-algo '{spec}' 无效：libswscale 没有算法 '{algo}'。\n"
+                f"  可用值：<backend>-<algo>，或裸 <algo>（后端自动）。\n  {_SCALE_ALGO_HELP}")
+        return backend, sw, _CUDA_SCALE_ALGO
+    if backend == 'cuda':
+        cuda = _cuda(algo)
+        if cuda is None:
+            raise ValueError(
+                f"--scale-algo '{spec}' 无效：cuda 没有算法 '{algo}'。\n"
+                f"  可用值：<backend>-<algo>，或裸 <algo>（后端自动）。\n  {_SCALE_ALGO_HELP}")
+        return backend, _SW_SCALE_FLAGS, cuda
+
+    sw, cuda = _sw(algo), _cuda(algo)
+    if sw is None and cuda is None:
+        raise ValueError(
+            f"--scale-algo '{spec}' 无效：未知算法 '{algo}'。\n"
+            f"  可用值：<backend>-<algo>，或裸 <algo>（后端自动）。\n  {_SCALE_ALGO_HELP}")
+    if sw is None or cuda is None:
+        missing = 'libswscale' if sw is None else 'cuda'
+        raise ValueError(
+            f"--scale-algo '{spec}' 无效：裸 '{algo}' 无法在两个后端同时确定"
+            f"（{missing} 侧没有这个算法）。\n"
+            f"  只在一个后端有的算法请带前缀，例如 --scale-algo {missing}-{algo}。\n"
+            f"  可用值：<backend>-<algo>，或裸 <algo>（后端自动）。\n  {_SCALE_ALGO_HELP}")
+    return backend, sw, cuda
+
 
 def _build_crop_filter_str(orig_w: int, orig_h: int, out_w: int, out_h: int,
                             use_cuda: bool = False) -> str:
@@ -2055,14 +2157,15 @@ def _build_crop_filter_str(orig_w: int, orig_h: int, out_w: int, out_h: int,
     return f'{fname}={out_w}:{out_h}:{x}:{y}'
 
 
-def _build_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int) -> str:
+def _build_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
+                            sw_algo: str = _SW_SCALE_FLAGS) -> str:
     """
     生成等比缩放+居中裁剪滤镜字符串（cover 模式）。
     策略：比较宽高比，确定缩放方向，再裁剪到目标区域。
-    缩放算法显式用 lanczos（见 _SW_SCALE_FLAGS 的注释：不吃 libswscale 的
-    默认 bicubic，且与 GPU 侧 scale_cuda 的 lanczos 同档）。
+    缩放算法由 --scale-algo 决定（默认见 _SW_SCALE_FLAGS 的注释：不吃 libswscale
+    的默认 bicubic，且与 GPU 侧 scale_cuda 的默认档一致）。
     """
-    sfx = f':flags={_SW_SCALE_FLAGS}'
+    sfx = f':flags={sw_algo}'
     if src_w <= 0 or src_h <= 0:
         return f'scale={dst_w}:{dst_h}{sfx}'
 
@@ -2082,7 +2185,8 @@ def _build_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int) -> s
 
 
 def _build_cover_cuda_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
-                                 download_fmt: str) -> str:
+                                 download_fmt: str,
+                                 cuda_algo: str = _CUDA_SCALE_ALGO) -> str:
     """
     生成 cover 模式的 CUDA 缩放链：scale_cuda → hwdownload,format=… → crop。
 
@@ -2097,10 +2201,10 @@ def _build_cover_cuda_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
       T4）自动插入那条路下 crop 会被静默丢弃：scale_cuda=1280:720,crop=iw/2:ih/2
       实际输出 1280x720 而不是 640x360——尺寸合法、无任何报错，画面却是错的。
     · **中间尺寸在 Python 侧算成偶数**，不吃 scale_cuda 的 -2 取偶语义；
-      interp_algo 显式钉 lanczos（scale_cuda 的 interp_algo 默认值是 0、未映射到
-      具名档，而 CPU 侧 scale 默认是 bicubic，不指定会得到与预期不符的画质）。
+      interp_algo 显式指定（scale_cuda 的默认值是 0、未映射到具名档，
+      默认取 _CUDA_SCALE_ALGO，可用 --scale-algo 覆盖）。
     """
-    sc = f'scale_cuda={dst_w}:{dst_h}:interp_algo=lanczos'
+    sc = f'scale_cuda={dst_w}:{dst_h}:interp_algo={cuda_algo}'
     dl = f'hwdownload,format={download_fmt}'
     if src_w <= 0 or src_h <= 0:
         return f'{sc},{dl}'
@@ -2121,12 +2225,13 @@ def _build_cover_cuda_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
         sw = dst_w
         sh = derive_even_dimension(src_h * dst_w / src_w)
         crop = f',crop={dst_w}:{dst_h}:0:(ih-{dst_h})/2'
-    return (f'scale_cuda={sw}:{sh}:interp_algo=lanczos,'
+    return (f'scale_cuda={sw}:{sh}:interp_algo={cuda_algo},'
             f'hwdownload,format={download_fmt}{crop}')
 
 
 def _build_crop_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
-                                 crop_ratio: Optional[Tuple[int, int]] = None) -> str:
+                                 crop_ratio: Optional[Tuple[int, int]] = None,
+                                 sw_algo: str = _SW_SCALE_FLAGS) -> str:
     """
     生成「先裁剪、后缩放覆盖」滤镜字符串（crop-cover 模式）。
 
@@ -2141,7 +2246,7 @@ def _build_crop_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
     rn, rd = crop_ratio if crop_ratio else (dst_w, dst_h)
     crop_w, crop_h = calculate_auto_crop_size(src_w, src_h, rn, rd)
     crop = _build_crop_filter_str(src_w, src_h, crop_w, crop_h)
-    cover = _build_cover_filter_str(crop_w, crop_h, dst_w, dst_h)
+    cover = _build_cover_filter_str(crop_w, crop_h, dst_w, dst_h, sw_algo)
     return f'{crop},{cover}' if cover else crop
 
 
@@ -2149,7 +2254,9 @@ def build_video_filter(mode: str, src_w: int, src_h: int, dst_w: int, dst_h: int
                        use_cuda: bool = False,
                        crop_ratio: Optional[Tuple[int, int]] = None,
                        cuda_scale: bool = False,
-                       src_bits: int = 8) -> str:
+                       src_bits: int = 8,
+                       sw_algo: str = _SW_SCALE_FLAGS,
+                       cuda_algo: str = _CUDA_SCALE_ALGO) -> str:
     """
     根据 mode 生成对应的 FFmpeg 视频滤镜字符串。
 
@@ -2171,11 +2278,11 @@ def build_video_filter(mode: str, src_w: int, src_h: int, dst_w: int, dst_h: int
         if mode != 'cover':
             raise ValueError('CUDA 缩放链（scale_cuda）目前只支持 cover 模式')
         return _build_cover_cuda_filter_str(src_w, src_h, dst_w, dst_h,
-                                            _src_download_fmt(src_bits))
+                                            _src_download_fmt(src_bits), cuda_algo)
     if mode == 'cover':
-        return _build_cover_filter_str(src_w, src_h, dst_w, dst_h)
+        return _build_cover_filter_str(src_w, src_h, dst_w, dst_h, sw_algo)
     if mode == 'crop-cover':
-        return _build_crop_cover_filter_str(src_w, src_h, dst_w, dst_h, crop_ratio)
+        return _build_crop_cover_filter_str(src_w, src_h, dst_w, dst_h, crop_ratio, sw_algo)
     return _build_crop_filter_str(src_w, src_h, dst_w, dst_h, use_cuda=use_cuda)
 
 
@@ -2408,6 +2515,7 @@ def _generate_strategies(
     hw_caps: HardwareCapabilities,
     hw_mode: str,
     mode: str = 'crop',
+    scale_backend: str = 'auto',
 ) -> List[Dict]:
     """
     根据硬件能力、用户意图和处理模式生成策略列表（优先级从高到低）。
@@ -2465,8 +2573,10 @@ def _generate_strategies(
     #   而不是 640x360）→ 所以链里必须显式写 hwdownload,format=...
     #
     # crop-cover 不纳入：它必须先裁剪，GPU 缩放要额外 hwupload 一次，未实测。
+    # --scale-algo 显式指定 libswscale-* 时也不插（用户强制走 CPU 链）。
     if (hw_mode != 'none'
             and mode == 'cover'
+            and scale_backend != 'libswscale'
             and is_nvenc
             and hw_caps.can_cuda_scale(preferred_codec)):
         strategies.append({
@@ -3004,6 +3114,9 @@ def process_file(
     flag: Optional[str] = None,
     color_range: Optional[str] = None,
     crop_ratio: Optional[Tuple[int, int]] = None,
+    scale_backend: str = 'auto',
+    sw_algo: str = _SW_SCALE_FLAGS,
+    cuda_algo: str = _CUDA_SCALE_ALGO,
     queue_rest: Optional[float] = None,
     queue_cur: Optional[float] = None,
 ) -> Dict[str, object]:
@@ -3126,7 +3239,8 @@ def process_file(
     total_frames = _get_total_frames(str(input_file), ffmpeg_bin)
 
     # ── 生成策略链 ──
-    all_strategies = _generate_strategies(codec, hw_caps, hw_mode, mode=mode)
+    all_strategies = _generate_strategies(codec, hw_caps, hw_mode, mode=mode,
+                                          scale_backend=scale_backend)
 
     # ── Dry-run 模式：打印最优策略命令后返回 ──
     if dry_run:
@@ -3137,6 +3251,7 @@ def process_file(
                 use_cuda=strategy['use_hw_filter'], crop_ratio=crop_ratio,
                 cuda_scale=bool(strategy.get('cuda_scale', False)),
                 src_bits=_src_bits,
+                sw_algo=sw_algo, cuda_algo=cuda_algo,
             )
         except ValueError as exc:
             print(f'  ✘ 失败：滤镜构建 — {exc}', file=sys.stderr)
@@ -3186,6 +3301,7 @@ def process_file(
                 mode, actual_width, actual_height, out_width, out_height,
                 use_cuda=use_hw_filter, crop_ratio=crop_ratio,
                 cuda_scale=use_cuda_scale, src_bits=_src_bits,
+                sw_algo=sw_algo, cuda_algo=cuda_algo,
             )
         except ValueError as exc:
             print(f'  ✘ 失败：滤镜构建 — {exc}', file=sys.stderr)
@@ -3363,6 +3479,17 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                              'cover=等比缩放覆盖后居中裁剪（任意尺寸）；'
                              'crop-cover=先按 --crop-ratio（未给出时用目标宽高比）'
                              '最大化裁剪，再缩放覆盖到 --output-width/height')
+
+    parser.add_argument('--scale-algo', default=None, metavar='SPEC',
+                        help='缩放算法，写法 <backend>-<algo> 或裸 <algo>（后端自动）。'
+                             'libswscale-*：' + ' '.join(_SW_SCALE_ALGOS) + '；'
+                             'cuda-*（仅 cover 模式、需自带 scale_cuda 的自建 FFmpeg）：'
+                             + ' '.join(_CUDA_SCALE_ALGOS) + '。'
+                             f'默认裸 {_SW_SCALE_FLAGS}：GPU 可用则走 cuda-{_CUDA_SCALE_ALGO}、'
+                             f'否则 libswscale-{_SW_SCALE_FLAGS}。'
+                             'libswscale-* / cuda-* 前缀用于强制后端；'
+                             '裸名字要求两个后端都认（只在一个后端有的算法必须带前缀，'
+                             '如 libswscale-spline）。crop 模式不做缩放、该参数不生效')
 
     # 视频编码
     parser.add_argument('--codec', default='h264_nvenc',
@@ -3543,6 +3670,26 @@ def main() -> int:
               f'{crop_ratio_num}:{crop_ratio_den} 补全为 '
               f'{args.output_width}x{args.output_height}。')
 
+    # --scale-algo：解析成 (backend, sw_algo, cuda_algo)。位置固定在
+    # 「尺寸/crop-ratio 那一组校验之后、质量参数之前」——两脚本必须同顺序。
+    try:
+        args.scale_backend, args.sw_algo, args.cuda_algo = parse_scale_algo(args.scale_algo)
+    except ValueError as exc:
+        print(f'[ERROR] {exc}', file=sys.stderr)
+        return 2
+    if args.mode == 'crop' and args.scale_algo:
+        print('提示：--mode crop 不做缩放，--scale-algo 不生效。')
+    # 明确要 CUDA 缩放、却又显式禁用了 GPU → 参数矛盾（与 --crf-ref/--crf 同类），报错
+    if args.scale_backend == 'cuda':
+        if args.hwaccel == 'none':
+            print('[ERROR] --scale-algo cuda-* 与 --hwaccel none 冲突：'
+                  '前者要 CUDA 缩放，后者显式禁用了 GPU。请二选一。', file=sys.stderr)
+            return 2
+        if args.fallback_policy == 'cpu-only':
+            print('[ERROR] --scale-algo cuda-* 与 --fallback-policy cpu-only 冲突：'
+                  '前者要 CUDA 缩放，后者显式走了纯 CPU 路径。请二选一。', file=sys.stderr)
+            return 2
+
     if args.crf is not None and not (0 <= args.crf <= 63):
         print('[ERROR] --crf 建议范围为 0-63。', file=sys.stderr)
         return 2
@@ -3641,6 +3788,20 @@ def main() -> int:
             except Exception:
                 pass  # 缓存写入失败不影响主流程
 
+    # --scale-algo cuda-*：显式要 CUDA 缩放，但环境给不了 → 两档处理
+    # （复刻 --hwaccel cuda 的既有行为：一件 CUDA 组件都没有才报错，其余退回并告警）
+    if args.scale_backend == 'cuda':
+        if not hw_caps.has_decoder and not hw_caps.has_any_encoder():
+            print('[ERROR] --scale-algo cuda-* 需要 CUDA 组件，但一件都没检测到'
+                  '（无 NVDEC / 无 NVENC）。\n'
+                  f'  改用 --scale-algo libswscale-{args.sw_algo}（或裸 {args.sw_algo}）'
+                  '走 CPU 缩放；或先修好驱动 / ffmpeg / 显存占用。', file=sys.stderr)
+            return 2
+        if not hw_caps.has_cuda_scale:
+            print(f'  ⚠ --scale-algo cuda-{args.cuda_algo} 不可用（当前 FFmpeg 里没有 '
+                  f'scale_cuda），已改用 libswscale-{args.sw_algo}')
+            args.scale_backend = 'libswscale'
+
     # 收集输入文件
     input_path  = Path(args.input).resolve()
     output_path = Path(args.output).resolve()
@@ -3698,7 +3859,8 @@ def main() -> int:
     #   · 请求的 NVENC 编码器不可用时也已反映为 CPU 编码器（见 _get_software_fallback）。
     # 概览块整批只打印一次，策略层那次才逐文件重复。
     _effective_codec = str(_generate_strategies(
-        args.codec, hw_caps, args.hwaccel, mode=args.mode)[0]['codec'])
+        args.codec, hw_caps, args.hwaccel, mode=args.mode,
+        scale_backend=args.scale_backend)[0]['codec'])
     # 未指定 --preset 时按"请求的编码器"的默认档位换算，降级前后档位等效
     # （见 strategy_preset），避免概览显示 p5 而命令里却是 libsvtav1 的 8。
     # quiet：换算提示留给逐策略那次打印，概览块只展示结果值。
@@ -3717,6 +3879,16 @@ def main() -> int:
                      if encoder_supports_preset(_effective_codec) else '')
     print(_label('编码器')
           + f'{_effective_codec}   {_preset_field}' + '   '.join(quality_parts))
+    # 只展示真正会生效的缩放档：crop 模式不缩放；cover 模式看策略链首条用的是哪条链
+    if args.mode != 'crop':
+        _has_cuda_scale = any(s.get('cuda_scale') for s in _generate_strategies(
+            args.codec, hw_caps, args.hwaccel, mode=args.mode,
+            scale_backend=args.scale_backend))
+        print(_label('缩放')
+              + (f'cuda-{args.cuda_algo}（显存内）' if _has_cuda_scale
+                 else f'libswscale-{args.sw_algo}（CPU）'))
+    elif args.scale_algo:
+        print(_label('缩放') + '不适用（crop 模式不缩放）')
     # 只在"用户点名要的 NVENC 编码器"被换掉时才提示；--codec auto 解析出的具体
     # 编码器属正常自适应，不是降级。
     if args.codec in NVENC_CODECS and _effective_codec != args.codec:
@@ -3804,6 +3976,9 @@ def main() -> int:
                 flag=args.flag,
                 color_range=args.color_range,
                 crop_ratio=(crop_ratio_num, crop_ratio_den) if has_crop_ratio else None,
+                scale_backend=args.scale_backend,
+                sw_algo=args.sw_algo,
+                cuda_algo=args.cuda_algo,
                 queue_rest=q_rest,
                 queue_cur=q_cur,
             )

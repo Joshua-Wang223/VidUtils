@@ -61,7 +61,11 @@
   **`crop_cuda` 在上游并不存在**（不是"6.1 未编译"）→ 策略 1 实际永远跳过、crop 只能在 CPU；
   `crop-cover` 不纳入（要先裁剪，GPU 缩放需额外 `hwupload`）；
   顺带修掉 `_src_download_fmt` 返回非法 pix_fmt 名（`p010`/`p012` → `p010le`/`p012le`），
-  该 bug 此前因唯一调用路径不可达而没暴露；**质量门（PSNR/VMAF）尚未在 T4 上跑**
+  该 bug 此前因唯一调用路径不可达而没暴露；**质量门（PSNR/VMAF）尚未在 T4 上跑**；
+  同日追加 `--scale-algo`（`<backend>-<algo>` 或裸 `<algo>`，默认=现状即"后端自动"；
+  `libswscale-*` 强制 CPU 链、`cuda-*` 强制显存内缩放；裸名字在 v2 可省前缀、
+  在 hwaccel 要求两表都认；`cuda-*` 无 CUDA 组件报错/缺 scale_cuda 退回并告警；
+  v2 拒绝 `cuda-*`），不传该参数时 16/16 行滤镜链与改动前逐字相同
 
 ---
 

@@ -1417,6 +1417,55 @@ _PIXFMT_10BIT_BY_ENCODER = {
 _ENCODERS_8BIT_ONLY = {'mpeg4', 'libvpx', 'mjpeg', 'vp8', 'h264_v4l2m2m',
                        'h264_nvenc'}
 
+# ── --bit-depth 用：位深 → 各编码器的目标像素格式 ────────────────────────
+# 10bit 一栏直接复用 _PIXFMT_10BIT_BY_ENCODER（改一处要同步另一处）；
+# 12bit 走 yuv420p12le / p012le；8bit 的 NVENC 是 yuv420p、prores 是 yuv422p。
+# 与 vidcrop_cpu_v2.py 的同名表逐字一致（孪生约定）。
+_PIXFMT_BY_DEPTH: Dict[int, Dict[str, str]] = {
+    8: {
+        'h264_nvenc': 'yuv420p', 'hevc_nvenc': 'yuv420p', 'av1_nvenc': 'yuv420p',
+        'av1_qsv': 'yuv420p', 'av1_amf': 'yuv420p',
+        'prores': 'yuv422p', 'prores_ks': 'yuv422p',
+    },
+    10: dict(_PIXFMT_10BIT_BY_ENCODER),
+    12: {
+        'libx264': 'yuv420p12le', 'libx265': 'yuv420p12le',
+        'libsvtav1': 'yuv420p12le', 'libaom-av1': 'yuv420p12le',
+        'librav1e': 'yuv420p12le', 'libvpx-vp9': 'yuv420p12le',
+        'hevc_nvenc': 'p012le', 'av1_nvenc': 'p012le',
+        'av1_qsv': 'p012le', 'av1_amf': 'p012le',
+        'prores': 'yuv422p12le', 'prores_ks': 'yuv422p12le',
+    },
+}
+# 表里没列出的编码器按位深取这个默认值（多数 8bit 编码器本来就是 yuv420p）
+_DEFAULT_PIXFMT_BY_DEPTH: Dict[int, str] = {
+    8: 'yuv420p', 10: 'yuv420p10le', 12: 'yuv420p12le',
+}
+_BIT_DEPTH_CHOICES = (8, 10, 12)
+
+
+def resolve_pix_fmt_for_depth(codec: str, depth: int,
+                              warn: Optional[Callable[[str], None]] = None,
+                              policy: str = 'auto') -> Optional[str]:
+    """--bit-depth 显式指定时，算出对应的目标像素格式。
+
+    命中 _ENCODERS_8BIT_ONLY（含 h264_nvenc：NVENC 的 H.264 只做 8bit，喂 10bit
+    输入实测 rc=218 失败）却要求 10bit+ 时：auto 策略下降 8bit 并告警，
+    strict 策略下抛错（由调用方转成退出 2）。
+    """
+    if depth not in _BIT_DEPTH_CHOICES:
+        return None
+    c = (codec or '').lower()
+    if depth >= 10 and c in _ENCODERS_8BIT_ONLY:
+        if policy == 'strict':
+            raise ValueError(f'--bit-depth {depth}：{c} 不支持 10bit 以上编码'
+                             f'（--fallback-policy strict 不降级）')
+        if warn:
+            warn(f'{c} 不支持 {depth}bit 编码，已降级为 8bit 输出'
+                 f'（如需 {depth}bit 请用 hevc_nvenc / av1_nvenc 或 CPU 编码器）')
+        return _PIXFMT_BY_DEPTH[8].get(c, _DEFAULT_PIXFMT_BY_DEPTH[8])
+    return _PIXFMT_BY_DEPTH.get(depth, {}).get(c, _DEFAULT_PIXFMT_BY_DEPTH[depth])
+
 # ── --pix-fmt 相关 ──────────────────────────────────────────────────────
 # 4:2:0 系（含高位深）要求宽高**均为**偶数；4:2:2 系只要求宽为偶数。
 # 与 vidcrop_cpu_v2.py 的同名集合逐字一致（孪生约定）。
@@ -3036,6 +3085,7 @@ def build_ffmpeg_cmd(
     hw_download_fmt: Optional[str] = None,
     color_range: Optional[str] = None,
     pix_fmt: Optional[str] = 'auto',
+    bit_depth: Optional[int] = None,
     policy: str = 'auto',
 ) -> List[str]:
     """
@@ -3111,6 +3161,12 @@ def build_ffmpeg_cmd(
             _pf_handled = True                  # 明确不下发 -pix_fmt
         elif _v != 'auto':
             _req_pf = _v
+            _pf_handled = True
+        elif bit_depth is not None and bit_depth in _BIT_DEPTH_CHOICES:
+            # --bit-depth 只在 --pix-fmt 保持 auto 时才生效：两者语义重叠
+            # （格式名本身已含位深），按既定决策 --pix-fmt 优先。
+            _req_pf = resolve_pix_fmt_for_depth(codec, bit_depth,
+                                                warn=_warn, policy=policy)
             _pf_handled = True
 
     # 零拷贝 CUDA 链（-hwaccel_output_format cuda）不能传 -pix_fmt：
@@ -3490,6 +3546,7 @@ def process_file(
     cuda_algo: str = _CUDA_SCALE_ALGO,
     policy: str = 'auto',
     pix_fmt: Optional[str] = 'auto',
+    bit_depth: Optional[int] = None,
     queue_rest: Optional[float] = None,
     queue_cur: Optional[float] = None,
 ) -> Dict[str, object]:
@@ -3653,6 +3710,7 @@ def process_file(
             extra_args=extra_args,
             color_range=color_range,
             pix_fmt=pix_fmt,
+            bit_depth=bit_depth,
             policy=policy,
         )
         print('  ' + _label('输出文件') + str(output_file))
@@ -3730,6 +3788,7 @@ def process_file(
                 hw_download_fmt=_dl,
                 color_range=color_range,
                 pix_fmt=pix_fmt,
+                bit_depth=bit_depth,
                 policy=policy,
             )
 
@@ -4039,6 +4098,14 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                              'scale_cuda=format= 并自动配 -profile:v；'
                              'scale_cuda 仅支持 nv12 / yuv420p / yuv444p / p010le，'
                              '其它格式按 --fallback-policy 处理')
+    parser.add_argument('--bit-depth', type=int, default=None, metavar='N',
+                        help='目标位深：8 / 10 / 12（默认 auto=继承源）。'
+                             '按编码器选对应像素格式（如 libx265 的 10bit → '
+                             'yuv420p10le，hevc_nvenc → p010le）；'
+                             'h264_nvenc 只支持 8bit，要求 10bit+ 时会告警并降 8bit'
+                             '（--fallback-policy strict 下改为报错）。'
+                             '注意：与 --pix-fmt 语义重叠——显式给了 --pix-fmt 时'
+                             '以 --pix-fmt 为准，本参数被忽略（会提示）')
 
     # 可观测性
     parser.add_argument('--dry-run', action='store_true',
@@ -4171,6 +4238,17 @@ def main() -> int:
         print(f'[ERROR] --pix-fmt {args.pix_fmt} 不是 {ffmpeg_bin} 认识的像素格式。\n'
               f'  用 `{ffmpeg_bin} -pix_fmts` 查看可用列表（取 NAME 列）。', file=sys.stderr)
         return 2
+
+    # --bit-depth：None 即 auto（继承源）。给了非 8/10/12 的值直接报错。
+    if args.bit_depth is not None and args.bit_depth not in _BIT_DEPTH_CHOICES:
+        print(f'[ERROR] --bit-depth 只支持 {" / ".join(str(d) for d in _BIT_DEPTH_CHOICES)}'
+              f'（不指定即 auto=继承源），收到 {args.bit_depth}。', file=sys.stderr)
+        return 2
+    # 两个参数语义重叠（格式名里已含位深）：按决策以 --pix-fmt 为准，并明确告知，
+    # 免得用户以为位深没生效。
+    if args.bit_depth is not None and _pf_arg not in ('auto', 'none'):
+        print(f'提示：--pix-fmt {args.pix_fmt} 与 --bit-depth {args.bit_depth} 语义重叠，'
+              f'已按 --pix-fmt 为准，忽略 --bit-depth。')
 
     if args.crf is not None and not (0 <= args.crf <= 63):
         print('[ERROR] --crf 建议范围为 0-63。', file=sys.stderr)
@@ -4489,6 +4567,7 @@ def main() -> int:
                 cuda_algo=args.cuda_algo,
                 policy=args.fallback_policy,
                 pix_fmt=args.pix_fmt,
+                bit_depth=args.bit_depth,
                 queue_rest=q_rest,
                 queue_cur=q_cur,
             )

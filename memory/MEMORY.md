@@ -61,7 +61,12 @@
   **软解 + `hwupload_cuda` 链已实测**（判据 C/D/E）：crop 尺寸协商正确（640x360）、
   **比软解+CPU缩放快 2.9~3.2%**、画质与零拷贝链逐位相同；
   但**绝对值是 44~46s vs 硬解零拷贝 12.8s** → 定位仍是「NVDEC 用不了时的出路」；
-  唯一仍未测的是 **10bit `p010le` 下载路径**；
+  **10bit `p010le` 下载路径已跑通**（用 HLG 的 new4_raw，1920x1080 `yuv420p10le`，
+  零拷贝链 2.058s、B4 `-2` 接受、`DL_FMT=p010le` ✓）——此前"仍空白"的说法已过期；
+  ⚠ **PSNR/libvmaf 在 10bit 上失效**（存成 yuv420p10le 后 psnr 协商失败 → 全 N/A）
+  → 所有路滤镜末尾统一加 `,format=yuv420p` 降 8bit 再比（8bit 源是空操作，不影响旧数字）；
+  ⚠ **恒等缩放陷阱**：new4_raw 源高就是 1080，覆盖链缩放是恒等操作（只裁剪不缩放）
+  → B/D/Q/E 全与缩放无关，VMAF 99.98 不是画质结论；探针现在检测到"源高==1080"会给出警示；
   **必须显式写 `hwdownload,format=…`**：靠 FFmpeg 自动插入时 `crop` 会被**静默丢弃**
   （`scale_cuda=1280:720,crop=iw/2:ih/2` 输出 1280x720 而非 640x360，无任何报错）；
   **`crop_cuda` 在上游并不存在**（不是"6.1 未编译"）→ 策略 1 实际永远跳过、crop 只能在 CPU；
@@ -80,6 +85,13 @@
   **`--decode cpu` 不再等于纯 CPU**；新增「软解 + `hwupload_cuda`」链（自带 device，
   所以 `build_ffmpeg_cmd` 零改动）；`auto` 缩放用**功能探针**判定，显式 `cuda-*` 不探针；
   回归判据 = 16/16 滤镜链 + 默认路径 5 用例逐字 + `verify_decode_axis.sh` 15 项
+- [像素格式 / 位深 / HDR 三个新参数](project_color_depth_hdr_params.md)
+  — 2026-09-20 两脚本都加了 `--pix-fmt`（hwaccel 此前没有）/ `--bit-depth` / `--hdr`，
+  默认全 `auto`（不传时命令逐字不变）；
+  ⚠ **零拷贝 CUDA 链不能传 `-pix_fmt`**（实测 Impossible to convert）→ 改用
+  `scale_cuda=format=` + `-profile:v`，且**紧随的 `hwdownload,format=` 必须同步改**；
+  **`tonemap_cuda` 上游不存在** → `--hdr sdr` 走 CPU 的 zscale+tonemap（**未实测**）；
+  **`--pix-fmt` 优先于 `--bit-depth`**（用户决策，重叠时后者忽略并提示）
 
 ---
 

@@ -69,7 +69,10 @@
 | 递归扫描目录（`-r`） | ✅ | ✅ | ✅ | ✅ |
 | `--crop-ratio` 按比例自动算裁剪尺寸 | ❌ | ❌ | ✅ | ✅ |
 | `--flag` 自定义输出名后缀 | ❌ | ❌ | ✅ | ✅ |
-| `--color-range` 值域控制（含真转换） | ❌ | ❌ | ✅ | ✅ |
+| `--color-range` 值域控制（含真转换） | ❌ | ❌ | ✅ | ✅⁵ |
+| `--pix-fmt` 输出像素格式 | ✅ | ❌ | ✅ | ✅⁶ |
+| `--bit-depth` 输出位深（8/10/12） | ❌ | ❌ | ✅ | ✅ |
+| `--hdr` HDR 处理（含 HDR→SDR） | ❌ | ❌ | ✅ | ✅⁷ |
 | CPU 软件编码器（libx264/265、VP9、AV1、ProRes、MJPEG…） | ✅ | ✅ | ✅ | ✅ |
 | AV1：`libsvtav1` / `libaom-av1` / `librav1e` | ❌ / ✅ / ✅ | ❌ / ✅ / ✅ | ✅ | ✅ |
 | VP9：`libvpx-vp9` | ✅ | ✅ | ✅ | ✅ |
@@ -106,6 +109,9 @@
 > ³ v2 可以**使用**硬件编码器（写 `--codec h264_nvenc` 等），但不做硬件探测、也不做硬件解码——解码全程走 CPU。是否可用由 FFmpeg 与驱动自行决定。
 > ⁴ 软解 + 显存内缩放 = `--decode cpu --scale-algo cuda-*`，链为 `hwupload_cuda → scale_cuda → 显式 hwdownload → CPU crop`。**已实测（T4，两轮一致）：比「软解 + CPU 缩放」快 2.9%~3.2%**（45.9s→44.6s / 46.0s→44.6s），画质与零拷贝链逐位相同（PSNR 同为 46.603743 dB）。
 > 但要看清**绝对值**：软解链路整体是 44~46s，而硬解零拷贝只要 12.8s —— 上传链再快也只是「NVDEC 用不了 / 解不了该编码时的出路」，**不是**用来替代硬解的。`--scale-algo auto` 只在显式 `--decode cpu` 下才会自动走它，且会先跑功能探针。
+> ⁵ hwaccel 的 `--color-range` **不完全等同 v2**：链首是 CUDA 原生滤镜时会跳过值域转换并告警（只写标签）。见下文参数表与已知限制。
+> ⁶ hwaccel 此前没有 `--pix-fmt`，现已补齐；两个脚本的取值与校验一致。
+> ⁷ `--hdr sdr` 的 tone mapping 走 CPU（`zscale` + `tonemap`）；`tonemap_cuda` 上游不存在，CUDA 链上没有硬件 tone mapping。
 
 > **如何选择？**
 > - 有多核 CPU、无 GPU、批量大 → **v2**（默认选择，功能最全）
@@ -299,7 +305,9 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--crf-ref` | 无 | 以 **libx264 CRF** 为基准给出质量，按等效表换算到目标编码器；与 `--crf`/`--cq` 互斥 |
 | `--cq-ref` | 无 | 以 **h264_nvenc CQ** 为基准给出质量，按等效表换算；与 `--crf`/`--cq` 互斥 |
 | `--preset` | CPU `medium` / GPU `p5` | 支持 x264 风格与 NVENC `p1~p7`，自动双向映射；`libsvtav1` 自动转 0~13 整数档 |
-| `--pix-fmt` | `auto` | 输出像素格式；可填 `none` 禁用 |
+| `--pix-fmt` | `auto` | 输出像素格式（`yuv420p` / `yuv420p10le` / `p010le` / `yuv422p10le` …）；`auto`=继承源位深，`none`=不下发。显式给出时会校验该名字是否被 ffmpeg 认识 |
+| `--bit-depth` | `auto` | 目标位深 `8` / `10` / `12`；`auto`=继承源。按编码器选格式（如 `libx265` 的 10bit→`yuv420p10le`、`hevc_nvenc`→`p010le`）。与 `--pix-fmt` 语义重叠，**显式给了 `--pix-fmt` 时以它为准**，`--bit-depth` 被忽略并提示 |
+| `--hdr` | `auto` | HDR 处理：`auto` / `keep`=尽力保留 HDR10 静态元数据；`drop`=不写元数据、**色彩标签按 SDR(bt709) 写，像素不动**；`sdr`=真的做 HDR→SDR tone mapping（可带算法 `sdr:hable` / `sdr:reinhard` …，默认 `mobius`） |
 | `--color-range` | `auto` | `tv` / `pc` 强制值域，且与源不同时会插入 scale 滤镜做**真值域转换** |
 | `--flag` | `_cropped` / `_covered` / `_cropcovered` | 自定义输出名后缀（仅对自动生成的输出名生效） |
 | `--audio-codec` / `--audio-bitrate` | `copy` / `128k` | 音频编码；WebM 容器下 `copy` 遇到不兼容音轨会自动换成 `libopus` |
@@ -346,7 +354,10 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--crf` | **`21`** | CPU 编码器质量（0–51）；字面量原样下发 |
 | `--crf-ref` / `--cq-ref` | 无 | 统一质量基准（同上），与 `--crf`/`--cq` **互斥，混用直接报错退出** |
 | `--preset` | GPU `p5` / CPU `medium` | NVENC（p1~p7）↔ libx264 风格双向映射；`libsvtav1` 自动转整数档。降级到 CPU 编码器时按**请求的编码器**换算，档位保持等效（`h264_nvenc` 的 p5 → `libx264` 的 medium、`av1_nvenc` 的 p5 → `libsvtav1` 的 8），概览块显示的就是实际下发的值 |
-| `--color-range` | `auto` | 同 v2 |
+| `--pix-fmt` | `auto` | 输出像素格式；`auto`=继承源位深、`none`=不下发，具体名会校验。**零拷贝 CUDA 链不能传 `-pix_fmt`**（实测 `Impossible to convert`）→ 那条链上改用 `scale_cuda=format=` 并自动配 `-profile:v`；`scale_cuda` 仅支持 `nv12` / `yuv420p` / `yuv444p` / `p010le`，其它格式按 `--fallback-policy` 处理 |
+| `--bit-depth` | `auto` | 目标位深 `8` / `10` / `12`；`auto`=继承源。与 `--pix-fmt` 重叠时以 `--pix-fmt` 为准并提示。`h264_nvenc` 只支持 8bit，要求 10bit+ 会告警降 8bit（`strict` 下报错） |
+| `--hdr` | `auto` | 同 v2 的四种取值。⚠ `tonemap_cuda` 上游不存在，所以 CUDA 链上没有硬件 tone mapping——会先下载成软件帧再做（cover 链本来就在 crop 前 `hwdownload`） |
+| `--color-range` | `auto` | **不完全同 v2**：链首是 CUDA 原生滤镜（`scale_cuda` 等）时会跳过值域转换并告警，只写标签（见已知限制） |
 | `--flag` | `_cropped` / `_covered` | 同 v2 |
 | `--audio-codec` / `--audio-bitrate` | `copy` / `128k` | 音频编码；WebM 下自动换 `libopus` |
 | `--no-skip-same-size` | 否 | 同尺寸强制转码 |
@@ -1374,6 +1385,9 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 | 旧名 `--hwaccel` 与三个旧 `--fallback-policy` 值已删除 | `--hwaccel` 硬更名成 `--decode`；`strict-cuda` / `nvenc-only` / `cpu-only` 不是"策略"而是"三轴预设"，已移除 | 用旧名/旧值都会报错退出 2，并在提示里给出可直接抄的等价写法 |
 | **软解 + `hwupload_cuda` 收益很小（已实测 +2.9%~3.2%）** | 该链要把整帧从内存上载到显存，两轮 T4 实测只比「软解 + CPU 缩放」快约 3%。更关键的是**绝对值**：软解链路整体 44~46s，而硬解零拷贝只要 12.8s | 只在**确实没有可用硬解**时用（NVDEC 用不了 / 解不了该编码）。有硬解时永远该走硬解；`--scale-algo auto` 只在显式 `--decode cpu` 下才自动走它，且要先过功能探针 |
 | 显式 `cuda-*` 执行失败要等到运行期才发现 | `--scale-algo cuda-*` **不跑功能探针**（按设计直接执行） | `--fallback-policy auto`（默认）会自动降级到 `libswscale-<同档>`；要"不可用就报错"用 `strict` |
+| **零拷贝 CUDA 链不能传 `-pix_fmt`** | 该链上 `-hwaccel_output_format cuda` 时帧是 CUDA 帧，`-pix_fmt` 设的是 `AVFrame.format`（= `AV_PIX_FMT_CUDA`）而非 `sw_format`，传 `nv12` / `yuv420p` 实测都报 `Impossible to convert` | 已按链型分别落地：零拷贝链改用 `scale_cuda=format=` + `-profile:v`，只有软件帧链才下发 `-pix_fmt`。用户请求 `scale_cuda` 不支持的格式时按 `--fallback-policy` 降级或报错 |
+| **`tonemap_cuda` 上游不存在** | 实测 `ffmpeg -h filter=tonemap_cuda` → `Unknown filter`（与 `crop_cuda` 同款，非编译选项问题）。CUDA 侧没有硬件 HDR→SDR | `--hdr sdr` 走 CPU 的 `zscale` + `tonemap`；CUDA 链本来就先 `hwdownload` 成软件帧，直接接在链尾即可。滤镜缺失时会降级为 `--hdr drop` 并提示 |
+| `--hdr sdr` 的 tone mapping 未实测 | 这是全新能力：滤镜配方、desat、各算法（hable / mobius / reinhard）的观感差异都还没有 T4 数据 | 先在真实 HDR 片源（如 HLG 的 `new4_raw`）上验一遍再用于生产；算法可换（`--hdr sdr:hable`） |
 | `crop-cover` 不走 CUDA 缩放 | 它必须先裁剪，而裁剪只能在 CPU（无 `crop_cuda`）→ GPU 缩放要额外一次 `hwupload_cuda` | 保留 CPU 侧 `crop,scale`（该路径未实测）；要用 CUDA 缩放请改用 `--mode cover` |
 | CPU 侧缩放是 lanczos（比旧版慢） | `cover` / `crop-cover` 默认用 `flags=lanczos`（原先是 libswscale 默认的 bicubic），抽头更多 → CPU 侧吞吐略降 | 这是为了与 GPU 侧同档、避免降级时画质变软。换档用 `--scale-algo`（如 `--scale-algo bicubic`） |
 | v0 / v1 与 v2/hwaccel 的缩放档位不同 | v0/v1 仍吃 libswscale 的默认 `bicubic`（它们定位是"对照旧行为"，这次没跟着改） | 要同档用 v2 / hwaccel；要对照旧输出用 v0/v1 |

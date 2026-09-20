@@ -1,6 +1,6 @@
 ---
 name: cover 模式的 CUDA 缩放（scale_cuda）——实测数据、两条硬约束、以及一个被激活的老 bug
-description: 2026-09-20 给 vidcrop_hwaccel.py 的 cover 模式加了「CUDA 缩放 + CPU 裁剪」策略；实测 4K→1440x1080 快 44.5%（CPU 侧 scale 占 17.2%）；必须显式写 hwdownload 否则 crop 被静默丢弃；crop_cuda 上游不存在；顺带修掉 _src_download_fmt 的 p010/p012 非法 pix_fmt 名
+description: 2026-09-20 给 vidcrop_hwaccel.py 的 cover 模式加了「CUDA 缩放 + CPU 裁剪」策略；真实 4K→1440x1080 实测快 51.9~52.9%（对着 lanczos 基准；对旧 bicubic 基准是 44.5%）；质量门已完整通过（PSNR 46.60dB + VMAF 97.21）；必须显式写 hwdownload 否则 crop 被静默丢弃；crop_cuda 上游不存在；顺带修掉 _src_download_fmt 的 p010/p012 非法 pix_fmt 名；探针的 awk 跨行三元在 T4 的 mawk 上炸过（gawk 兼容 ≠ mawk 兼容）；软解+hwupload 链的吞吐与画质（判据 D/E）仍是空白
 type: project
 ---
 
@@ -106,6 +106,59 @@ NVDEC → scale_cuda=W:H:interp_algo=lanczos → 显式 hwdownload,format=… �
    改造收益 **9.8%**（不过 10% 阈值）。合成内容解码极快、管线被别的环节吃掉，测不出差异。
    → 这个优化只在**真实高码率 4K** 上兑现。
 
+### 第三轮（2026-09-20，`--scale-algo` 落地后、CPU 侧已换 lanczos；**首次跑通质量门**）
+
+同一素材、同一目标链，min of 3。本轮新增 B1b（CPU bicubic，复现旧基准）并跑了判据 Q：
+
+| 变体 | 链 | 时间 |
+|---|---|---|
+| B1 现行 | `-hwaccel auto` + `scale=-2:1080:flags=lanczos,crop=…` | **26.65s** |
+| B1b 旧基准 | `-hwaccel auto` + `scale=-2:1080,crop=…`（libswscale 默认 bicubic） | 24.35s |
+| B2 去缩放 | `-hwaccel auto` + `crop=1440:1080:0:0` | 19.09s |
+| B3 新链 | `-hwaccel cuda -hwaccel_output_format cuda` + `scale_cuda=1920:1080:interp_algo=lanczos,hwdownload,format=nv12,crop=…` | **12.82s** |
+
+- CPU 侧 scale（lanczos）单独成本 **7.56s = 现行的 28.4%**（比 bicubic 那轮的 17.2% 高，
+  因为 lanczos 抽头更多）；新链净收益 **13.83s = 现行的 51.9%**
+- 换 lanczos 让 CPU 基准变慢 **2.30s = 旧基准的 9.4%** → 之前记的 44.5% 是**偏保守**的
+- **判据 Q（质量门）**：`PSNR(GPU lanczos vs CPU lanczos) = 46.60 dB`，远超 `≥ 40 dB` 门槛
+  → **GPU lanczos 基本复现了 CPU lanczos**。另两条对照：CPU lanczos vs CPU bicubic =
+  56.05 dB（该素材上 lanczos 与 bicubic 差异本就很小）、GPU vs CPU bicubic = 46.53 dB
+
+**⚠ 这一轮 T4 日志被探针自身的 bug 截断了**（值得单独记）：判据 Q 的判词用了**跨行三元
+表达式**，而 POSIX awk **不允许在 `:` 前换行**（Newline 只允许跟在 `, { && || do else` 后），
+T4 的 **mawk** 直接报 `missing ) near end of line` / `syntax error at or near :`；脚本是
+`set -euo pipefail`，于是这次 awk 解析失败把**后面的 VMAF 与汇总段一起带走**——日志只剩
+三行 PSNR 就断了。本机 Git Bash 是 **gawk 5.4.1**，容忍该写法，所以 SELFTEST 当时没抓到。
+→ 已修（改成 if/else 逐行赋值），并给 SELFTEST 加了 **`awk --posix` 预解析守卫**：三段
+awk 程序（判词 + 汇总 + 上传链判词）提成变量，SELFTEST 用假数据真跑一遍，语法/空输出都判失败。
+**教训：gawk 兼容 ≠ mawk 兼容；只在本机 gawk 下跑过的 awk 片段等于没验证过。**
+
+### 第四轮（2026-09-20，awk bug 修好后复跑；**VMAF 首次产出，质量门完整通过**）
+
+同一素材、同一目标链，min of 3：
+
+| 变体 | 时间 | （第三轮对照） |
+|---|---|---|
+| B1 现行（CPU lanczos） | **27.19s** | 26.65s |
+| B1b 旧基准（CPU bicubic） | 26.86s | 24.35s |
+| B2 去缩放 | 18.83s | 19.09s |
+| B3 新链（硬解零拷贝） | **12.82s** | 12.82s |
+
+- CPU 侧 scale 单独成本 **8.37s = 现行的 30.8%**；新链净收益 **14.38s = 现行的 52.9%**
+- **B3 极稳**（12.82 / 12.82 / 12.82~12.84 三轮一致），B1 在 26.6~27.2s 之间波动
+- ⚠ **「换 lanczos 让 CPU 慢多少」这个差值不稳**：第三轮 2.30s（9.4%），本轮只有 0.33s（1.2%）。
+  别引用这个数字下结论——它落在测量噪声里；**稳定的结论只有 B1 vs B3（51.9%~52.9%）**
+- **判据 Q**：`PSNR(GPU lanczos vs CPU lanczos) = 46.60 dB`（≥40 门槛，与第三轮一致）
+- **判据 Q + `PROBE_VMAF=1`（首次产出）**：
+  `VMAF 新链(GPU) vs CPU lanczos = 97.21`、`VMAF CPU lanczos vs bicubic = 97.88`
+  → **质量门完整通过**（PSNR ≥ 40 且 VMAF > 95），GPU lanczos 与 CPU lanczos 的差异在感知上可忽略
+
+**⚠ 这一轮仍没有判据 C/D/E**：T4 上的 `temp/` 是它自己的副本（`temp/` 被 `.gitignore` 覆盖，
+不会随 git 同步），判据 C/D/E（软解 + `hwupload_cuda` 链的 device、尺寸协商、吞吐、画质）
+是新增的，要**把更新后的 `temp/probe_scale_cuda_crop.sh` 拷过去再跑**。
+→ **软解 + `hwupload_cuda` 那条链的吞吐至今仍是空白**；在判据 D 出结果前，`--scale-algo auto`
+只在显式 `--decode cpu` 下才会走它（且要先过功能探针）。
+
 ## 两条硬约束（都有实测编号，改动时别踩）
 
 ### 1. 必须**显式**写 `hwdownload,format=…`，不能靠 FFmpeg 自动插入
@@ -168,8 +221,18 @@ A2 那格是本次最值钱的发现：尺寸 1280x720 本身**合法**、ffmpeg
 ## How to apply
 
 - 谈论 cover 的 GPU 化时直接引用上面的 B 表，别重新推导；也**别说"策略 1 会接管"**——它不会。
+  **引用收益时用第三轮的 51.9%**（B1 已含 lanczos），别再用对着旧 bicubic 基准的 44.5%。
 - 改这条链时守住两条：**显式 `hwdownload,format=`**（否则画面静默错）、**显式 `interp_algo`**
   （`scale_cuda` 的默认值是 0，未映射到具名档，而 CPU 侧 `scale` 默认是 bicubic）。
+- **质量门已过**：PSNR 46.60 dB（≥40）+ VMAF 97.21（>95），GPU lanczos ≈ CPU lanczos；
+  但 **软解 + `hwupload_cuda` 那条链（判据 D/E）与 `10bit p010le` 路径仍是空白**；
+  再动缩放算法/档位时要重跑判据 Q（+`PROBE_VMAF=1`）。
+- **引用收益用 B1 vs B3 = 51.9%~52.9%**（B1 已含 lanczos）。别引用「换 lanczos 让 CPU 慢多少」
+  ——三轮测出 9.4% 与 1.2%，落在噪声里。
+- **T4 的 `temp/` 不会随 git 同步**（被 `.gitignore` 覆盖）：换了探针/工装要**手动拷过去**。
+- **本机 awk 是 gawk、T4 是 mawk**：给 `temp/*.sh` 写 awk 时避免跨行三元等非 POSIX 写法，
+  并跑 `SELFTEST=1`（里面已含 `awk --posix` 预解析守卫）。`set -e` 的脚本里一个 awk
+  解析失败会带走后面所有输出，破坏性比看上去大。
 - 判据 A 的探针技巧可复用：想验证某个滤镜"看到的 `iw/ih` 是多少"，用 `crop=iw/2:ih/2`
   让输出尺寸自己报出来，比 PSNR 对照便宜且无歧义。
 - `scale_cuda` 没有 `in_range`/`out_range` → CUDA 链里 `--color-range tv|pc` 的**值域转换做不了**

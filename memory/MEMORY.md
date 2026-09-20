@@ -52,20 +52,30 @@
   后缀 `_cropcovered`；比例与源不同时即使同尺寸也不能跳过）；
   同日又逐字对齐了 17 条校验文案与校验顺序（cpu_v2 的「crop-ratio + 显式尺寸」由
   「忽略+提示」改为**报错**、量程检查提到 `_resolve_quality_params` 之前）
-- [cover 的 CUDA 缩放：实测数据与两条硬约束](project_cuda_scale_cover.md)
+- [cover 的 CUDA 缩放：实测数据、两条硬约束与质量门](project_cuda_scale_cover.md)
   — 2026-09-20 给 `vidcrop_hwaccel.py` 的 cover 加了「`scale_cuda` + 显式 `hwdownload` + CPU crop」
-  策略：真实 4K→1440x1080 实测 **23.11s → 12.83s（快 44.5%）**，CPU 侧 `scale` 占 17.2%
-  （合成 testsrc2 测不出差异，只有 0.2%——收益是内容相关的）；
+  策略：真实 4K→1440x1080 实测 **26.65s → 12.82s（快 51.9%）**，CPU 侧 `scale(lanczos)` 占 28.4%
+  （对着旧 bicubic 基准 24.35s 则是 44.5%；合成 testsrc2 测不出差异，只有 0.2%——收益是内容相关的）；
+  **质量门已完整通过**：`PSNR(GPU lanczos vs CPU lanczos) = 46.60 dB ≥ 40`、
+  `VMAF = 97.21`（**10bit p010le 路径与「软解 + hwupload」链仍空白**）；
   **必须显式写 `hwdownload,format=…`**：靠 FFmpeg 自动插入时 `crop` 会被**静默丢弃**
   （`scale_cuda=1280:720,crop=iw/2:ih/2` 输出 1280x720 而非 640x360，无任何报错）；
   **`crop_cuda` 在上游并不存在**（不是"6.1 未编译"）→ 策略 1 实际永远跳过、crop 只能在 CPU；
-  `crop-cover` 不纳入（要先裁剪，GPU 缩放需额外 `hwupload`）；
+  `crop-cover` 不纳入（要先裁剪，GPU 缩放需额外 `hwupload_cuda`）；
   顺带修掉 `_src_download_fmt` 返回非法 pix_fmt 名（`p010`/`p012` → `p010le`/`p012le`），
-  该 bug 此前因唯一调用路径不可达而没暴露；**质量门（PSNR/VMAF）尚未在 T4 上跑**；
-  同日追加 `--scale-algo`（`<backend>-<algo>` 或裸 `<algo>`，默认=现状即"后端自动"；
-  `libswscale-*` 强制 CPU 链、`cuda-*` 强制显存内缩放；裸名字在 v2 可省前缀、
-  在 hwaccel 要求两表都认；`cuda-*` 无 CUDA 组件报错/缺 scale_cuda 退回并告警；
-  v2 拒绝 `cuda-*`），不传该参数时 16/16 行滤镜链与改动前逐字相同
+  该 bug 此前因唯一调用路径不可达而没暴露；
+  **探针自身的 bug 值得记**：判据 Q 的判词用了跨行三元，POSIX awk 不允许在 `:` 前换行，
+  T4 的 **mawk** 直接语法错；本机是 **gawk** 所以 SELFTEST 没抓到，而 `set -e` 把后面的
+  VMAF 与汇总一起带走了 → 已修 + 给 SELFTEST 加了 `awk --posix` 预解析守卫
+- [vidcrop_hwaccel 的三轴模型：--hwaccel 已硬更名为 --decode](project_three_axis_model.md)
+  — 2026-09-20 把纠缠的 `--hwaccel` 拆成 `--decode` / `--scale-algo` / `--codec` **三个正交轴**
+  + 纯策略开关 `--fallback-policy(auto/strict)`，轴之间**零冲突检查**；
+  **三处硬伤**：`none` 顺带关掉 NVENC、`can_cuda_scale` 把 GPU 缩放硬绑在硬解上、
+  `nvenc-only` 下漏探滤镜还输出假结论；
+  **破坏性变更**：`--hwaccel` 硬删（旧值 `none`≡`cpu`）、三个旧 fallback 值删除并给等价三轴写法、
+  **`--decode cpu` 不再等于纯 CPU**；新增「软解 + `hwupload_cuda`」链（自带 device，
+  所以 `build_ffmpeg_cmd` 零改动）；`auto` 缩放用**功能探针**判定，显式 `cuda-*` 不探针；
+  回归判据 = 16/16 滤镜链 + 默认路径 5 用例逐字 + `verify_decode_axis.sh` 15 项
 
 ---
 

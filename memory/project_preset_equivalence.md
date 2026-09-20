@@ -146,3 +146,9 @@ crop=640:480:...`）；而无 `--crop-ratio` 的同尺寸则正常跳过。两�
 **How to apply:** 以后再加 `--mode` 取值或改模式语义：两个文件一起改，改完用
 `--dry-run` 在同一个源上比两边的滤镜链是否等价，并各跑一次"尺寸同源但比例不同"的用例。
 `vidcrop_hwaccel - Copy.py` / `vidcrop_cpu_v2 - Copy.py` 是用户自己的备份，**不要同步改**。
+
+**边界（哪些参数可以不齐）**：`--decode` / `--fallback-policy` / `--cuda-diagnostics` /
+`--cuda-device-id` 只在 hwaccel 侧存在，v2 没有——这是有意的（v2 是纯 CPU 后端）。
+但**共享参数**的取值表 / 别名表 / 默认值 / 报错首行必须逐字一致（`--scale-algo` 是当前
+唯一的共享新参数，已按此对齐；唯一有意的差异是 v2 可省 `libswscale-` 前缀、且拒绝 `cuda-*`）。
+三轴模型本身见 `project_three_axis_model.md`。

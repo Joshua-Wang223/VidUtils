@@ -78,6 +78,8 @@
 | 硬件解码（CUDA / Vulkan / VA-API / OpenCL） | ❌ | ❌ | ❌ | ✅ |
 | `crop_cuda` 全 GPU 流水线 | ❌ | ❌ | ❌ | ✅¹ |
 | `scale_cuda` 显存内缩放（仅 cover，策略 2） | ❌ | ❌ | ❌ | ✅¹ |
+| 软解 + 显存内缩放（`hwupload_cuda` 链） | ❌ | ❌ | ❌ | ✅⁴ |
+| 解码 / 缩放 / 编码三轴独立组合 | ❌ | ❌ | ❌ | ✅ |
 | `--scale-algo` 选缩放算法 | ❌ | ❌ | ✅（仅 libswscale） | ✅（含 `cuda-*`） |
 | 运行时硬件能力探测 | — | — | — | ✅ |
 | 策略链自动降级（6 级） | — | — | — | ✅ |
@@ -99,9 +101,10 @@
 | `--crf-ref` / `--cq-ref` 统一质量基准 | ❌ | ❌ | ✅ | ✅ |
 | `--fallback-policy` 策略控制 / `--cuda-diagnostics` | ❌ | ❌ | ❌ | ✅ |
 
-> ¹ FFmpeg 上游**并没有 `crop_cuda`** 这个滤镜（与编译选项无关：实测 `-filters` 列表里没有它、`-h filter=crop_cuda` 报 `Unknown filter`），所以「全 GPU 流水线」在真实环境里**永远跳过**。cover 模式在带 `scale_cuda` 的构建（需 `--enable-cuda-nvcc` 的自建 FFmpeg）上把**缩放**放进显存、裁剪仍回 CPU（`scale_cuda → 显式 hwdownload → CPU crop → NVENC`），实测 4K→1440×1080 覆盖链**快 44.5%**；`crop-cover` 保留 CPU 侧 `crop,scale`（它必须先裁剪，GPU 缩放要额外 `hwupload`，未实测）。
+> ¹ FFmpeg 上游**并没有 `crop_cuda`** 这个滤镜（与编译选项无关：实测 `-filters` 列表里没有它、`-h filter=crop_cuda` 报 `Unknown filter`），所以「全 GPU 流水线」在真实环境里**永远跳过**。cover 模式在带 `scale_cuda` 的构建（需 `--enable-cuda-nvcc` 的自建 FFmpeg）上把**缩放**放进显存、裁剪仍回 CPU（`scale_cuda → 显式 hwdownload → CPU crop → NVENC`），实测 4K→1440×1080 覆盖链**快 51.9%~52.9%**（对着旧 bicubic 基准是 44.5%）；质量门已完整通过（`PSNR(GPU lanczos vs CPU lanczos) = 46.60 dB ≥ 40`、`VMAF = 97.21`）。`crop-cover` 保留 CPU 侧 `crop,scale`（它必须先裁剪，GPU 缩放要额外 `hwupload`，未实测）。
 > ² `av1_nvenc` 需第 8 代 NVENC（Ada / RTX 40 / L40 及以上），否则自动降级为 `libsvtav1`。
 > ³ v2 可以**使用**硬件编码器（写 `--codec h264_nvenc` 等），但不做硬件探测、也不做硬件解码——解码全程走 CPU。是否可用由 FFmpeg 与驱动自行决定。
+> ⁴ 软解 + 显存内缩放 = `--decode cpu --scale-algo cuda-*`，链为 `hwupload_cuda → scale_cuda → 显式 hwdownload → CPU crop`。**吞吐未实测**（可能不如纯 CPU 缩放，因为多一次整帧上载），定位是「NVDEC 用不了 / 解不了该编码时的出路」。`--scale-algo auto` 在显式 `--decode cpu` 下也会走这条路，但会先跑功能探针确认真能跑通。
 
 > **如何选择？**
 > - 有多核 CPU、无 GPU、批量大 → **v2**（默认选择，功能最全）
@@ -346,15 +349,15 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--flag` | `_cropped` / `_covered` | 同 v2 |
 | `--audio-codec` / `--audio-bitrate` | `copy` / `128k` | 音频编码；WebM 下自动换 `libopus` |
 | `--no-skip-same-size` | 否 | 同尺寸强制转码 |
-| `--hwaccel` | `auto` | `auto` / `cuda` / `vulkan` / `vaapi` / `opencl` / `none` |
-| `--fallback-policy` | `auto` | `auto` / `strict-cuda` / `nvenc-only` / `cpu-only`（见[硬件加速说明](#硬件加速说明)） |
+| `--decode` | `auto` | 解码后端：`auto` / `cuda` / `vulkan` / `vaapi` / `opencl` / `cpu`（旧值 `none` ≡ `cpu`）。**只管解码**（见[硬件加速说明](#硬件加速说明)）；旧名 `--hwaccel` 已**硬更名**，用旧名直接报错退出 2 |
+| `--fallback-policy` | `auto` | 显式点名的后端不可用/失败时：`auto`=降级并提示 / `strict`=报错退出 2。旧值 `strict-cuda` / `nvenc-only` / `cpu-only` **已删除**，用旧值报错并给出等价三轴写法 |
 | `--cuda-diagnostics` | 否 | 输出多分辨率探针与详细错误，定位"硬解不可用"根因 |
 | `--cuda-device-id` | `0` | 多 GPU 环境下选择解码设备 |
 | `--overwrite` / `--container` | — | 覆盖 / 容器扩展名 |
 | `--ffmpeg-bin` | `ffmpeg` | 自定义 FFmpeg 路径；ffprobe 自动从同目录推导 |
 | `--dry-run` / `--log` / `--extra-args` | — | 预览 / 日志 / 追加参数 |
 
-> ¹ `cover` 模式在带 `scale_cuda` 的构建上把缩放放进显存（`scale_cuda → 显式 hwdownload → CPU crop`，实测快 44.5%），否则 `scale,crop` 在 CPU 侧执行；`crop-cover` 始终在 CPU 侧（它要先裁剪）。解码与编码仍可走 GPU。两条路的缩放算法都显式钉 `lanczos`（GPU 侧 `interp_algo=lanczos`、CPU 侧 `flags=lanczos`）——`scale_cuda` 只到 lanczos 一档，取两者交集里的最高档并显式钉死，免得 GPU 更锐、降级到 CPU 反而变软。
+> ¹ `cover` 模式在带 `scale_cuda` 的构建上把缩放放进显存（`scale_cuda → 显式 hwdownload → CPU crop`，实测快 51.9%），否则 `scale,crop` 在 CPU 侧执行；`crop-cover` 始终在 CPU 侧（它要先裁剪）。解码与编码仍可走 GPU。两条路的缩放算法都显式钉 `lanczos`（GPU 侧 `interp_algo=lanczos`、CPU 侧 `flags=lanczos`）——`scale_cuda` 只到 lanczos 一档，取两者交集里的最高档并显式钉死，免得 GPU 更锐、降级到 CPU 反而变软。
 
 ---
 
@@ -998,17 +1001,30 @@ python vidcrop_hwaccel.py \
 python vidcrop_hwaccel.py \
     --input ./clips --output ./out \
     --output-width 1280 --output-height 720 \
-    --codec libx264 --crf-ref 21 --hwaccel vaapi
+    --codec libx264 --crf-ref 21 --decode vaapi
 ```
 
-### 8. CI / 容器环境（强制禁用所有硬件加速）
+### 8. CI / 容器环境（三轴全 CPU，等价于旧的 `--hwaccel none`）
 
 ```bash
 python vidcrop_hwaccel.py \
     --input ./clips --output ./out \
     --output-width 1280 --output-height 720 \
-    --codec libx264 --crf-ref 21 --hwaccel none
+    --decode cpu --scale-algo libswscale-lanczos --codec libx264
 ```
+
+> 只写 `--decode cpu` **不等于纯 CPU** —— 那只关解码，`--scale-algo auto` 仍会优先尝试显存内缩放（软解时走 `hwupload_cuda`），`--codec` 默认仍是 `h264_nvenc`。纯 CPU 要把三个轴都钉死（如上），此时会跳过全部 GPU 探测。
+
+### 8b. 软解 + 显存内缩放（NVDEC 解不了源编码，或驱动有缺陷时）
+
+```bash
+python vidcrop_hwaccel.py \
+    --input ./clips --output ./out \
+    --output-width 1280 --output-height 720 \
+    --decode cpu --scale-algo cuda-lanczos --codec hevc_nvenc
+```
+
+> 链为 `hwupload_cuda → scale_cuda → 显式 hwdownload → CPU crop → hevc_nvenc`。要多一次整帧上载，吞吐未必优于「软解 + CPU 缩放」；**先看概览块「组合」那行的提示**。
 
 ### 9. 网页分发（VP9 / WebM）
 
@@ -1105,55 +1121,93 @@ python vidcrop_cpu_v2.py \
   OpenCL:     不可用 ✗
   ── 说明 ──
   · av1_nvenc 不可用：AV1 硬编需 8 代 NVENC（Ada / RTX 40 / L40 及以上）；--codec av1_nvenc 会自动降级为 libsvtav1 CPU 编码
-  · crop_cuda 不可用：该滤镜在 FFmpeg 上游并不存在（与编译选项无关），crop 模式的全 GPU 流水线跳过；实际走「硬解 + CPU 裁剪 + NVENC 硬编」
+  · crop_cuda 不可用：该滤镜在 FFmpeg 上游并不存在（与编译选项无关），crop 模式的全 GPU 流水线跳过；裁剪实际在 CPU 侧完成
 ```
 
 不可用项会给出**原因说明**，而不是只打一个 ✗。
 
-**`--hwaccel` 参数语义：**
+**探测是按轴按需进行的**，不是每次都全探：
+
+- 三轴都显式指向 CPU（`--decode cpu` + `--scale-algo libswscale-*` + CPU 编码器）→ **跳过全部 GPU 探测**，不打印上面任何一行。
+- 编码器与滤镜的探测**与解码轴无关**（软解照样可能用 NVENC 编码、用 `scale_cuda` 缩放），由 `--codec` / `--scale-algo` 决定要不要探。
+- `--scale-algo auto` 且零拷贝路径拿不到 CUDA 帧时，会多跑一次**功能探针**（真跑 1 帧 `hwupload_cuda,scale_cuda → null`），打印一行 `hwupload缩放: 可用 ✓ / 不可用 ✗`。显式 `--scale-algo cuda-*` **不跑探针**（直接执行）。
+- 只有**真的探过**的项才会出现在「说明」里——不会出现「没探却说它不可用」的假结论。
+
+### 三个正交轴
+
+解码 / 缩放 / 编码是**三个互相独立的轴**，可以任意组合，轴之间**没有任何冲突检查**：
+
+| 轴 | 参数 | 取值 | 只管什么 |
+|---|---|---|---|
+| 解码 | **`--decode`** | `auto`（默认）/ `cuda` / `vulkan` / `vaapi` / `opencl` / `cpu`（旧值 `none` ≡ `cpu`） | 帧在哪解出来（要不要下发 `-hwaccel`） |
+| 缩放 | `--scale-algo` | `auto`（默认）/ `libswscale-<algo>` / `cuda-<algo>` | 重采样在哪、用什么算法 |
+| 编码 | `--codec` | `auto` / `h264_nvenc` / `libx264` / … | 用哪个编码器 |
+| 降级 | `--fallback-policy` | `auto`（默认）/ `strict` | **只回答一件事**：显式点名的后端不可用/失败时，降级还是报错 |
+
+合法组合举例：
+
+- `--decode cpu --codec h264_nvenc` → 软解 + NVENC 硬编（等于旧 `--fallback-policy nvenc-only`）
+- `--decode cuda --codec libx264` → 硬解 + 软编
+- `--decode cpu --scale-algo cuda-lanczos` → 软解 + 显存内缩放（`hwupload_cuda` 链）
+
+> ⚠️ **`--decode cpu` 只关解码，不再等于「纯 CPU」。** 这是相对旧 `--hwaccel none` 的**语义收窄**——旧的那个值会把整块 GPU（含 NVENC 编码与 `scale_cuda` 缩放）一起关掉。
+> 想要旧的「纯 CPU」行为，请写三轴形式：
+> `--decode cpu --scale-algo libswscale-lanczos --codec libx264`
+> （这条组合会被识别为「三轴全 CPU」，**跳过全部 GPU 探测**，与旧 `cpu-only` 一样快。）
+
+**`--decode` 参数语义：**
 
 | 值 | 行为 |
 |---|---|
-| `auto`（默认） | 全面探测，按策略链自动选择 |
-| `cuda` | 强制走 CUDA 路径；若 CUDA 组件完全不可用则直接退出 |
-| `vulkan` / `vaapi` / `opencl` | 强制使用对应后端做硬解，编码走 CPU |
-| `none` | 禁用所有硬件加速，相当于退化为 CPU 版行为 |
+| `auto`（默认） | 按策略链自动选择硬解后端；不可用时降级为软解 |
+| `cuda` | 走 CUDA 硬解；不可用时按 `--fallback-policy` 处理（`auto` 降级 / `strict` 报错） |
+| `vulkan` / `vaapi` / `opencl` | 用对应后端做硬解；产出的仍是软件帧，因此可与 `--scale-algo cuda-*`（走 `hwupload_cuda`）或任意编码器组合 |
+| `cpu` | 纯软解。**不影响** `--codec` 与 `--scale-algo` |
+
+> 旧名 `--hwaccel` 已**硬更名**为 `--decode`：用旧名会直接报错退出 2，并在提示里给出等价的 `--decode` 写法。
 
 **`--fallback-policy` 参数语义：**
 
 | 值 | 行为 |
 |---|---|
-| `auto`（默认） | 完整 6 级策略链，逐级降级 |
-| `strict-cuda` | 无 CUDA 则直接退出，不降级 |
-| `nvenc-only` | 只用 NVENC 编码，跳过硬件解码（驱动有缺陷时的兜底） |
-| `cpu-only` | 纯 CPU 路径，跳过全部 GPU 探测 |
+| `auto`（默认） | 显式点名的后端不可用/执行失败 → **降级到下一档并提示**，继续跑完整策略链 |
+| `strict` | 显式点名的后端不可用/执行失败 → **报错退出 2**，不降级（策略链只保留首选策略） |
 
-**6 级策略链（按优先级依次尝试）：**
+> 旧值 `strict-cuda` / `nvenc-only` / `cpu-only` 已删除（它们其实是「三轴预设」，不是策略）。用旧值会报错并给出可直接抄的等价写法：
+> - `cpu-only` → `--decode cpu --scale-algo libswscale-lanczos --codec libx264`
+> - `nvenc-only` → `--decode cpu --codec h264_nvenc`
+> - `strict-cuda` → `--decode cuda --fallback-policy strict`
+
+**策略链（按优先级依次尝试，`strict` 时只剩首选）：**
 
 1. CUDA 全流水线（硬解 + `crop_cuda` + NVENC 硬编）— 仅 crop 模式；**该滤镜上游不存在，实际永远跳过**
 2. CUDA 缩放 + CPU 裁剪（硬解 + `scale_cuda` + 显式 `hwdownload` + CPU crop + NVENC 硬编）— 仅 cover 模式
-3. auto 硬解 + NVENC 硬编（CPU 做 vf 滤镜）
+2b. CUDA 缩放 + CPU 裁剪（**软解** + `hwupload_cuda` + `scale_cuda` + 显式 `hwdownload` + CPU crop）— 仅 cover 模式
+3. 解码轴给的后端（`auto` → `-hwaccel auto`）+ NVENC 硬编（CPU 做 vf 滤镜）
 4. 指定硬解（CUDA / Vulkan / VA-API / OpenCL）+ CPU 软件编码
-5. auto 模式下最佳硬解 + CPU 软件编码
+5. `auto` 模式下最佳硬解 + CPU 软件编码
 6. 纯 CPU 兜底
 
 **`--scale-algo`：缩放算法怎么选、后端怎么定**
 
 写法 `<backend>-<algo>` 或裸 `<algo>`。前缀决定**强制**哪个后端，裸名字则交给自动选择。
-不传等价于裸 `lanczos`，也就是默认行为（GPU 可用走 `cuda-lanczos`，否则 `libswscale-lanczos`）。
+不传 = `auto`：**优先 cuda、失败回退 cpu**。
 
 | 写法 | 含义 |
 |---|---|
+| `auto`（不传） | 显式 `--decode cpu` 时也会优先显存内缩放（走 `hwupload_cuda`），但**先跑功能探针**确认真能跑通；纯默认（`--decode auto`）只在零拷贝可用时用 cuda |
 | `lanczos` / `bicubic` / `nearest` … | 只定算法、后端自动。hwaccel 下**要求两张表都认**（避免歧义）；v2 下只查 libswscale 表（所以能省前缀） |
 | `libswscale-<algo>` | 强制 CPU 侧 `scale=…:flags=<algo>`，**不插** CUDA 缩放策略 |
-| `cuda-<algo>` | 强制 CUDA 缩放链 `scale_cuda=…:interp_algo=<algo>`（仅 cover 模式） |
+| `cuda-<algo>` | 强制 CUDA 缩放链（仅 cover 模式）：有硬解走零拷贝 `scale_cuda=…`，否则走 `hwupload_cuda,scale_cuda=…` |
 
 - `libswscale` 侧：`fast_bilinear` `bilinear` `bicubic` `neighbor` `area` `bicublin` `gauss` `sinc` `lanczos` `spline`（= `scale` 滤镜 flags 里真能当算法用的那些；不收 `experimental`，它要配 `+unstable`）。
 - `cuda` 侧：`nearest` `bilinear` `bicubic` `lanczos`（= `scale_cuda` 的全部具名档，量程 0~4；默认值 0 未映射到具名档，所以必须显式给）。`nearest` ↔ `neighbor` 互为别名。
-- **`cuda-*` 的降级**（复刻 `--hwaccel cuda` 的两档行为）：一件 CUDA 组件都没有 → **报错退出 2**，并提示改用 `libswscale-<同档>`；有 CUDA 但当前 FFmpeg 没有 `scale_cuda` → **退回 `libswscale-<同档>` 并告警**。
-- **冲突**：`cuda-*` 与 `--hwaccel none` / `--fallback-policy cpu-only` 同时给 → **报错退出 2**（明确要 GPU 又显式禁用它）。
+- **显式 `cuda-*` 不要求 NVENC 编码器**：链尾本来就是软件帧（`hwdownload` + CPU crop），硬编软编都接得住。
+- **`cuda-*` 的降级**：当前 FFmpeg 没有 `scale_cuda` 滤镜 → `auto` 时**退回 `libswscale-<同档>` 并告警**，`strict` 时**报错退出 2**。显式 `cuda-*` **不跑功能探针**，直接执行；执行失败也按同一个策略处理。
 - `crop` 模式不做缩放 → 给了只提示"不生效"，继续跑。
 - v2 **拒绝** `cuda-*`（纯 CPU 路径，没有 GPU 缩放链），并指向 hwaccel 版——这是有意的两脚本不对称。
+
+**组合效果提示：** 概览块会按实际生效的（解码, 缩放, 编码）打印一行「组合」评估，例如「全 GPU 零拷贝，最快路径」「软解 + hwupload_cuda：要多一次整帧上载，可能不如 CPU 缩放」。它只是提示，**不会阻断执行**。
 
 **策略降级示例：**
 
@@ -1310,8 +1364,12 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 | 无 VP9 硬件编码 | FFmpeg 从未提供 `vp9_nvenc`；VP9 硬编只有 `vp9_qsv` / VA-API | VP9 走 CPU 编码（可配硬解） |
 | `av1_nvenc` 需新卡 | 第 8 代 NVENC（Ada / RTX 40 / L40+）才有；Turing / Ampere 没有 | 自动降级 `libsvtav1` |
 | `crop_cuda` 缺失 | 该滤镜**在 FFmpeg 上游并不存在**（不是编译选项问题），crop 模式的全 GPU 流水线（策略 1）始终跳过 | 仍走"硬解 + CPU 裁剪 + NVENC 硬编"；代价是**吞吐对 CPU 敏感**，见 [FAQ Q13](#常见问题faq) |
-| cover 的 CUDA 缩放需自建 FFmpeg | 只有 `--enable-cuda-nvcc` 编出来的 FFmpeg 才有 `scale_cuda`，发行版 gpl 构建通常没有 | 没有就自动退回 CPU 侧 `scale`（结果正确、只是慢）；要拿那 44.5% 的提速需自建 |
-| `crop-cover` 不走 CUDA 缩放 | 它必须先裁剪，而裁剪只能在 CPU（无 `crop_cuda`）→ GPU 缩放要额外一次 `hwupload` | 保留 CPU 侧 `crop,scale`（该路径未实测）；要用 CUDA 缩放请改用 `--mode cover` |
+| cover 的 CUDA 缩放需自建 FFmpeg | 只有 `--enable-cuda-nvcc` 编出来的 FFmpeg 才有 `scale_cuda`，发行版 gpl 构建通常没有 | 没有就自动退回 CPU 侧 `scale`（结果正确、只是慢）；要拿那 51.9% 的提速需自建 |
+| `--decode cpu` 不再等于纯 CPU | 旧 `--hwaccel none` 会把整块 GPU 一起关掉；现在 `--decode cpu` 只关解码，`--scale-algo auto` 仍会优先尝试显存内缩放（软解时走 `hwupload_cuda`），`--codec` 默认仍是 `h264_nvenc` | 要纯 CPU 用三轴写法 `--decode cpu --scale-algo libswscale-lanczos --codec libx264`（会跳过全部 GPU 探测） |
+| 旧名 `--hwaccel` 与三个旧 `--fallback-policy` 值已删除 | `--hwaccel` 硬更名成 `--decode`；`strict-cuda` / `nvenc-only` / `cpu-only` 不是"策略"而是"三轴预设"，已移除 | 用旧名/旧值都会报错退出 2，并在提示里给出可直接抄的等价写法 |
+| **软解 + `hwupload_cuda` 的吞吐未实测** | 该链要把整帧从内存上载到显存，成本可能吃掉显存缩放的好处（memory 里有 `cuvid + hwupload_cuda` 比软解还慢的前科）。定位是"NVDEC 用不了/解不了该编码时的出路"，**不是**吞吐优化 | 只在你确实没有可用的硬解时用；`--scale-algo auto` 只在显式 `--decode cpu` 下才会自动走它，且会先跑功能探针 |
+| 显式 `cuda-*` 执行失败要等到运行期才发现 | `--scale-algo cuda-*` **不跑功能探针**（按设计直接执行） | `--fallback-policy auto`（默认）会自动降级到 `libswscale-<同档>`；要"不可用就报错"用 `strict` |
+| `crop-cover` 不走 CUDA 缩放 | 它必须先裁剪，而裁剪只能在 CPU（无 `crop_cuda`）→ GPU 缩放要额外一次 `hwupload_cuda` | 保留 CPU 侧 `crop,scale`（该路径未实测）；要用 CUDA 缩放请改用 `--mode cover` |
 | CPU 侧缩放是 lanczos（比旧版慢） | `cover` / `crop-cover` 默认用 `flags=lanczos`（原先是 libswscale 默认的 bicubic），抽头更多 → CPU 侧吞吐略降 | 这是为了与 GPU 侧同档、避免降级时画质变软。换档用 `--scale-algo`（如 `--scale-algo bicubic`） |
 | v0 / v1 与 v2/hwaccel 的缩放档位不同 | v0/v1 仍吃 libswscale 的默认 `bicubic`（它们定位是"对照旧行为"，这次没跟着改） | 要同档用 v2 / hwaccel；要对照旧输出用 v0/v1 |
 | `--scale-algo` 的裸名字在 v2 与 hwaccel 上不完全等价 | v2 只有一个后端 → **任何 libswscale 算法都能省前缀**（`--scale-algo spline` 可用）；hwaccel 有两个后端 → 裸名字要求两表都认，`spline` 这类只有 libswscale 有的**必须**写成 `libswscale-spline`，否则报错 | 想让同一条命令两边都能跑就统一带前缀（`libswscale-<algo>`）；只在 v2 上用才可省 |
@@ -1369,7 +1427,7 @@ VidUtils 规划作为一个**命令行优先 / Python 原生**的视频工程工
 
 **统一设计约束（所有后续模块都会遵守）：**
 
-- 参数命名风格一致（`--input / --output / --overwrite / --hwaccel / --ffmpeg-bin`）
+- 参数命名风格一致（`--input / --output / --overwrite / --decode / --ffmpeg-bin`）
 - 批量语义一致（文件或目录均可作为 `--input`）
 - 失败诊断一致（打印命令 + FFmpeg stderr 末 N 行）
 - 进度与统计一致（实时进度条 + 文件级耗时 + 批量汇总 + 整批剩余 ETA）
@@ -1491,18 +1549,24 @@ vidutils/
 --mode crop-cover --output-width 1280 --output-height 720
 ```
 
-`cover` 模式的缩放现在可以留在显存里：若 FFmpeg 带 `scale_cuda` 且编码器是 NVENC，链是
-`scale_cuda → 显式 hwdownload → CPU crop → NVENC`（策略 2）——实测 4K→1440×1080 比 CPU 侧 `scale` 快 **44.5%**。
+`cover` 模式的缩放现在可以留在显存里，有两种形态：
+
+- **零拷贝**（有硬解、编码器是 NVENC）：`scale_cuda → 显式 hwdownload → CPU crop → NVENC`（策略 2）——实测 4K→1440×1080 比 CPU 侧 `scale` 快 **51.9%~52.9%**（对着旧 bicubic 基准是 44.5%），
+质量门 `PSNR(GPU lanczos vs CPU lanczos) = 46.60 dB`、`VMAF = 97.21`（差异在感知上可忽略）。
+- **软解 + 上载**（`--decode cpu --scale-algo cuda-*`）：`hwupload_cuda → scale_cuda → 显式 hwdownload → CPU crop`（策略 2b）。缩放轴与解码轴正交，硬解用不了时也能把重采样放进显存；**但吞吐未实测**，可能不如纯 CPU 缩放。
+
 两处细节是刻意的：**必须显式写 `hwdownload,format=…`**（依赖 FFmpeg 自动插入时 `crop` 会被静默丢弃——实测
 `scale_cuda=1280:720,crop=iw/2:ih/2` 输出 1280×720 而不是 640×360，且没有任何报错）；`interp_algo` 也显式钉
 `lanczos`（`scale_cuda` 的默认值是 0，未映射到具名档）。
 
+上载用的是 **`hwupload_cuda`** 而不是通用 `hwupload`：后者必须配 `-filter_hw_device`，否则报
+`A hardware device reference is required`；`hwupload_cuda` 自带 device，不需要额外的命令行管道。
+
 CPU 侧同一天也钉成了 `:flags=lanczos`（两个脚本一起改），**两条路同档**——否则同一批文件会在 GPU 上更锐、
-一旦降级到 CPU（无 `scale_cuda` 的构建 / `--hwaccel none` / `cpu-only` / 新链失败）就变软。这也意味着上面那个
-44.5% 是对着**旧的 bicubic 基准**测的：CPU 侧换成 lanczos 后基准更慢，新链的相对收益只会更大。
+一旦降级到 CPU（无 `scale_cuda` 的构建 / 显式 `--scale-algo libswscale-*` / 三轴全 CPU / 新链失败）就变软。
 
 `crop-cover` 仍是 CPU 侧 `crop,scale`：它要先裁剪，而裁剪只能在 CPU（`crop_cuda` 不存在），GPU 缩放得额外
-`hwupload` 一次。crop 模式的全 GPU 流水线（策略 1）因为 `crop_cuda` 不存在，实际永远跳过。
+`hwupload_cuda` 一次。crop 模式的全 GPU 流水线（策略 1）因为 `crop_cuda` 不存在，实际永远跳过。
 
 另外 `crop-cover` 的同尺寸跳过判定会先看裁剪步骤是否为空操作：裁剪比例与源比例不同时，
 即使最终尺寸等于源尺寸也会改变画面，因此**不会**被跳过（`--no-skip-same-size` 可强制转码）。
@@ -1558,7 +1622,9 @@ nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv   # �
 
 本环境（`crop_cuda` 不可用）的 crop 模式实际流水线是 `CUDA 硬解 → hwdownload → CPU 侧 crop → 回传显存 → NVENC 硬编`，CPU 段在关键路径上；NVENC 跑到 1300+ fps 时每帧只摊到约 0.7 ms CPU 预算。8 核机器上任何一个吃满 CPU 的并发作业（典型：算 SSIM/PSNR 的 `-lavfi ssim` 质量对比、另一个转码任务）就会把它从约 47x 拖到约 20x。
 
-`cover` 模式原先更吃 CPU——它比 crop 多一步 `scale`（实测 4K→1440×1080 上 CPU 侧缩放单独占 **17.2%**）。现在若 FFmpeg 带 `scale_cuda`，缩放搬进显存后这一步不再占 CPU，同一条链从 23.11s 降到 12.83s。
+`cover` 模式原先更吃 CPU——它比 crop 多一步 `scale`（实测 4K→1440×1080 上 CPU 侧缩放单独占 **28.4%**，lanczos；换成 bicubic 时是 17.2%）。现在若 FFmpeg 带 `scale_cuda`，缩放搬进显存后这一步不再占 CPU，同一条链从 26.65s 降到 12.82s（**快 51.9%**）。
+
+> 顺带说明排查时的**参数命名**：解码轴参数是 `--decode`（旧名 `--hwaccel` 已硬更名）。`--decode cpu` 只关解码，不等于纯 CPU；要确认当前到底走了哪条链，看概览块的「缩放」与「组合」两行。
 
 实测对照（同一文件、同一条命令、`vidcrop_hwaccel.py`）：并发 SSIM 作业运行时 **1m11s（610 fps / 20.5x）**，该作业结束后同样命令 **32s（1378 fps / 46.7x）**。所以排查顺序是：先看 `speed`，再查并发作业，最后才怀疑脚本；批量任务与质量对比任务请错开运行。
 

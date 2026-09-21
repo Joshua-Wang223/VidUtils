@@ -1550,6 +1550,33 @@ _SCALE_CUDA_FORMATS = ('nv12', 'yuv420p', 'yuv444p', 'p010le')
 # scale_cuda=format= 改格式后必须配 -profile:v，否则 profile 与像素格式不匹配
 # （同出处：format=p010le → main10、yuv444p → high444p）。
 _SCALE_CUDA_PROFILE = {'p010le': 'main10', 'yuv444p': 'high444p'}
+# 零拷贝链上「用户想要的格式 → scale_cuda 能表达的等价格式 + 为什么等价」。
+# 只收真正等价的：yuv420p10le 与 p010le 都是 10bit 4:2:0，差别只在后者是半 planar
+# （显存里的排布），CUDA 链上这就是同一个东西——不映射的话用户会以为\"10bit 用不了\"，
+# 其实只是换个名字。没有等价格式的（yuv422p / p012le 等）不收，走无替代的提示分支。
+_CUDA_PIX_FMT_ALIAS: Dict[str, Tuple[str, str]] = {
+    'yuv420p10le': ('p010le', '同为 10bit 4:2:0 的显存排布'),
+    'yuv420p10be': ('p010le', '同为 10bit 4:2:0 的显存排布'),
+    'p010be':      ('p010le', '仅字节序不同'),
+    'yuvj420p':    ('yuv420p', 'CUDA 链上没有 jpeg 值域变体，按 tv 处理'),
+}
+
+
+def _cuda_pixfmt_hint(req_pf: str) -> str:
+    """零拷贝 CUDA 链上 --pix-fmt 用不了时，给一句**可直接照抄**的替代方案。
+
+    两种情况分开说，否则用户分不清\"换个名字就行\"和\"这条链真的做不到\"：
+      · 有等价格式 → 点名那个格式（并说明会自动配的 -profile:v）
+      · 没有       → 说明只有离开零拷贝链（软件帧链）才能用原格式
+    """
+    alt = _CUDA_PIX_FMT_ALIAS.get(req_pf)
+    if alt is None:
+        return ('该格式在 CUDA 链上没有对应项；改用软件帧链'
+                '（--scale-algo libswscale-lanczos）后原格式可正常下发')
+    name, note = alt
+    prof = _SCALE_CUDA_PROFILE.get(name)
+    return (f'改用 --pix-fmt {name}（{note}'
+            + (f'，会自动配 -profile:v {prof}' if prof else '') + '）')
 
 
 def validate_output_dimensions(width: int, height: int,
@@ -3263,21 +3290,40 @@ def build_ffmpeg_cmd(
     _cuda_profile: Optional[str] = None
     if _req_pf is not None and hwaccel_output_format == 'cuda':
         _why = ''
+        _how = ''
         if _req_pf not in _SCALE_CUDA_FORMATS:
-            _why = (f'零拷贝 CUDA 链只能用 {" / ".join(_SCALE_CUDA_FORMATS)}'
-                    f'（scale_cuda=format= 的限制）')
+            # 分两种：有等价格式（yuv420p10le → p010le）和无等价格式（yuv422p 等）。
+            # 混成一句话会让用户以为"10bit 在这条链上做不到"，其实只是换个名字。
+            _why = ('零拷贝 CUDA 链不能用 -pix_fmt 下发（该链帧格式是 AV_PIX_FMT_CUDA，'
+                    f'实测传 nv12 / yuv420p 都报 "Impossible to convert"）；'
+                    '改格式只能写进 scale_cuda=format=，而它只接受 '
+                    f'{" / ".join(_SCALE_CUDA_FORMATS)}')
+            _how = _cuda_pixfmt_hint(_req_pf)
         else:
             _new_vf = _apply_pix_fmt_to_cuda_filter(vf_filter, _req_pf)
             if _new_vf is not None:
                 vf_filter = _new_vf
                 _cuda_profile = _SCALE_CUDA_PROFILE.get(_req_pf)
             else:
-                _why = '零拷贝 CUDA 链的链首不是 scale_cuda，无法在显存内改格式'
+                _why = (f'零拷贝 CUDA 链的链首是 '
+                        f'{vf_filter.split(",", 1)[0].split("=", 1)[0]} 而不是 scale_cuda，'
+                        f'没地方写 format={_req_pf}')
+                _how = ('scale_cuda 只出现在 cover 模式；改用 --mode cover，'
+                        '或改走软件帧链（--scale-algo libswscale-lanczos）')
         if _why:
+            # 后果必须说清：忽略后不再下发 -pix_fmt，输出格式由链上 hwdownload 的
+            # format（按源位深推导）决定 —— 所以"要 10bit 却给了 8bit 源"会真的掉位深。
+            _fallback = _src_download_fmt(src_bits)
+            _loss = ('→ 位深要求被丢弃' if _fallback == 'nv12'
+                     and _req_pf.endswith(('10le', '12le')) else '')
+            _head = f'--pix-fmt {_req_pf} 在零拷贝 CUDA 链上无法下发'
+            _tail = (f'\n     原因：{_why}'
+                     f'\n     怎么办：{_how}'
+                     f'\n     当前后果：已忽略该设置，输出按链上的 {_fallback} 走'
+                     f'（源 {src_bits}bit）{_loss}')
             if policy == 'strict':
-                raise ValueError(f'--pix-fmt {_req_pf}：{_why}'
-                                 f'（--fallback-policy strict 不降级）')
-            _warn(f'--pix-fmt {_req_pf}：{_why}，已忽略该格式设置')
+                raise ValueError(_head + _tail + '\n     （--fallback-policy strict 不降级）')
+            _warn(_head + _tail)
         _req_pf = None                          # 无论成功与否都不再下发 -pix_fmt
 
     # 视频滤镜 & 编码器

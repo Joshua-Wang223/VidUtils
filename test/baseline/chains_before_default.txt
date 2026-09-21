@@ -1,0 +1,5 @@
+--mode cover --output-width 1440 --output-height 1080 scale=-2:1080:flags=lanczos,crop=1440:1080:(iw-1440)/2:0
+--mode crop --output-width 640 --output-height 360 crop=640:360:640:360
+--mode crop-cover --crop-ratio 16:9 --output-width 640 crop=1920:1080:0:0,scale=640:360:flags=lanczos
+--mode cover --output-width 1280 --output-height 720 scale=1280:720:flags=lanczos
+--mode cover --output-width 720 --output-height 1280 scale=720:1280:flags=lanczos

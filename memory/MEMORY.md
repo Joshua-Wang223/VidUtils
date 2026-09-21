@@ -39,7 +39,9 @@
   — 别的流水线会抢 CPU/GPU 导致基准不可信；**VP9 有硬解但从来没有硬编**、
   **AV1 硬解硬编都没有**（`av1_cuvid` 在列表里但运行时报 not supported）；
   「本机 AV1 完全编不出来」这条已更正：custom ffmpeg 7.1 没有、系统 ffmpeg 6.1.1 有
-  libsvtav1/libaom-av1；零拷贝管线里 `-pix_fmt` 无效
+  libsvtav1/libaom-av1；零拷贝管线里 `-pix_fmt` 无效；
+  ⇒ **硬解能力是「分编解码器」的、不是布尔量**：2026-09-21 起 `vidcrop_hwaccel.py`
+  按源 codec 用真实输入试解 1 帧（`has_decoder` 那个 H.264 微流探针只代表 H.264）
 - [FFmpeg 7.1 已合并 nvinterpolate 与 libvmaf](project_nvinterpolate_build.md)
   — 单一 ffmpeg、无需环境文件；`nvinterpolate` 必须放滤镜链末尾否则段错误；移植补丁位置
 - [两个裁剪脚本的行为一致约定](project_preset_equivalence.md)
@@ -87,7 +89,10 @@
   **破坏性变更**：`--hwaccel` 硬删（旧值 `none`≡`cpu`）、三个旧 fallback 值删除并给等价三轴写法、
   **`--decode cpu` 不再等于纯 CPU**；新增「软解 + `hwupload_cuda`」链（自带 device，
   所以 `build_ffmpeg_cmd` 零改动）；`auto` 缩放用**功能探针**判定，显式 `cuda-*` 不探针；
-  回归判据 = 16/16 滤镜链 + 默认路径 5 用例逐字 + `verify_decode_axis.sh` 15 项
+  回归判据 = 16/16 滤镜链 + 默认路径 5 用例逐字 + `verify_decode_axis.sh` 15 项；
+  **补（2026-09-21）**：`auto` / `cuda` 的解码判定改成**按源编解码器**（T4 解不了 AV1，
+  原来是拿 H.264 探针的全局标志硬套 → 每个 AV1 文件白跑一次必败的链、strict 下误退出 2），
+  判据 `temp/verify_cuda_decode_codec.py`
 - [像素格式 / 位深 / HDR 三个新参数](project_color_depth_hdr_params.md)
   — 2026-09-20 两脚本都加了 `--pix-fmt`（hwaccel 此前没有）/ `--bit-depth` / `--hdr`，
   默认全 `auto`（不传时命令逐字不变）；

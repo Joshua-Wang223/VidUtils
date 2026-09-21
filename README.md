@@ -361,7 +361,7 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--flag` | `_cropped` / `_covered` | 同 v2 |
 | `--audio-codec` / `--audio-bitrate` | `copy` / `128k` | 音频编码；WebM 下自动换 `libopus` |
 | `--no-skip-same-size` | 否 | 同尺寸强制转码 |
-| `--decode` | `auto` | 解码后端：`auto` / `cuda` / `vulkan` / `vaapi` / `opencl` / `cpu`（旧值 `none` ≡ `cpu`）。**只管解码**（见[硬件加速说明](#硬件加速说明)）；旧名 `--hwaccel` 已**硬更名**，用旧名直接报错退出 2 |
+| `--decode` | `auto` | 解码后端：`auto` / `cuda` / `vulkan` / `vaapi` / `opencl` / `cpu`（旧值 `none` ≡ `cpu`）。**只管解码**（见[硬件加速说明](#硬件加速说明)）；`auto` 的探测**按源编解码器**做（NVDEC 的能力是分编解码器的，T4 解不了 AV1）——拿真实输入试解 1 帧，结果按 codec 缓存；旧名 `--hwaccel` 已**硬更名**，用旧名直接报错退出 2 |
 | `--fallback-policy` | `auto` | 显式点名的后端不可用/失败时：`auto`=降级并提示 / `strict`=报错退出 2。旧值 `strict-cuda` / `nvenc-only` / `cpu-only` **已删除**，用旧值报错并给出等价三轴写法 |
 | `--cuda-diagnostics` | 否 | 输出多分辨率探针与详细错误，定位"硬解不可用"根因 |
 | `--cuda-device-id` | `0` | 多 GPU 环境下选择解码设备 |
@@ -1383,6 +1383,7 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 | cover 的 CUDA 缩放需自建 FFmpeg | 只有 `--enable-cuda-nvcc` 编出来的 FFmpeg 才有 `scale_cuda`，发行版 gpl 构建通常没有 | 没有就自动退回 CPU 侧 `scale`（结果正确、只是慢）；要拿那 51.9% 的提速需自建 |
 | `--decode cpu` 不再等于纯 CPU | 旧 `--hwaccel none` 会把整块 GPU 一起关掉；现在 `--decode cpu` 只关解码，`--scale-algo auto` 仍会优先尝试显存内缩放（软解时走 `hwupload_cuda`），`--codec` 默认仍是 `h264_nvenc` | 要纯 CPU 用三轴写法 `--decode cpu --scale-algo libswscale-lanczos --codec libx264`（会跳过全部 GPU 探测） |
 | 旧名 `--hwaccel` 与三个旧 `--fallback-policy` 值已删除 | `--hwaccel` 硬更名成 `--decode`；`strict-cuda` / `nvenc-only` / `cpu-only` 不是"策略"而是"三轴预设"，已移除 | 用旧名/旧值都会报错退出 2，并在提示里给出可直接抄的等价写法 |
+| 硬件解码能力**分编解码器**，不是"有 / 没有" | 能力探测里的 `has_decoder` 是拿 **H.264 微流**探出来的**机器级**标志；而 NVDEC 实际是分编解码器的——T4（Turing）能解 H.264 / HEVC / VP9 / MPEG-2/4 / VC-1，但**解不了 AV1**（要 Ampere 起的第 5 代）。拿机器级标志推断"这个源能硬解"会误判，代价不只是多一次无用尝试：`--decode auto` 会让每个 AV1 文件都白跑一次必然失败的链；`--fallback-policy strict` 下更是直接退出 2，而这条素材走软解其实完全可行（实测 `[av1 @ ...] Failed setup for format cuda: hwaccel initialisation returned error`） | 现在按**源编解码器**用**真实输入**试解 1 帧（`-frames:v 1 -f null`，几十毫秒），结果按 codec 名缓存、一批文件只探一次；解不了就按软解处理并提示，显式 `--decode cuda` + `strict` 则提前报错（不会白跑一次转码才发现）。正常素材（H.264 / HEVC）只多这一次 1 帧解码，命令逐字不变 |
 | **软解 + `hwupload_cuda` 收益很小（已实测 +2.9%~3.2%）** | 该链要把整帧从内存上载到显存，两轮 T4 实测只比「软解 + CPU 缩放」快约 3%。更关键的是**绝对值**：软解链路整体 44~46s，而硬解零拷贝只要 12.8s | 只在**确实没有可用硬解**时用（NVDEC 用不了 / 解不了该编码）。有硬解时永远该走硬解；`--scale-algo auto` 只在显式 `--decode cpu` 下才自动走它，且要先过功能探针 |
 | 显式 `cuda-*` 执行失败要等到运行期才发现 | `--scale-algo cuda-*` **不跑功能探针**（按设计直接执行） | `--fallback-policy auto`（默认）会自动降级到 `libswscale-<同档>`；要"不可用就报错"用 `strict` |
 | **零拷贝 CUDA 链不能传 `-pix_fmt`** | 该链上 `-hwaccel_output_format cuda` 时帧是 CUDA 帧，`-pix_fmt` 设的是 `AVFrame.format`（= `AV_PIX_FMT_CUDA`）而非 `sw_format`，传 `nv12` / `yuv420p` 实测都报 `Impossible to convert` | 已按链型分别落地：零拷贝链改用 `scale_cuda=format=` + `-profile:v`，只有软件帧链才下发 `-pix_fmt`。用户请求 `scale_cuda` 不支持的格式时按 `--fallback-policy` 降级或报错 |

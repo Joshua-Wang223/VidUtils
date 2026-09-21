@@ -49,8 +49,18 @@ GPU 39–69%、`utilization.encoder` 20–29%、显存 3.4GB 被 TensorRT 占着
 - **VP9 有硬解**（实测 `vp9_cuvid` 能跑，帧数正确）—— 与「VP9 没有硬编」正好相反，
   这对能力最容易记混。
 - **AV1 没有硬解**：`av1_cuvid` **在 `-decoders` 列表里存在**（Turing 之前的构建都会列出来），
-  但运行时直接报 `Codec av1_cuvid is not supported.` → 这是**编码器级**失败，
-  只该拉黑 av1，不能当成 CUDA 坏了把整批硬解关掉（T4 的 AV1 解码要 Ampere+）。
+  但运行时直接报 `Codec av1_cuvid is not supported.`（走 `-hwaccel cuda` 时报的是
+  `Failed setup for format cuda: hwaccel initialisation returned error`）→ 这是
+  **编码器级**失败，只该拉黑 av1，不能当成 CUDA 坏了把整批硬解关掉（T4 的 AV1 解码要 Ampere+）。
+  ⇒ **推论：硬件解码能力是「分编解码器」的，不是一个「有 / 没有」的布尔量。**
+  任何"先探一次硬解能力、之后当全局标志用"的写法都会在这里出错——
+  `vidcrop_hwaccel.py` 的 `has_decoder`（拿 **H.264 微流**探的）就是被这么误用的：
+  `--decode auto` 对 AV1 源选到 cuda → 每个文件白跑一次必然失败的链；
+  `--fallback-policy strict` 下更是直接退出 2，而这条素材走软解其实完全可行。
+  2026-09-21 已改成**按源编解码器、用真实输入试解 1 帧**（`-frames:v 1 -f null`，
+  结果按 codec 名缓存，一批文件只探一次）。比静态黑名单更通用——黑名单要求预先知道
+  "哪些机器不支持哪些编码"，而探测是实测。（`vidls.py` 那套 `_NVDEC_CODEC_BLOCKED`
+  是同一问题的静态黑名单版本，两种解法并存，别把它们记混。）
 
 **NVENC 是单引擎**：1/2/4/8 路并发总吞吐基本不变（300 帧 1080p 约 227–263 fps），
 单路吞吐随并发数成反比。8 路会话都能建立（数据中心卡无消费级的会话数限制）。

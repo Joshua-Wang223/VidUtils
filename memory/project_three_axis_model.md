@@ -19,7 +19,7 @@ type: project
 
 | 轴 | 参数 | 取值 | 只管什么 |
 |---|---|---|---|
-| 解码 | `--decode` | `auto`(默认) / `cuda` / `vulkan` / `vaapi` / `opencl` / `cpu`（旧值 `none` ≡ `cpu`） | 是否下发 `-hwaccel` |
+| 解码 | `--decode` | `auto`(默认) / `cuda` / `vulkan` / `vaapi` / `opencl` / `cpu`（旧值 `none` ≡ `cpu`） | 是否下发 `-hwaccel`。**`auto` 与 `cuda` 的判定按「源编解码器」做**（NVDEC 能力分编解码器：T4 解不了 AV1）——探测用真实输入试解 1 帧，见 `project_t4_gpu_capabilities.md` |
 | 缩放 | `--scale-algo` | `auto`(默认) / `libswscale-<algo>` / `cuda-<algo>` | 重采样在哪、用什么算法 |
 | 编码 | `--codec` | `auto` / `h264_nvenc` / `libx264` / … | `-c:v` |
 | 策略 | `--fallback-policy` | `auto`(默认) / `strict` | **只回答一件事**：显式点名的后端不可用/失败时，降级还是报错 |

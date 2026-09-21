@@ -2149,9 +2149,14 @@ _CUDA_SCALE_ALGOS = ("nearest", "bilinear", "bicubic", "lanczos")
 _SW_ALGO_ALIAS = {"nearest": "neighbor"}
 _CUDA_ALGO_ALIAS = {"neighbor": "nearest"}
 
+# ⚠ 这份串**故意不列 cuda**：v2 是纯 CPU 路径、随后会拒绝 cuda-*，列出来等于把人
+# 指向一条本脚本根本走不了的路（原先照抄了 hwaccel 的双后端版本，报错里会印出
+# "cuda      ：nearest bilinear bicubic lanczos（需自带 scale_cuda 的自建 FFmpeg）"）。
+# cuda-* 的**解析**仍保留，因为 parse_scale_algo 要与 hwaccel 的同名函数逐字对应；
+# 拒绝发生在 validate_and_finalize_args()。
 _SCALE_ALGO_HELP = ("libswscale：" + " ".join(_SW_SCALE_ALGOS)
-                    + "\n  cuda      ：" + " ".join(_CUDA_SCALE_ALGOS)
-                    + "（需自带 scale_cuda 的自建 FFmpeg）")
+                    + "（本脚本只有一个后端，前缀可省；不支持 cuda-* —— "
+                      "要走 CUDA 缩放请用 vidcrop_hwaccel.py）")
 
 
 def parse_scale_algo(spec: Optional[str]) -> Tuple[str, str, str]:

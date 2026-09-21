@@ -67,8 +67,8 @@ type: project
 - `scale_backend == 'auto'` 的判据里 **NVENC 门必须保留**（否则 `--codec libx264` 会在有硬解的
   机器上凭空多出一条 CUDA 缩放链，破坏"默认行为逐字不变"）；只有显式 `cuda-*` 才放宽成
   "任何编码器都能接"。
-- 改完必须跑三道回归：`temp/dump_filter_chains.sh`（16 行逐字）、默认路径 5 个用例逐字
-  （`temp/chains_before_default.txt`）、`temp/verify_decode_axis.sh`（CLI 层 15 项）。
+- 改完必须跑三道回归：`test/dump_filter_chains.sh`（16 行逐字）、默认路径 5 个用例逐字
+  （`test/baseline/chains_before_default.txt`）、`verify/verify_decode_axis.sh`（CLI 层 15 项）。
 - 相关：`project_cuda_scale_cover.md`（缩放链的实测数据与质量门）、
   `project_t4_gpu_capabilities.md`（零拷贝链不能传 `-pix_fmt`）、
   `project_preset_equivalence.md`（两脚本一致性约定）。

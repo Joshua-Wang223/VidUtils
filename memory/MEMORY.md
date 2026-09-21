@@ -70,8 +70,15 @@
   ⚠ **恒等缩放陷阱**：new4_raw 源高就是 1080，覆盖链缩放是恒等操作（只裁剪不缩放）
   → B/D/Q/E 全与缩放无关，VMAF 99.98 不是画质结论；探针现在检测到"源高==1080"会给出警示；
   ⚠ **收益是素材相关的，不是分辨率相关的**：同为 4K，Earth 素材净收益 51.9~52.9%、
-  new4_raw_4k 只有 **6.4%**（CPU 缩放只占总耗时 6.6%）；判据 D 在 4K 上仅 **+1.2~3.5%**
-  → 「4K 就稳赚 50%」不成立，跨素材不可比，报数要连时长/帧数一起报；
+  new4_raw_4k 只有 **6.4%**（CPU 缩放只占总耗时 6.6%）→ 「4K 就稳赚 50%」不成立，
+  跨素材不可比，报数要连时长/帧数一起报；
+  **第八轮（2026-09-21，12 组素材）把规律钉死了 =「位深 + 是否真在缩放」**：
+  源 ≥10bit **且**真缩放 → 上传链快 **+14~25%**；8bit 真缩放 → **+0.4% ~ −14%**；
+  **恒等缩放（无论位深）必亏 −1.6% ~ −34.7%**（10bit 恒等也是 **−22.0%** ← 判决性格）；
+  ⇒ 门槛已落地 `_hwupload_skip_reason()`，**只作用于 `--scale-algo auto`**（显式 `cuda-*` 照跑），
+  跳过时打印具体理由；判据 `verify/verify_hwupload_worth.py`；
+  **工装脚本已转正**：`test/`（回归门 + `baseline/`）、`verify/`、`probe/` 三个目录都在 git 里、
+  随 `git pull` 同步 → **"改了探针要手动拷到 T4"的约定作废**；`temp/` 现在只是本机工作目录；
   **必须显式写 `hwdownload,format=…`**：靠 FFmpeg 自动插入时 `crop` 会被**静默丢弃**
   （`scale_cuda=1280:720,crop=iw/2:ih/2` 输出 1280x720 而非 640x360，无任何报错）；
   **`crop_cuda` 在上游并不存在**（不是"6.1 未编译"）→ 策略 1 实际永远跳过、crop 只能在 CPU；
@@ -92,7 +99,7 @@
   回归判据 = 16/16 滤镜链 + 默认路径 5 用例逐字 + `verify_decode_axis.sh` 15 项；
   **补（2026-09-21）**：`auto` / `cuda` 的解码判定改成**按源编解码器**（T4 解不了 AV1，
   原来是拿 H.264 探针的全局标志硬套 → 每个 AV1 文件白跑一次必败的链、strict 下误退出 2），
-  判据 `temp/verify_cuda_decode_codec.py`
+  判据 `verify/verify_cuda_decode_codec.py`
 - [像素格式 / 位深 / HDR 三个新参数](project_color_depth_hdr_params.md)
   — 2026-09-20 两脚本都加了 `--pix-fmt`（hwaccel 此前没有）/ `--bit-depth` / `--hdr`，
   默认全 `auto`（不传时命令逐字不变）；
@@ -101,7 +108,7 @@
   **`tonemap_cuda` 上游不存在** → `--hdr sdr` 走 CPU 的 zscale+tonemap（**未实测**）；
   **`--pix-fmt`×`--bit-depth` =「能落地者赢」**（2026-09-21 修）：先按 `--pix-fmt` 落地，
   它在当前链上不可用时由 `--bit-depth` 接管并明说让位代价（位深/色度，strict 下有损失报错）；
-  恒定让谁赢两端都有反例；判据 `temp/verify_pixfmt_bitdepth.py`
+  恒定让谁赢两端都有反例；判据 `verify/verify_pixfmt_bitdepth.py`
 
 ---
 

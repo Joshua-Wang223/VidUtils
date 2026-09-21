@@ -34,7 +34,7 @@ type: project
   双双失效（实测输出掉回 8bit nv12）；`--bit-depth` 恒赢 → `--pix-fmt yuv444p --bit-depth 10`
   静默降成 4:2:0。正解：先让 `--pix-fmt` 落地；它在当前链上落不了地时由 `--bit-depth` 接管，
   并明说让位代价（`_pixfmt_shape()` 比对位深/色度；有损失且 `strict` → 报错）。
-  判据见 `temp/verify_pixfmt_bitdepth.py`（37 格，含两端反例与回归格）。
+  判据见 `verify/verify_pixfmt_bitdepth.py`（37 格，含两端反例与回归格）。
   ⚠ **曾经有过一个真 bug**：`--pix-fmt` 显式时置 `_pf_handled = True`，而 `--bit-depth` 的
   解析挂在同一条 `elif` 上 → 两个参数同时给出时 `--bit-depth` **压根没被算过**，等
   `--pix-fmt` 被链拒绝后 `_pf_handled` 仍为 True，把整段位深逻辑一起跳过 → **10bit 静默蒸发**，
@@ -55,7 +55,7 @@ type: project
 
 - 再动这三个参数：先跑三道回归门（16/16 滤镜链、默认路径 5/5、命令级 7/7），再改；尤其
   `--pix-fmt` 的新格式支持要确认 `scale_cuda` 是否认。动「优先级 / 冲突」类逻辑还要跑
-  `temp/verify_pixfmt_bitdepth.py`——**优先级 bug 不会在单参数测试里暴露**，必须喂
+  `verify/verify_pixfmt_bitdepth.py`——**优先级 bug 不会在单参数测试里暴露**，必须喂
   两参数组合（这次就是两个同给才炸；单给 `--pix-fmt` 或单给 `--bit-depth` 全都正常）。
 - 判断"哪个参数该赢"时先问**谁知道能不能落地**：知识在链/编码器那一侧的参数（意图级）
   才适合做仲裁；用户手写的名字（实现级）只适合在它能表达时生效。这跟 `--decode auto`
@@ -65,7 +65,7 @@ type: project
   静默从 4:4:4 掉到 4:2:0 比直接报错更糟。`strict` 语义 = "不降级"，所以**等价让位
   （`yuv420p10le`→`p010le`）不算降级**，不报错；有信息损失才 raise。
 - 报结论时区分**链型**（软件帧链 / 零拷贝 CUDA 链），别笼统说"改了 pix_fmt"。
-- **让位路径的上机验证工装**（已就位，仍待跑）：`temp/probe_scale_cuda_crop.sh` +
+- **让位路径的上机验证工装**（已就位，仍待跑）：`probe/probe_scale_cuda_crop.sh` +
   `PROBE_10BIT=1` 会跑 A3/A4 两格——A3 = `format=p010le`（脚本让位后下发的滤镜形状），
   A4 = A3 **再加 `-profile:v main10`**（脚本也会下发的那一项），两者是单变量对照，
   **两格都成功**才算让位路径成立。

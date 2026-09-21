@@ -38,6 +38,7 @@
 - [已知限制](#已知限制)
 - [路线图（Roadmap）](#路线图roadmap)
 - [目录结构](#目录结构)
+- [回归与验证](#回归与验证)
 - [工程记忆（memory/）](#工程记忆memory)
 - [常见问题（FAQ）](#常见问题faq)
 - [贡献指南](#贡献指南)
@@ -1384,7 +1385,7 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 | `--decode cpu` 不再等于纯 CPU | 旧 `--hwaccel none` 会把整块 GPU 一起关掉；现在 `--decode cpu` 只关解码，`--scale-algo auto` 仍会优先尝试显存内缩放（软解时走 `hwupload_cuda`），`--codec` 默认仍是 `h264_nvenc` | 要纯 CPU 用三轴写法 `--decode cpu --scale-algo libswscale-lanczos --codec libx264`（会跳过全部 GPU 探测） |
 | 旧名 `--hwaccel` 与三个旧 `--fallback-policy` 值已删除 | `--hwaccel` 硬更名成 `--decode`；`strict-cuda` / `nvenc-only` / `cpu-only` 不是"策略"而是"三轴预设"，已移除 | 用旧名/旧值都会报错退出 2，并在提示里给出可直接抄的等价写法 |
 | 硬件解码能力**分编解码器**，不是"有 / 没有" | 能力探测里的 `has_decoder` 是拿 **H.264 微流**探出来的**机器级**标志；而 NVDEC 实际是分编解码器的——T4（Turing）能解 H.264 / HEVC / VP9 / MPEG-2/4 / VC-1，但**解不了 AV1**（要 Ampere 起的第 5 代）。拿机器级标志推断"这个源能硬解"会误判，代价不只是多一次无用尝试：`--decode auto` 会让每个 AV1 文件都白跑一次必然失败的链；`--fallback-policy strict` 下更是直接退出 2，而这条素材走软解其实完全可行（实测 `[av1 @ ...] Failed setup for format cuda: hwaccel initialisation returned error`） | 现在按**源编解码器**用**真实输入**试解 1 帧（`-frames:v 1 -f null`，几十毫秒），结果按 codec 名缓存、一批文件只探一次；解不了就按软解处理并提示，显式 `--decode cuda` + `strict` 则提前报错（不会白跑一次转码才发现）。正常素材（H.264 / HEVC）只多这一次 1 帧解码，命令逐字不变 |
-| **软解 + `hwupload_cuda` 收益很小（已实测 +2.9%~3.2%）** | 该链要把整帧从内存上载到显存，两轮 T4 实测只比「软解 + CPU 缩放」快约 3%。更关键的是**绝对值**：软解链路整体 44~46s，而硬解零拷贝只要 12.8s | 只在**确实没有可用硬解**时用（NVDEC 用不了 / 解不了该编码）。有硬解时永远该走硬解；`--scale-algo auto` 只在显式 `--decode cpu` 下才自动走它，且要先过功能探针 |
+| **软解 + `hwupload_cuda` 只在高位深且真缩放时划算** | 上载 / 回下载开销固定，而 p010le 的 CPU 缩放比 8bit 贵得多。T4 两批共 12 组素材实测：**源 ≥10bit 且真在缩放 → +14~25%**；8bit 真缩放 → **+0.4% ~ −14%**；**恒等缩放（无论位深）→ −1.6% ~ −34.7%**（注意 10bit 恒等也是 −22%）。绝对值上软解链路整体 44~46s，而硬解零拷贝只要 12.8s | 有硬解时永远该走硬解。`--scale-algo auto` 只在显式 `--decode cpu` 下才自动走它，且要过两道关：**功能探针**（链真能跑通）+ **值不值**（≥10bit 且非恒等）；不满足时会打印具体理由。要强制使用请显式写 `--scale-algo cuda-lanczos` |
 | 显式 `cuda-*` 执行失败要等到运行期才发现 | `--scale-algo cuda-*` **不跑功能探针**（按设计直接执行） | `--fallback-policy auto`（默认）会自动降级到 `libswscale-<同档>`；要"不可用就报错"用 `strict` |
 | **零拷贝 CUDA 链不能传 `-pix_fmt`** | 该链上 `-hwaccel_output_format cuda` 时帧是 CUDA 帧，`-pix_fmt` 设的是 `AVFrame.format`（= `AV_PIX_FMT_CUDA`）而非 `sw_format`，传 `nv12` / `yuv420p` 实测都报 `Impossible to convert` | 已按链型分别落地：零拷贝链改用 `scale_cuda=format=` + `-profile:v`，只有软件帧链才下发 `-pix_fmt`。用户请求 `scale_cuda` 不支持的格式时按 `--fallback-policy` 降级或报错 |
 | **`tonemap_cuda` 上游不存在** | 实测 `ffmpeg -h filter=tonemap_cuda` → `Unknown filter`（与 `crop_cuda` 同款，非编译选项问题）。CUDA 侧没有硬件 HDR→SDR | `--hdr sdr` 走 CPU 的 `zscale` + `tonemap`；CUDA 链本来就先 `hwdownload` 成软件帧，直接接在链尾即可。滤镜缺失时会降级为 `--hdr drop` 并提示 |
@@ -1480,12 +1481,47 @@ vidutils/
 ├── vidls.cmd                 # 同上 Windows 版启动器（纯 ASCII + CRLF：cmd.exe 按 ANSI 代码页解析批处理）
 ├── vidll.cmd                 # Windows 版 vidll（只转发给 vidls.cmd）
 ├── vidls_win.py              # Windows 版内核：版式判据按实测重写、控制台编码自适应、写启动器的 --install
+├── test/                     # 裁剪脚本的回归门（基线在 test/baseline/，见「回归与验证」）
+├── verify/                   # 裁剪脚本的验证套件（单测 + CLI 层，都不需要 GPU）
+├── probe/                    # 上机探针：T4 实测用（无 GPU 时只能跑 SELFTEST=1）
 ├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
 ├── AV1_VP9_UPGRADE_PLAN_v2.md # AV1/VP9 升级方案归档
 ├── docs/                     # （规划）设计文档与性能基准
 ├── examples/                 # （规划）示例素材与演示脚本
-└── tests/                    # （规划）单元测试与端到端测试；test_interp_2x_lock.sh 暂放根目录
+└── temp/                     # 本机临时目录（gitignored）：测试素材、中间产物、探针日志
 ```
+
+---
+
+## 回归与验证
+
+改 `vidcrop_*.py` 的滤镜链、策略生成或参数落地之后，按这个顺序跑（**都不需要 GPU**）：
+
+```bash
+# 1) 回归门：不传新参数时命令必须逐字不变
+bash test/dump_filter_chains.sh > /tmp/after.txt
+diff test/baseline/chains_before.txt /tmp/after.txt     # 16 行（8 用例 × 2 脚本）
+bash test/dump_cmd_default.sh > /tmp/after2.txt
+diff test/baseline/cmd_before.txt /tmp/after2.txt       # 7 个命令级用例
+
+# 2) 验证套件
+python verify/verify_cuda_scale.py        # CUDA 缩放链 + 策略生成
+python verify/verify_scale_algo.py        # --scale-algo 解析
+python verify/verify_pixfmt_bitdepth.py   # --pix-fmt × --bit-depth 的「能落地者赢」
+python verify/verify_cuda_decode_codec.py # 按源编解码器的硬解确认（AV1）
+python verify/verify_hwupload_worth.py    # auto 缩放的 hwupload 门槛
+bash   verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
+```
+
+上机探针（**需要 NVIDIA GPU**；没有就只能跑装置自检）：
+
+```bash
+SELFTEST=1 bash probe/probe_scale_cuda_crop.sh             # 只验计时/汇总装置，CPU-only
+PROBE_VMAF=1 bash probe/probe_scale_cuda_crop.sh <源视频>   # 完整判据 A/B/C/D/Q
+```
+
+> 测试素材与探针工作目录都在 `temp/`（gitignored），**不入库**；
+> `verify/*.py` 需要 fixture 时会用 lavfi 按需生成。
 
 ---
 

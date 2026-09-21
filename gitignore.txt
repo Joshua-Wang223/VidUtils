@@ -17,3 +17,7 @@ interp_2x/
 # —— 本地临时目录（测试素材 / 中间产物，别入库；同理已在 tar_excludes.txt 里）——
 temp/
 tmp/
+# 探针的工作目录（SELFTEST / 运行产物会真写 mp4/mkv）。正常指向 temp/ 下，
+# 这两条是兜底：WORK 被改回脚本目录、或有人手工在仓库里跑探针时，产物也不会入库。
+chroma_work/
+probe_scale_cuda/

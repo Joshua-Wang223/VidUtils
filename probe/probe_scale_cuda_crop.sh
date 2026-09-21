@@ -75,7 +75,10 @@ T_H=${TARGET#*x*}
 [[ "$T_W" =~ ^[0-9]+$ && "$T_H" =~ ^[0-9]+$ ]] \
   || { echo "[ERROR] --target 格式应为 WxH（如 1440x1080 / 720x480），收到 '$TARGET'"; exit 2; }
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-WORK="$HERE/probe_scale_cuda"
+# 工作目录放**仓库根的 temp/**（gitignored）：放在 probe/ 下会让探针产物
+# （*.min / *.mkv / SELF_*）被 `git add probe/` 顺手带进仓库 —— 已经踩过一次。
+# 探针不在仓库里跑时 dirname 只是个普通父目录，脚本照跑，产物落在它旁边。
+WORK="$(dirname "$HERE")/temp/probe_scale_cuda"
 mkdir -p "$WORK"
 
 dim() { "$FP" -v error -select_streams v:0 -show_entries stream=width,height,pix_fmt \

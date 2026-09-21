@@ -3395,7 +3395,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--pix-fmt",
         default="auto",
-        help="输出像素格式；auto=大多数编码器 yuv420p，ProRes 为 yuv422p10le；可填 none 禁用",
+        help="输出像素格式；auto=大多数编码器 yuv420p，ProRes 为 yuv422p10le；"
+             "可填 none 禁用。与 --bit-depth 语义重叠（格式名已含位深）："
+             "需要特定色度/排布（4:4:4 / 4:2:2 等）时用它，"
+             "只关心位深请改用 --bit-depth",
     )
     ap.add_argument(
         "--bit-depth",
@@ -3405,7 +3408,8 @@ def parse_args() -> argparse.Namespace:
         help="目标位深：8 / 10 / 12（默认 auto=继承源）。按编码器选对应像素格式"
              "（如 libx265 的 10bit → yuv420p10le，hevc_nvenc → p010le）；"
              "h264_nvenc 只支持 8bit，要求 10bit+ 时会告警并降 8bit。"
-             "与 --pix-fmt 语义重叠：显式给了 --pix-fmt 时以它为准，本参数被忽略",
+             "与 --pix-fmt 语义重叠：同时给出时以 --pix-fmt 为准；"
+             "只关心位深时建议只用本参数——格式名要跟着编码器走，位深不用",
     )
 
     ap.add_argument(
@@ -3577,15 +3581,20 @@ def validate_and_finalize_args(args: argparse.Namespace) -> None:
                          f"  用 `ffmpeg -pix_fmts` 查看可用列表（取 NAME 列）。")
 
     # --bit-depth：None 即 auto（继承源）。给了非 8/10/12 的值直接报错。
-    # 与 --pix-fmt 语义重叠（格式名里已含位深）→ 以 --pix-fmt 为准并提示，
-    # 免得用户以为位深没生效。与 vidcrop_hwaccel.py 的处理一致。
+    # 与 --pix-fmt 语义重叠（格式名里已含位深），但不在同一层级：--pix-fmt 是实现级
+    # （需要特定色度/排布时用它），--bit-depth 是意图级（只要位深就用它，编码器会
+    # 自动选对格式名）。本脚本是纯 CPU 路径、帧格式与编码器一一对应，没有
+    # vidcrop_hwaccel.py 那种"格式名合法性随链变化"的问题（那边多一步
+    # "落不了地由 --bit-depth 接管"），所以这里以 --pix-fmt 为准并明确告知。
     if args.bit_depth is not None and args.bit_depth not in _BIT_DEPTH_CHOICES:
         raise ValueError(
             f"--bit-depth 只支持 {' / '.join(str(d) for d in _BIT_DEPTH_CHOICES)}"
             f"（不指定即 auto=继承源），收到 {args.bit_depth}。")
     if args.bit_depth is not None and _pf_arg not in ("auto", "none"):
         print("提示：--pix-fmt " + str(args.pix_fmt) + " 与 --bit-depth "
-              + str(args.bit_depth) + " 语义重叠，已按 --pix-fmt 为准，忽略 --bit-depth。")
+              + str(args.bit_depth) + " 语义重叠（格式名已含位深）：以 --pix-fmt 为准，"
+              "忽略 --bit-depth。")
+        print("      只关心位深时建议直接用 --bit-depth——格式名要跟着编码器走，位深不用。")
 
     # --hdr：解析校验 + 能力探测（tone mapping 需要 zscale 与 tonemap）
     try:

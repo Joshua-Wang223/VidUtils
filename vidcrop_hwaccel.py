@@ -1579,6 +1579,33 @@ def _cuda_pixfmt_hint(req_pf: str) -> str:
             + (f'，会自动配 -profile:v {prof}' if prof else '') + '）')
 
 
+def _pixfmt_shape(name: str) -> Tuple[int, str]:
+    """从像素格式名解析 (位深, 色度采样)，用于判断"让位"是否伴随信息损失。
+
+    `--pix-fmt` 落不了地、改由 `--bit-depth` 接管时，两者的差异必须说清：
+    `yuv420p10le` → `p010le` 是同一个东西（无损失），而 `yuv444p` → `p010le`
+    是把 4:4:4 降成了 4:2:0（有损失，strict 下要报错）。所以要能比对"形状"。
+
+    只覆盖 yuv* / yuvj* / p0* / nv12 这一族名字；认不出的返回 (8, '')，
+    调用方按"形状不同"保守处理——宁可多报一次降级，也不少报。
+    """
+    n = (name or '').strip().lower()
+    if n.startswith('p0') and len(n) >= 4 and n[2:4].isdigit():
+        depth = int(n[2:4])                     # p010le → 10、p012le → 12
+    elif len(n) >= 5 and n[-2:] in ('le', 'be') and n[-4:-2].isdigit():
+        depth = int(n[-4:-2])                   # yuv420p10le → 10
+    else:
+        depth = 8                               # yuv420p / nv12 / yuv444p
+    chroma = ''
+    for tag in ('444', '422', '420'):
+        if tag in n:
+            chroma = tag                        # yuv420p10le → 420
+            break
+    if not chroma and (n.startswith('nv12') or n.startswith('p0')):
+        chroma = '420'                          # 半 planar 的 4:2:0
+    return depth, chroma
+
+
 def validate_output_dimensions(width: int, height: int,
                                pix_fmt: Optional[str]) -> None:
     """校验输出尺寸与像素格式的奇偶约束（与 vidcrop_cpu_v2.py 的同名函数一致）。
@@ -3264,11 +3291,25 @@ def build_ffmpeg_cmd(
     if _sp and _is_sw_codec:
         vf_filter = f'{vf_filter},{_sp}'
 
-    # ── --pix-fmt：显式指定时的落地 ────────────────────────────────────
+    # ── --pix-fmt / --bit-depth：显式指定时的落地 ──────────────────────
     # auto 完全沿用下面「[META-KEEP] 位深继承」那段既有逻辑（10bit 源才下发、
-    # NVENC 内部再分），所以不传 --pix-fmt 时命令与改动前逐字相同。
+    # NVENC 内部再分），所以两个参数都不传时命令与改动前逐字相同。
+    #
+    # 两者语义重叠（格式名里已含位深），但**不在同一层级**：
+    #   · --pix-fmt   实现级：格式名 = 位深 + 色度 + 排布，信息量是超集，
+    #                 但合法性**与链相关**（零拷贝 CUDA 链只收 4 个值）。
+    #   · --bit-depth 意图级：只有位深，信息量是子集，但合法性**与链无关**
+    #                 （"10bit"在任何链上都成立，具体格式由链 + 编码器推导）。
+    # 所以"恒定让谁赢"两端都有反例：--pix-fmt 恒赢会让
+    # `--pix-fmt yuv420p10le --bit-depth 10` 双双失效（实测输出掉回 8bit nv12）；
+    # --bit-depth 恒赢会把 `--pix-fmt yuv444p --bit-depth 10` 静默降成 4:2:0。
+    # 正解是「能落地者赢」——与 --decode auto / --scale-algo auto 同一套哲学：
+    # 先让 --pix-fmt 试；它在当前链上落不了地时由 --bit-depth 接管，并把让位的
+    # 代价（位深/色度变化）明确说出来。
     _req_pf: Optional[str] = None
     _pf_handled = False
+    _pf_explicit = False        # 用户显式写了 --pix-fmt（既非 auto 也非 none）
+    _bd_declared = bit_depth is not None and bit_depth in _BIT_DEPTH_CHOICES
     if pix_fmt:
         _v = pix_fmt.strip().lower()
         if _v == 'none':
@@ -3276,9 +3317,9 @@ def build_ffmpeg_cmd(
         elif _v != 'auto':
             _req_pf = _v
             _pf_handled = True
-        elif bit_depth is not None and bit_depth in _BIT_DEPTH_CHOICES:
-            # --bit-depth 只在 --pix-fmt 保持 auto 时才生效：两者语义重叠
-            # （格式名本身已含位深），按既定决策 --pix-fmt 优先。
+            _pf_explicit = True
+        elif _bd_declared:
+            # --pix-fmt 保持 auto：--bit-depth 直接生效
             _req_pf = resolve_pix_fmt_for_depth(codec, bit_depth,
                                                 warn=_warn, policy=policy)
             _pf_handled = True
@@ -3311,19 +3352,52 @@ def build_ffmpeg_cmd(
                 _how = ('scale_cuda 只出现在 cover 模式；改用 --mode cover，'
                         '或改走软件帧链（--scale-algo libswscale-lanczos）')
         if _why:
-            # 后果必须说清：忽略后不再下发 -pix_fmt，输出格式由链上 hwdownload 的
-            # format（按源位深推导）决定 —— 所以"要 10bit 却给了 8bit 源"会真的掉位深。
-            _fallback = _src_download_fmt(src_bits)
-            _loss = ('→ 位深要求被丢弃' if _fallback == 'nv12'
-                     and _req_pf.endswith(('10le', '12le')) else '')
-            _head = f'--pix-fmt {_req_pf} 在零拷贝 CUDA 链上无法下发'
-            _tail = (f'\n     原因：{_why}'
-                     f'\n     怎么办：{_how}'
-                     f'\n     当前后果：已忽略该设置，输出按链上的 {_fallback} 走'
-                     f'（源 {src_bits}bit）{_loss}')
-            if policy == 'strict':
-                raise ValueError(_head + _tail + '\n     （--fallback-policy strict 不降级）')
-            _warn(_head + _tail)
+            # ── 让位：--pix-fmt 在本链上落不了地时，由 --bit-depth 接管 ──
+            # 只在"用户显式写了 --pix-fmt"时才谈让位：若 _req_pf 本身就是
+            # --bit-depth 推出来的，它失败说明该位深在本链上确实做不到，无路可退。
+            _bd_pf: Optional[str] = None
+            if _pf_explicit and _bd_declared:
+                _cand = resolve_pix_fmt_for_depth(codec, bit_depth,
+                                                  warn=_warn, policy=policy)
+                _cand_vf = (_apply_pix_fmt_to_cuda_filter(vf_filter, _cand)
+                            if _cand in _SCALE_CUDA_FORMATS else None)
+                if _cand_vf is not None:
+                    vf_filter = _cand_vf
+                    _cuda_profile = _SCALE_CUDA_PROFILE.get(_cand)
+                    _bd_pf = _cand
+            if _bd_pf is not None:
+                _o_d, _o_c = _pixfmt_shape(_req_pf)
+                _n_d, _n_c = _pixfmt_shape(_bd_pf)
+                _diff = []
+                if _o_d != _n_d:
+                    _diff.append(f'位深 {_o_d}→{_n_d}bit')
+                if _o_c and _n_c and _o_c != _n_c:
+                    _diff.append(f'色度 {":".join(_o_c)}→{":".join(_n_c)}')
+                _msg = (f'--pix-fmt {_req_pf} 在零拷贝 CUDA 链上无法下发，'
+                        f'已改由 --bit-depth {bit_depth} 接管：'
+                        f'scale_cuda=…:format={_bd_pf}'
+                        + ('（同为该链原生格式，无信息损失）' if not _diff
+                           else f'（注意：{" / ".join(_diff)}）'))
+                if _diff and policy == 'strict':
+                    raise ValueError(_msg + '\n     （--fallback-policy strict 不降级）')
+                _warn(_msg)
+            else:
+                # 后果必须说清：忽略后不再下发 -pix_fmt，输出格式由链上 hwdownload 的
+                # format（按源位深推导）决定 —— 所以"要 10bit 却给了 8bit 源"会真的掉位深。
+                _fallback = _src_download_fmt(src_bits)
+                _loss = ('→ 位深要求被丢弃' if _fallback == 'nv12'
+                         and _req_pf.endswith(('10le', '12le')) else '')
+                # 标题按来源写：--bit-depth 推出来的格式失败时说成 --pix-fmt 会误导
+                _head = (f'--pix-fmt {_req_pf} 在零拷贝 CUDA 链上无法下发' if _pf_explicit
+                         else f'--bit-depth {bit_depth} 推出的 {_req_pf}'
+                              f' 在零拷贝 CUDA 链上无法下发')
+                _tail = (f'\n     原因：{_why}'
+                         f'\n     怎么办：{_how}'
+                         f'\n     当前后果：已忽略该设置，输出按链上的 {_fallback} 走'
+                         f'（源 {src_bits}bit）{_loss}')
+                if policy == 'strict':
+                    raise ValueError(_head + _tail + '\n     （--fallback-policy strict 不降级）')
+                _warn(_head + _tail)
         _req_pf = None                          # 无论成功与否都不再下发 -pix_fmt
 
     # 视频滤镜 & 编码器
@@ -3361,7 +3435,8 @@ def build_ffmpeg_cmd(
         cmd += ['-profile:v', _cuda_profile]
 
     # [META-KEEP] 位深继承：10bit 源不再被降为 8bit。
-    # 显式给了 --pix-fmt 就以它为准；'none' 或已在 CUDA 链上处理过则整段跳过。
+    # 显式给了 --pix-fmt / --bit-depth 就以它们为准（_pf_handled 已置位）；
+    # 'none'，或已在 CUDA 链上经 scale_cuda=format= 处理过，也整段跳过。
     if _req_pf is not None:
         cmd += ['-pix_fmt', _req_pf]
     elif not _pf_handled and meta is not None and src_bits >= 10:
@@ -4232,16 +4307,20 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                              '注：零拷贝 CUDA 链（-hwaccel_output_format cuda）不能传 -pix_fmt'
                              '（实测 Impossible to convert），该链上改格式会用 '
                              'scale_cuda=format= 并自动配 -profile:v；'
-                             'scale_cuda 仅支持 nv12 / yuv420p / yuv444p / p010le，'
-                             '其它格式按 --fallback-policy 处理')
+                             'scale_cuda 仅支持 nv12 / yuv420p / yuv444p / p010le。'
+                             '与 --bit-depth 语义重叠：本参数是实现级（要特定色度/排布'
+                             '时用它），在零拷贝链上落不了地时由 --bit-depth 接管；'
+                             '只关心位深请直接用 --bit-depth——格式名是链相关的，位深不是')
     parser.add_argument('--bit-depth', type=int, default=None, metavar='N',
                         help='目标位深：8 / 10 / 12（默认 auto=继承源）。'
                              '按编码器选对应像素格式（如 libx265 的 10bit → '
                              'yuv420p10le，hevc_nvenc → p010le）；'
                              'h264_nvenc 只支持 8bit，要求 10bit+ 时会告警并降 8bit'
                              '（--fallback-policy strict 下改为报错）。'
-                             '注意：与 --pix-fmt 语义重叠——显式给了 --pix-fmt 时'
-                             '以 --pix-fmt 为准，本参数被忽略（会提示）')
+                             '注意：与 --pix-fmt 语义重叠——同时给出时优先按 --pix-fmt 落地，'
+                             '它在当前链上不可用（如零拷贝 CUDA 链只收 4 种格式）时改由本参数'
+                             '接管，让位的代价会明确提示。只关心位深时建议只用本参数，'
+                             '链和编码器会自动选对格式名')
     parser.add_argument('--hdr', default='auto', metavar='MODE',
                         help='HDR 处理（默认 auto）：'
                              'auto/keep=尽力保留 HDR10 静态元数据'
@@ -4390,11 +4469,17 @@ def main() -> int:
         print(f'[ERROR] --bit-depth 只支持 {" / ".join(str(d) for d in _BIT_DEPTH_CHOICES)}'
               f'（不指定即 auto=继承源），收到 {args.bit_depth}。', file=sys.stderr)
         return 2
-    # 两个参数语义重叠（格式名里已含位深）：按决策以 --pix-fmt 为准，并明确告知，
-    # 免得用户以为位深没生效。
+    # 两个参数语义重叠（格式名里已含位深），但不在同一层级：--pix-fmt 是实现级
+    # （要特定色度/排布时用它），--bit-depth 是意图级（只要位深就用它，链和编码器
+    # 会自动选对格式名）。同时给出时先按 --pix-fmt 落地，它在当前链上不可用时
+    # 再由 --bit-depth 接管——所以这里不能说"忽略 --bit-depth"（那正是曾经的误导：
+    # 两个参数会一起失效，用户却以为 --pix-fmt 生效了）。
     if args.bit_depth is not None and _pf_arg not in ('auto', 'none'):
-        print(f'提示：--pix-fmt {args.pix_fmt} 与 --bit-depth {args.bit_depth} 语义重叠，'
-              f'已按 --pix-fmt 为准，忽略 --bit-depth。')
+        print(f'提示：--pix-fmt {args.pix_fmt} 与 --bit-depth {args.bit_depth} 语义重叠'
+              f'（格式名已含位深）：优先按 --pix-fmt 落地，它在当前链上不可用时'
+              f'（如零拷贝 CUDA 链只收 {" / ".join(_SCALE_CUDA_FORMATS)}）'
+              f'由 --bit-depth {args.bit_depth} 接管。')
+        print('      只关心位深时建议直接用 --bit-depth——格式名是链相关的，位深不是。')
     # --hdr：解析校验 + 能力探测（tone mapping 需要 zscale 与 tonemap 两个滤镜）
     try:
         _hdr_mode, _hdr_algo = parse_hdr_spec(args.hdr)

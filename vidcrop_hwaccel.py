@@ -2593,6 +2593,27 @@ def _build_crop_filter_str(orig_w: int, orig_h: int, out_w: int, out_h: int,
     return f'{fname}={out_w}:{out_h}:{x}:{y}'
 
 
+def _cover_scale_dims(src_w: int, src_h: int, dst_w: int, dst_h: int) -> Tuple[int, int]:
+    """cover 链「缩放之后、裁剪之前」的尺寸（CPU / CUDA 两侧共用的一套几何）。
+
+    源更宽 → 以高度为基准缩放、宽按比例取偶；源更高 → 以宽度为基准；
+    比例相同 → 直接就是目标尺寸。`-2` 的取偶语义在这里显式算出来
+    （CUDA 链必须写显式尺寸，见 _build_cover_cuda_filter_str）。
+
+    也用来回答「这次缩放是不是恒等操作」——恒等时缩放成本为 0，
+    显存内缩放就没有可省的东西，只剩上载开销（实测必亏）。
+    """
+    if src_w <= 0 or src_h <= 0:
+        return dst_w, dst_h
+    src_ratio = src_w / src_h
+    dst_ratio = dst_w / dst_h
+    if abs(src_ratio - dst_ratio) < 1e-3:
+        return dst_w, dst_h
+    if src_ratio > dst_ratio:
+        return derive_even_dimension(src_w * dst_h / src_h), dst_h
+    return dst_w, derive_even_dimension(src_h * dst_w / src_w)
+
+
 def _build_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
                             sw_algo: str = _SW_SCALE_FLAGS) -> str:
     """
@@ -2653,26 +2674,13 @@ def _build_cover_cuda_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
         return f'{prefix}scale_cuda={w}:{h}:interp_algo={cuda_algo}'
 
     dl = f'hwdownload,format={download_fmt}'
-    if src_w <= 0 or src_h <= 0:
-        return f'{_sc(dst_w, dst_h)},{dl}'
-
-    src_ratio = src_w / src_h
-    dst_ratio = dst_w / dst_h
-
-    if abs(src_ratio - dst_ratio) < 1e-3:
-        # 比例完全一致：只缩放不裁剪
-        return f'{_sc(dst_w, dst_h)},{dl}'
-    if src_ratio > dst_ratio:
-        # 源比目标更宽：以高度为基准缩放，左右裁剪
-        sw = derive_even_dimension(src_w * dst_h / src_h)
-        sh = dst_h
-        crop = f',crop={dst_w}:{dst_h}:(iw-{dst_w})/2:0'
-    else:
-        # 源比目标更高（或更窄）：以宽度为基准缩放，上下裁剪
-        sw = dst_w
-        sh = derive_even_dimension(src_h * dst_w / src_w)
-        crop = f',crop={dst_w}:{dst_h}:0:(ih-{dst_h})/2'
-    return f'{_sc(sw, sh)},{dl}{crop}'
+    sw, sh = _cover_scale_dims(src_w, src_h, dst_w, dst_h)
+    if src_w <= 0 or src_h <= 0 or abs(src_w / src_h - dst_w / dst_h) < 1e-3:
+        # 源未知，或比例完全一致：只缩放不裁剪
+        return f'{_sc(sw, sh)},{dl}'
+    if src_w / src_h > dst_w / dst_h:
+        return f'{_sc(sw, sh)},{dl},crop={dst_w}:{dst_h}:(iw-{dst_w})/2:0'
+    return f'{_sc(sw, sh)},{dl},crop={dst_w}:{dst_h}:0:(ih-{dst_h})/2'
 
 
 def _build_crop_cover_filter_str(src_w: int, src_h: int, dst_w: int, dst_h: int,
@@ -3033,6 +3041,34 @@ def _combo_hint(hwaccel: Optional[str], cuda_scale: bool, hwupload: bool,
     return ''
 
 
+def _hwupload_skip_reason(src_bits: int, scale_identity: bool) -> Optional[str]:
+    """`--scale-algo auto` 在软解时**不**回退到 hwupload 链的理由（None = 该回退）。
+
+    依据 T4 实测（两批共 12 组素材，见 memory/project_cuda_scale_cover.md 判据 D）：
+
+      · 源 ≥10bit **且真在缩放** → 上传链快 14~25%
+        （4K 10bit +16.5% / +19.3%；720p 10bit +25.0%）
+      · 8bit + 真在缩放          → 打平或更慢
+        （4K 8bit +0.3% / +0.4%；720p 8bit −9.0% / −14.3%；SD −0.3% ~ −1.6%）
+      · 恒等缩放（**无论位深**） → 一定亏
+        （−1.6% ~ −34.7%；注意 10bit 恒等也是 −22.0%）
+
+    机理：上载 / 回下载的开销基本固定，而 p010le 的 CPU 缩放比 8bit 贵得多；
+    恒等缩放时 CPU 侧本来就没有重采样成本可省 —— 所以只有"高位深 + 真的省下缩放"
+    两项同时成立才划算。
+
+    只用来管 **auto**：显式 `--scale-algo cuda-*` 是用户点名要的，照旧直接执行
+    （执行效果用户自负），与既有的"显式不跑功能探针"约定一致。
+    """
+    if scale_identity:
+        return ('这次是恒等缩放（源尺寸 == 缩放后尺寸），显存内缩放没有可省的重采样，'
+                '只剩上载开销 —— 实测恒等时反而慢 1.6%~34.7%')
+    if src_bits < 10:
+        return (f'源是 {src_bits}bit，上传链的收益要到 10bit+ 才显现'
+                f'（8bit 实测打平或更慢，最差 −14%）')
+    return None
+
+
 def _generate_strategies(
     user_codec: str,
     hw_caps: HardwareCapabilities,
@@ -3041,6 +3077,8 @@ def _generate_strategies(
     scale_backend: str = 'auto',
     policy: str = 'auto',
     src_codec: str = '',
+    src_bits: int = 8,
+    scale_identity: bool = False,
 ) -> List[Dict]:
     """
     根据**三个正交轴**（解码 --decode / 缩放 --scale-algo / 编码 --codec）与处理模式
@@ -3054,6 +3092,10 @@ def _generate_strategies(
     「本机的 CUDA 硬解能不能解这个源」。它不参与"三轴"语义——硬件解码是否可用
     本来就是**具体到编解码器**的事实（T4 能解 H.264 但解不了 AV1），不传时按
     `has_decoder` 乐观处理，行为与改动前逐字相同。
+
+    src_bits / scale_identity 只用于 `--scale-algo auto` 的"值不值得"门槛：
+    软解时是否回退到 hwupload 链由 `_hwupload_skip_reason()` 判（10bit+ 且真在
+    缩放才划算，见那里的实测依据）。默认值让不传的调用方行为不变。
 
     每个策略字段：
         name                  描述名称
@@ -3135,7 +3177,12 @@ def _generate_strategies(
         # 显式 cuda-* 只要求滤镜存在——直接执行，失败由 --fallback-policy 处理。
         _up_ok = (hw_caps.can_cuda_scale_upload() if scale_backend == 'auto'
                   else hw_caps.has_cuda_scale)
-        _up = _want_cuda and not _zc and _up_ok
+        # auto 还要过"值不值得"这一关：实测 8bit 打平或更慢、恒等缩放必亏，
+        # 只有「≥10bit 且真在缩放」才划算（见 _hwupload_skip_reason）。
+        # 显式 cuda-* 不看这一条——用户点名要的，直接执行。
+        _up_skip = (_hwupload_skip_reason(src_bits, scale_identity)
+                    if scale_backend == 'auto' else None)
+        _up = _want_cuda and not _zc and _up_ok and _up_skip is None
         if _zc:
             strategies.append({
                 'name':                  'CUDA 缩放 + CPU 裁剪（显存内缩放）',
@@ -3992,10 +4039,26 @@ def process_file(
             print(f'  ⚠ 源编解码器 {_src_codec} 在本机无法 CUDA 硬解（NVDEC 不支持），'
                   f'本文件按软解处理')
 
+    # 这次缩放是不是**恒等操作**（源尺寸 == 缩放后尺寸）：CUDA 缩放链只在 cover 模式
+    # 生效，恒等时 CPU 侧本来就没有重采样成本可省 → 显存内缩放无利可图。
+    _cover_w, _cover_h = _cover_scale_dims(actual_width, actual_height,
+                                           out_width, out_height)
+    _scale_identity = (mode == 'cover'
+                       and (_cover_w, _cover_h) == (actual_width, actual_height))
+
     # ── 生成策略链 ──
     all_strategies = _generate_strategies(codec, hw_caps, decode, mode=mode,
                                           scale_backend=scale_backend, policy=policy,
-                                          src_codec=_src_codec)
+                                          src_codec=_src_codec,
+                                          src_bits=_src_bits,
+                                          scale_identity=_scale_identity)
+
+    # auto 缩放在软解时可能因为"不划算"而主动不走 hwupload 链 —— 不说清楚会被当成 bug。
+    if mode == 'cover' and scale_backend == 'auto' and decode == 'cpu':
+        _skip = _hwupload_skip_reason(_src_bits, _scale_identity)
+        if _skip:
+            print(f'  提示：--scale-algo auto 本次不走 hwupload 显存缩放链 —— {_skip}；'
+                  f'要强制使用请显式写 --scale-algo cuda-lanczos')
 
     # ── Dry-run 模式：打印最优策略命令后返回 ──
     if dry_run:

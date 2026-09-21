@@ -533,6 +533,10 @@ class HardwareCapabilities:
         # 功能探针：软解路径的「hwupload_cuda → scale_cuda → hwdownload」真能跑通吗。
         # 与 has_cuda_scale（只是 `-filters` 里有这个滤镜名）是两件事，见下面谓词的注释。
         self.cuda_scale_upload_ok = False
+        # 按**源编解码器**的硬解实测结论：codec_name（h264 / hevc / av1 …）→ 能否硬解。
+        # has_decoder 只是"H.264 能硬解"的机器级结论；NVDEC 的能力分编解码器
+        # （T4 解不了 AV1），所以每个源 codec 各自确认一次，见 cuda_decodes()。
+        self.cuda_decode_ok: Dict[str, bool] = {}
         self.has_vulkan        = False
         self.has_vaapi         = False
         self.has_opencl        = False
@@ -552,6 +556,23 @@ class HardwareCapabilities:
 
     def has_any_encoder(self) -> bool:
         return self.has_encoder_h264 or self.has_encoder_hevc or self.has_encoder_av1
+
+    def cuda_decodes(self, src_codec: str = '') -> bool:
+        """本机的 CUDA 硬解能不能解这个**源编解码器**（不是"这个编码器"）。
+
+        与 has_decoder 的分工：`has_decoder` = "机器有可用的 CUDA 硬解"，但它是由
+        **H.264 微流**探出来的；NVDEC 的解码能力分编解码器（T4/Turing 解不了 AV1），
+        所以这里再叠一层"该 codec 实测能解"。
+
+        未探测过（字典里没这个 codec）时按 has_decoder **乐观**处理——这样不传
+        src_codec 的既有调用方（如 --list-strategies）行为逐字不变，只有实测失败的
+        codec 才会降级。
+        """
+        if not self.has_decoder:
+            return False
+        if not src_codec:
+            return True
+        return self.cuda_decode_ok.get(src_codec.strip().lower(), True)
 
     def can_full_pipeline(self, codec: str) -> bool:
         """全 GPU 流水线：硬解 + crop_cuda + NVENC 编码（仅 crop 模式可用）。"""
@@ -685,9 +706,31 @@ def _probe_stream_args(size_str: str) -> List[str]:
     ]
 
 
+# CUDA 解码探针判定"失败"的关键词。抽成常量是因为有**两处**探针要用
+# （机器级的 _check_cuda_decoder_available 与 按源编解码器的 _probe_cuda_decode_codec），
+# 各写一份必然慢慢漂移。
+_CUDA_ERROR_MARKERS = (
+    'cannot load libnvcuvid', 'failed loading nvcuvid',
+    'cannot load nvcuda', 'failed to load nvcuda',
+    'device creation failed',
+    'hardware device setup failed',
+    'could not dynamically load cuda',
+    'no device available for decoder',
+    'hwaccel initialisation returned error',
+    'no cuda capable devices',
+    'does not support device type cuda',
+    'cuda_error_no_device',
+    'operation not permitted',
+)
+
+
 def _check_cuda_decoder_available(ffmpeg_bin: str = 'ffmpeg',
                                     diagnostics: bool = False) -> bool:
-    """运行时探测 CUDA 硬件解码：生成微型 H.264 流后以 -hwaccel cuda 解码。
+    """运行时探测 CUDA 硬件解码：生成微型 **H.264** 流后以 -hwaccel cuda 解码。
+
+    ⚠ 本函数只证明「H.264 能硬解」，所以它得到的是**编解码器无关的机器级标志**。
+    NVDEC 的解码能力其实是分编解码器的（T4/Turing 解不了 AV1），判断"某个源能不能
+    硬解"必须另用 `_probe_cuda_decode_codec()` 拿真实输入试解 1 帧——见 `cuda_decodes()`。
 
     新增：支持多分辨率探针（64×64、192×192、320×240），避免尺寸特定问题；
          diagnostics=True 时输出详细错误信息，帮助定位环境缺陷。
@@ -722,23 +765,10 @@ def _check_cuda_decoder_available(ffmpeg_bin: str = 'ffmpeg',
             r2 = subprocess.run(test, capture_output=True, text=True, timeout=15,
                                stdin=subprocess.DEVNULL, env=_ffmpeg_env())
             err = (r2.stderr or '').lower()
-            cuda_errors = [
-                'cannot load libnvcuvid', 'failed loading nvcuvid',
-                'cannot load nvcuda', 'failed to load nvcuda',
-                'device creation failed',
-                'hardware device setup failed',
-                'could not dynamically load cuda',
-                'no device available for decoder',
-                'hwaccel initialisation returned error',
-                'no cuda capable devices',
-                'does not support device type cuda',
-                'cuda_error_no_device',
-                'operation not permitted',
-            ]
-            if any(e in err for e in cuda_errors):
+            if any(e in err for e in _CUDA_ERROR_MARKERS):
                 errors_by_res[label] = (
                     '检测到 CUDA 错误: '
-                    + _extract_ffmpeg_error(r2.stderr, cuda_errors)
+                    + _extract_ffmpeg_error(r2.stderr, list(_CUDA_ERROR_MARKERS))
                 )
             else:
                 if diagnostics:
@@ -1010,6 +1040,42 @@ def detect_cuda_capabilities(ffmpeg_bin: str = 'ffmpeg',
             print(f'  · {_n}')
 
     return caps
+
+
+def _probe_cuda_decode_codec(ffmpeg_bin: str, input_file,
+                             timeout: int = 30) -> bool:
+    """用**真实输入**试解 1 帧，判断本机的 CUDA 硬解能不能解这个源。
+
+    为什么不复用 `_check_cuda_decoder_available()`：那个探针是拿 **H.264 微流**跑的，
+    结论只是"H.264 能硬解"。而 NVDEC 的解码能力是**分编解码器**的——T4（Turing，
+    第 4 代 NVDEC）能解 H.264 / HEVC / VP9 / MPEG-2/4 / VC-1，但**解不了 AV1**
+    （要 Ampere 起的第 5 代）。拿机器级标志去推断"这个源能硬解"会误判，后果不止
+    多一次无用尝试：
+      · `--decode auto` 会选到 cuda → 每个该编码的文件都白跑一次必然失败的链；
+      · `--fallback-policy strict` 下更糟：首选策略失败且不降级 → 直接退出 2，
+        而这条素材走软解其实完全可行。
+    实测（2026-09-20 T4 + AV1 素材）：
+      `[av1 @ ...] Failed setup for format cuda: hwaccel initialisation returned error`
+
+    判据是"真的解一帧"：rc == 0 且 stderr 里没有 CUDA 类错误关键词。比查
+    `ffmpeg -decoders` 列表可靠——表里有 `av1_cuvid` 只说明它**编译进来了**，
+    不代表这台设备的 NVDEC 支持它。`-f null` 不落盘、`-frames:v 1` 只解一帧，
+    成本在几十毫秒量级；结果由调用方按 codec 名缓存，一批文件只探一次。
+    """
+    cmd = [
+        ffmpeg_bin, '-nostdin', '-y', '-hide_banner', '-loglevel', 'error',
+        '-hwaccel', 'cuda', '-hwaccel_device', '0',
+        '-i', str(input_file), '-frames:v', '1', '-f', 'null', '-',
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL, env=_ffmpeg_env())
+    except Exception:
+        return False
+    if r.returncode != 0:
+        return False
+    err = (r.stderr or '').lower()
+    return not any(e in err for e in _CUDA_ERROR_MARKERS)
 
 
 def _probe_cuda_scale_upload(ffmpeg_bin: str = 'ffmpeg') -> bool:
@@ -2884,9 +2950,16 @@ def _get_software_fallback(codec: str) -> str:
     return 'libx264'
 
 
-def _select_best_hwaccel(hw_caps: HardwareCapabilities) -> Optional[str]:
-    """按 CUDA > Vulkan > VA-API > OpenCL 优先级选择最佳硬件加速器。"""
-    if hw_caps.has_decoder:
+def _select_best_hwaccel(hw_caps: HardwareCapabilities,
+                         src_codec: str = '') -> Optional[str]:
+    """按 CUDA > Vulkan > VA-API > OpenCL 优先级选择最佳硬件加速器。
+
+    src_codec 是**源流的编解码器名**（h264 / hevc / av1 …）：CUDA 那一档走
+    `cuda_decodes()`，因为 NVDEC 的解码能力分编解码器（T4 解不了 AV1）。
+    其余后端暂不加同类判据——本项目没有它们存在编解码器级差异的实测证据，
+    不凭猜测加约束。
+    """
+    if hw_caps.cuda_decodes(src_codec):
         return 'cuda'
     if hw_caps.has_vulkan:
         return 'vulkan'
@@ -2902,7 +2975,8 @@ def _select_best_hwaccel(hw_caps: HardwareCapabilities) -> Optional[str]:
 _DECODE_SW_FRAME_BACKENDS = ('vulkan', 'vaapi', 'opencl')
 
 
-def _decode_hwaccel(decode: str, hw_caps: HardwareCapabilities) -> Optional[str]:
+def _decode_hwaccel(decode: str, hw_caps: HardwareCapabilities,
+                    src_codec: str = '') -> Optional[str]:
     """解码轴 → `-hwaccel` 的实际取值（None = 软解、不下发）。
 
     **`auto` 与 `--scale-algo auto` 是同一套逻辑：先探测、再定，探测不到就降级 cpu。**
@@ -2911,13 +2985,20 @@ def _decode_hwaccel(decode: str, hw_caps: HardwareCapabilities) -> Optional[str]
     一个都没有就明确走软解（不下发 `-hwaccel`），与 `--scale-algo auto` 的
     「优先 cuda、失败回退 cpu」对称。
 
+    src_codec 透传给 `_select_best_hwaccel()`：`--decode auto` 的探测必须按**源编解码器**
+    做，否则"机器能硬解"会被误当成"这个源能硬解"（T4 上 AV1 就是这么被误判的）。
+
     顺序沿用既有的 `_select_best_hwaccel()`：CUDA > Vulkan > VA-API > OpenCL。
     `auto` 不是显式请求，所以探测不到时只是降级，不算"够不到"（不触发 strict 报错）。
     """
     if decode == 'auto':
-        return _select_best_hwaccel(hw_caps)
+        return _select_best_hwaccel(hw_caps, src_codec)
     if decode == 'cpu':
         return None
+    if decode == 'cuda':
+        # 显式点 cuda 时同样要按源 codec 判：解不了就该返回 None，让上层按
+        # --fallback-policy 走"显式后端够不到"的既有分支（auto 降级 / strict 报错）。
+        return decode if hw_caps.cuda_decodes(src_codec) else None
     return decode if hw_caps.has_hwaccel(decode) else None
 
 
@@ -2959,6 +3040,7 @@ def _generate_strategies(
     mode: str = 'crop',
     scale_backend: str = 'auto',
     policy: str = 'auto',
+    src_codec: str = '',
 ) -> List[Dict]:
     """
     根据**三个正交轴**（解码 --decode / 缩放 --scale-algo / 编码 --codec）与处理模式
@@ -2967,6 +3049,11 @@ def _generate_strategies(
     轴之间没有冲突检查：每个轴各自决定「要用哪个后端」，本函数只把它们拼成链。
     policy='strict' 时**不追加降级策略**（只留首选策略），执行失败由上层直接报错退出；
     policy='auto' 时逐级降级。
+
+    src_codec 是**源流的编解码器名**（h264 / hevc / av1 …），只用于回答一个问题：
+    「本机的 CUDA 硬解能不能解这个源」。它不参与"三轴"语义——硬件解码是否可用
+    本来就是**具体到编解码器**的事实（T4 能解 H.264 但解不了 AV1），不传时按
+    `has_decoder` 乐观处理，行为与改动前逐字相同。
 
     每个策略字段：
         name                  描述名称
@@ -2994,7 +3081,7 @@ def _generate_strategies(
     # 用户显式指定非 NVENC 的具体编码器，软件策略沿用该编码器
     sw_codec = user_codec if (not is_nvenc and user_codec != 'auto') else sw_fallback
 
-    decode_hw = _decode_hwaccel(decode, hw_caps)
+    decode_hw = _decode_hwaccel(decode, hw_caps, src_codec)
 
     # ── 策略 1：全 GPU 流水线（硬解 + crop_cuda + NVENC 编码）──
     # cover / crop-cover 模式需要 scale 步骤，crop_cuda 不支持，
@@ -3002,6 +3089,7 @@ def _generate_strategies(
     if (decode != 'cpu'
             and mode == 'crop'
             and is_nvenc
+            and hw_caps.cuda_decodes(src_codec)
             and hw_caps.can_full_pipeline(preferred_codec)):
         strategies.append({
             'name':                  'CUDA 全加速（硬解 + crop_cuda + NVENC 编码）',
@@ -3040,7 +3128,7 @@ def _generate_strategies(
                       or (scale_backend == 'auto' and decode == 'cpu'))
         # auto 缩放保持既有判据（含 NVENC 门，字节级不变）；显式 cuda-* 时放宽到
         # 「任何编码器」——链尾本来就是软件帧，硬编/软编都接得住。
-        _zc_direct = (hw_caps.has_decoder and hw_caps.has_cuda_scale
+        _zc_direct = (hw_caps.cuda_decodes(src_codec) and hw_caps.has_cuda_scale
                       and (is_nvenc if scale_backend == 'auto' else True))
         _zc = decode != 'cpu' and _zc_direct
         # auto 缩放要求功能探针通过（免得自动选到一条必然失败的链）；
@@ -3096,7 +3184,9 @@ def _generate_strategies(
 
     # ── 策略 3：指定硬件加速解码 + 软件编码 ──
     specific_hwaccels = ('cuda', 'vulkan', 'vaapi', 'opencl')
-    if decode in specific_hwaccels and hw_caps.has_hwaccel(decode):
+    _hw3_ok = (hw_caps.cuda_decodes(src_codec) if decode == 'cuda'
+               else hw_caps.has_hwaccel(decode))
+    if decode in specific_hwaccels and _hw3_ok:
         strategies.append({
             'name':                  f'{decode} 硬件解码 + CPU 编码',
             'hwaccel':               decode,
@@ -3108,7 +3198,7 @@ def _generate_strategies(
 
     # ── 策略 4：auto 模式下选最佳硬解 + 软件编码 ──
     if decode == 'auto':
-        best_hw = _select_best_hwaccel(hw_caps)
+        best_hw = _select_best_hwaccel(hw_caps, src_codec)
         if best_hw is not None:
             strategies.append({
                 'name':                  f'{best_hw} 硬件解码 + CPU 编码',
@@ -3877,9 +3967,35 @@ def process_file(
     # ── 预探测总帧数（供进度条使用）──
     total_frames = _get_total_frames(str(input_file), ffmpeg_bin)
 
+    # ── 按**源编解码器**确认 CUDA 硬解（NVDEC 的能力分编解码器：T4 解不了 AV1）──
+    # has_decoder 是拿 H.264 微流探出来的机器级标志，直接拿它推断"这个源能硬解"
+    # 会误判 → 每个该编码的文件都白跑一次必然失败的链；strict 下更是直接退出 2，
+    # 而软解其实完全可行。这里拿**真实输入**试解 1 帧，结果按 codec 名缓存，
+    # 同一批文件里同种编码只探一次。
+    _src_codec = ''
+    if _meta is not None:
+        _src_codec = ((_meta.get('video') or {}).get('codec_name') or '').strip().lower()
+    if (decode != 'cpu' and hw_caps.has_decoder and _src_codec
+            and _src_codec not in hw_caps.cuda_decode_ok):
+        _dec_ok = _probe_cuda_decode_codec(ffmpeg_bin, input_file)
+        hw_caps.cuda_decode_ok[_src_codec] = _dec_ok
+        if not _dec_ok:
+            # 显式点名 --decode cuda 时，这一条就是"点名的后端够不到"——与全局那段
+            # （--fallback-policy 唯一作用的所在）同语义：strict 失败、auto 降级。
+            # 改动前 strict 在这条素材上**也是失败的**（只是要先真跑一次必败的链），
+            # 所以这里不是放松语义，而是**提前失败 + 说清原因**。
+            if decode == 'cuda' and policy == 'strict':
+                print(f'  ✘ 源编解码器 {_src_codec} 在本机无法 CUDA 硬解（NVDEC 不支持）；'
+                      f'--decode cuda 是你点名的后端，--fallback-policy strict 下不降级。',
+                      file=sys.stderr)
+                return _result('failed')
+            print(f'  ⚠ 源编解码器 {_src_codec} 在本机无法 CUDA 硬解（NVDEC 不支持），'
+                  f'本文件按软解处理')
+
     # ── 生成策略链 ──
     all_strategies = _generate_strategies(codec, hw_caps, decode, mode=mode,
-                                          scale_backend=scale_backend, policy=policy)
+                                          scale_backend=scale_backend, policy=policy,
+                                          src_codec=_src_codec)
 
     # ── Dry-run 模式：打印最优策略命令后返回 ──
     if dry_run:

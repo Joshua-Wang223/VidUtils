@@ -94,7 +94,9 @@
   ⚠ **零拷贝 CUDA 链不能传 `-pix_fmt`**（实测 Impossible to convert）→ 改用
   `scale_cuda=format=` + `-profile:v`，且**紧随的 `hwdownload,format=` 必须同步改**；
   **`tonemap_cuda` 上游不存在** → `--hdr sdr` 走 CPU 的 zscale+tonemap（**未实测**）；
-  **`--pix-fmt` 优先于 `--bit-depth`**（用户决策，重叠时后者忽略并提示）
+  **`--pix-fmt`×`--bit-depth` =「能落地者赢」**（2026-09-21 修）：先按 `--pix-fmt` 落地，
+  它在当前链上不可用时由 `--bit-depth` 接管并明说让位代价（位深/色度，strict 下有损失报错）；
+  恒定让谁赢两端都有反例；判据 `temp/verify_pixfmt_bitdepth.py`
 
 ---
 

@@ -10,14 +10,14 @@
 #   而且双方都白跑。现在靠 $WORKDIR/.lock 上的 flock 挡住，这个测试就是守它。
 #
 # 用法:
-#   bash test_interp_2x_lock.sh [测试用输入视频]
-#   TEST_INPUT=/path/to/small.mp4 bash test_interp_2x_lock.sh
-#   SUT=/path/to/interp_2x_safe.sh bash test_interp_2x_lock.sh
+#   bash test/test_interp_2x_lock.sh [测试用输入视频]
+#   TEST_INPUT=/path/to/small.mp4 bash test/test_interp_2x_lock.sh
+#   SUT=/path/to/interp_2x_safe.sh bash test/test_interp_2x_lock.sh
 #
 # 退出码:  0 = 全部通过   1 = 有用例失败   2 = 环境不具备，跳过
 #
 # 环境变量:
-#   TEST_INPUT  测试输入（默认自动在 <本脚本目录>/input_videos/ 与
+#   TEST_INPUT  测试输入（默认自动在 <仓库根>/input_videos/ 与
 #               /workspace/input_videos/ 找 new5_10s.mp4）
 #   SUT         被测脚本（默认与本脚本同目录的 interp_2x_safe.sh）
 #   SEG         分片长度，默认 2 秒（越小片越多、并发窗口越大）
@@ -40,9 +40,9 @@
 # =============================================================================
 set -uo pipefail
 
-# ROOT 必须先算：SUT 的默认值要相对本脚本所在的目录解析，
+# ROOT 是**仓库根**（本脚本在 test/ 下）：SUT 默认值与素材候选都相对它解析，
 # 这样整个 VidUtils 目录搬到哪儿都能直接跑。
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SUT=${SUT:-$ROOT/interp_2x_safe.sh}
 SEG=${SEG:-2}
 FFMPEG=${FFMPEG:-/usr/local/bin/ffmpeg}

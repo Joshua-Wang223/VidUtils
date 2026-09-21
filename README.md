@@ -27,8 +27,8 @@
   - [vidls.sh — ls / ll 替代 + 视频属性探测](#vidlssh--ls--ll--替代--视频属性探测)
   - [Windows 版 vidls — ls / ll 替代（Windows）](#windows-版vidlscmd--vidls_winpy)
   - [vidll — vidls -l 的快捷方式（Linux + Windows）](#vidll--vidls--l-的快捷方式linux--windows)
-  - [test_interp_2x_lock.sh — 回归测试（并发与锁）](#test_interp_2x_locksh--回归测试并发与锁)
-  - [test_interp_2x_orphan.sh — 回归测试（中断收尾与孤儿 ffmpeg）](#test_interp_2x_orphansh--回归测试中断收尾与孤儿-ffmpeg)
+  - [test/test_interp_2x_lock.sh — 回归测试（并发与锁）](#testtest_interp_2x_locksh--回归测试并发与锁)
+  - [test/test_interp_2x_orphan.sh — 回归测试（中断收尾与孤儿 ffmpeg）](#testtest_interp_2x_orphansh--回归测试中断收尾与孤儿-ffmpeg)
 - [快速上手](#快速上手)
 - [常见场景配方](#常见场景配方)
 - [硬件加速说明](#硬件加速说明)
@@ -578,7 +578,7 @@ csv 列序是结构体固定序、跟你 `-show_entries` 里写的顺序无关�
 | 拼接失败 | 分片都还在，可手工重拼，或直接重跑 |
 | 被杀 / 断电 | 已成名的 `.ts` 分片保留；临时文件下次持锁启动时自动清理 |
 | Ctrl+C / SIGTERM | `trap` 会把在跑的 ffmpeg 一起收掉再退出（130/143）。收尾是**有界且有日志**的：`TERM → 最多 3s → SIGKILL`（实测 ffmpeg 捕获了 INT/TERM 但要 11–13s 才真退出，而半成品 .part 反正要丢，不值得等）。注意 Ctrl+C 只发给**终端前台进程组**：`setsid` / `&` 起的任务收不到，要用 `kill -TERM <脚本pid>` 或 `kill -TERM -<pgid>` |
-| 留下孤儿 ffmpeg（脚本被 `kill -9`） | 走不到 trap，在飞的 ffmpeg 变成 **PPID=1 的孤儿**继续写盘烧 CPU。更麻烦的是 `exec 9>"$LOCK"` 的 fd **被子 shell 与 ffmpeg 继承** → 孤儿自己占着锁，下次同 `-w` 启动会先撞「另一个实例正在跑」，**"启动清孤儿"那段代码永远走不到**（实测事故：两次重跑都撞锁） | 根因已修：run_job 子 shell / 试编码 subshell 里 `exec 9>&-`，**锁只留在脚本本体** → 脚本一死锁立刻释放，孤儿交给启动时的 `残留` 清理（`TERM → 3s → KILL`）+ 清 `.part`。撞锁另有兜底：只有 ffmpeg 持有 → 收掉再接管锁；否则报错并给出持有者 pid/启动时间/命令行。回归测试：`test_interp_2x_orphan.sh` |
+| 留下孤儿 ffmpeg（脚本被 `kill -9`） | 走不到 trap，在飞的 ffmpeg 变成 **PPID=1 的孤儿**继续写盘烧 CPU。更麻烦的是 `exec 9>"$LOCK"` 的 fd **被子 shell 与 ffmpeg 继承** → 孤儿自己占着锁，下次同 `-w` 启动会先撞「另一个实例正在跑」，**"启动清孤儿"那段代码永远走不到**（实测事故：两次重跑都撞锁） | 根因已修：run_job 子 shell / 试编码 subshell 里 `exec 9>&-`，**锁只留在脚本本体** → 脚本一死锁立刻释放，孤儿交给启动时的 `残留` 清理（`TERM → 3s → KILL`）+ 清 `.part`。撞锁另有兜底：只有 ffmpeg 持有 → 收掉再接管锁；否则报错并给出持有者 pid/启动时间/命令行。回归测试：`test/test_interp_2x_orphan.sh` |
 
 **注意**
 
@@ -587,15 +587,15 @@ csv 列序是结构体固定序、跟你 `-show_entries` 里写的顺序无关�
 
 ---
 
-### `test_interp_2x_lock.sh` — 回归测试（并发与锁）
+### `test/test_interp_2x_lock.sh` — 回归测试（并发与锁）
 
 守住 `interp_2x_safe.sh` 的**单实例锁与并发安全**，也就是上面那个"两边都白跑"的原始 bug；
 同时把分片复用、残留清理、`--overwrite` 早退、检查顺序等不变量一起钉住。
 
 ```bash
-bash test_interp_2x_lock.sh                                  # 自动找小素材
-SUT=./interp_2x_safe.sh bash test_interp_2x_lock.sh
-TEST_INPUT=/path/small.mp4 bash test_interp_2x_lock.sh
+bash test/test_interp_2x_lock.sh                                  # 自动找小素材
+SUT=./interp_2x_safe.sh bash test/test_interp_2x_lock.sh
+TEST_INPUT=/path/small.mp4 bash test/test_interp_2x_lock.sh
 ```
 
 > 耗时取决于**被测脚本用的后端**：GPU（`nvinterpolate`）几分钟内跑完；若把 `SUT` 指向通用版
@@ -623,7 +623,7 @@ TEST_INPUT=/path/small.mp4 bash test_interp_2x_lock.sh
 | 6 实例内并行 `-j 2` | 产出与顺序模式等价（每片切法逐片校验）；`-j` 不进 recipe → 换 `-j` 复用旧目录全 skip；并行下删掉一片只重编那一片 |
 | 全局 | 所有日志都不该出现 `mv: cannot stat` |
 
-### `test_interp_2x_orphan.sh` — 回归测试（中断收尾与孤儿 ffmpeg）
+### `test/test_interp_2x_orphan.sh` — 回归测试（中断收尾与孤儿 ffmpeg）
 
 守住 2026-09-15 那次事故：**按了 Ctrl+C 任务"还在跑"，随后脚本本体没了，却留下一个 PPID=1 的
 孤儿 ffmpeg 继续往 `parts/` 写盘**。根因两条：Ctrl+C 只发给终端前台进程组（`setsid`/`&` 起的
@@ -631,9 +631,9 @@ TEST_INPUT=/path/small.mp4 bash test_interp_2x_lock.sh
 而旧代码 `kill -TERM` 之后就 `wait`。
 
 ```bash
-bash test_interp_2x_orphan.sh                                # 现场生成 1080p 素材
-SUT=./interp_2x_safe_v1.sh bash test_interp_2x_orphan.sh
-SRC=/path/small1080p.mp4 bash test_interp_2x_orphan.sh       # 省掉现场生成
+bash test/test_interp_2x_orphan.sh                                # 现场生成 1080p 素材
+SUT=./interp_2x_safe_v1.sh bash test/test_interp_2x_orphan.sh
+SRC=/path/small1080p.mp4 bash test/test_interp_2x_orphan.sh       # 省掉现场生成
 ```
 
 | 环境变量 | 默认 | 说明 |
@@ -932,7 +932,7 @@ bash interp_2x_safe.sh /path/in.mp4 -w /tmp/demo -L 4 --cap 12
 bash interp_2x_safe.sh /path/in.mp4 /tmp/head.mp4 --cap 600
 
 # 锁与并发安全的回归测试（退出码 0/1/2；GPU 后端几分钟，CPU 后端约 12 分钟）
-bash test_interp_2x_lock.sh
+bash test/test_interp_2x_lock.sh
 ```
 
 ---
@@ -1437,8 +1437,8 @@ VidUtils 规划作为一个**命令行优先 / Python 原生**的视频工程工
 | `convert_crf.py` | ✅ 已发布 | 质量换算单一事实来源 |
 | `interp_2x_safe.sh` | ✅ 已发布 | 光流插帧 2x **GPU 专版**（`nvinterpolate` + `hevc_nvenc`，**无 CPU 回退**；**cgroup 感知的环境自动探测** + **分片级并行 `-j`** + **时间段截取 `--SS/--TO/-T`** + `setsid` + TS 分片 + 断点恢复 + 单实例锁） |
 | `interp_2x_safe_v1.sh` | ✅ 已发布 | 同上的**通用版**：多一条 CPU 回退后端（`minterpolate` + `libx265`）与 `--backend` / `--cpu-preset`；其余特性（环境探测 / `-j` / `--SS/--TO/-T`）与 GPU 专版一致，两者的 `recipe.txt` 兼容、可互相接管分片目录 |
-| `test_interp_2x_lock.sh` | ✅ 已发布 | 上面两版的回归测试（单实例锁 / 并发安全，退出码 0/1/2），默认 `SUT` 为 `interp_2x_safe.sh` |
-| `test_interp_2x_orphan.sh` | ✅ 已发布 | 上面两版的回归测试（中断收尾 / 孤儿 ffmpeg 自愈，退出码 0/1/2），默认 `SUT` 为 `interp_2x_safe.sh` |
+| `test/test_interp_2x_lock.sh` | ✅ 已发布 | 上面两版的回归测试（单实例锁 / 并发安全，退出码 0/1/2），默认 `SUT` 为 `interp_2x_safe.sh` |
+| `test/test_interp_2x_orphan.sh` | ✅ 已发布 | 上面两版的回归测试（中断收尾 / 孤儿 ffmpeg 自愈，退出码 0/1/2），默认 `SUT` 为 `interp_2x_safe.sh` |
 | `vidls.sh` + `vidls.py`（另有 `vidll.sh`） | ✅ 已发布 | `ls` / `ll` 替代品（`vidll` == `vidls -l`）：非视频按原生 `ls` 版式（实测逐字节一致），视频追加分辨率 / 帧率 / 比特率 / 编码器 / 容器 / 时长（帧数为可选列 `--show frames`）；帧数四级降级链（包头 → 硬解 → 包数 → 估算）+ cgroup 感知的自动并行 + `--install` 自检装机 |
 | `vidls.cmd` + `vidls_win.py`（另有 `vidll.cmd`） | ✅ 已发布 | 上面的 Windows 移植（Linux 版原样保留、两者互不 import）：非视频版式在 Git Bash 下与 coreutils ls 8.32 **逐字节一致**（1040 组随机布局实测）+ 同样的四级降级链 + 控制台编码自适应 + 写启动器进 PATH 的 `--install` |
 | `vidscale_*.py` | 🚧 规划中 | 视频缩放：双三次 / Lanczos / `scale_cuda` / `scale_npp` |
@@ -1473,15 +1473,18 @@ vidutils/
 ├── convert_crf.py            # 质量换算表（被 v2 / hwaccel 依赖，单一事实来源）
 ├── interp_2x_safe.sh         # 光流插帧 2x · GPU 专版（nvinterpolate + hevc_nvenc；环境探测 + -j 并行 + --SS/--TO/-T + TS 分片 + 断点恢复）
 ├── interp_2x_safe_v1.sh      # 同上的通用版（多一条 CPU 回退 minterpolate + libx265 与 --backend/--cpu-preset）
-├── test_interp_2x_lock.sh    # 上面两版的回归测试（单实例锁 / 并发安全）
-├── test_interp_2x_orphan.sh  # 上面两版的回归测试（中断收尾 / 孤儿 ffmpeg 自愈）
 ├── vidls.sh                  # ls / ll 替代（启动器；--install 把自己接进 PATH）
 ├── vidll.sh                  # vidll == vidls -l，只有 3 行转发逻辑
 ├── vidls.py                  # 上面的内核（纯标准库）：列布局、资源探测、帧数四级降级链（Linux 版）
 ├── vidls.cmd                 # 同上 Windows 版启动器（纯 ASCII + CRLF：cmd.exe 按 ANSI 代码页解析批处理）
 ├── vidll.cmd                 # Windows 版 vidll（只转发给 vidls.cmd）
 ├── vidls_win.py              # Windows 版内核：版式判据按实测重写、控制台编码自适应、写启动器的 --install
-├── test/                     # 裁剪脚本的回归门（基线在 test/baseline/，见「回归与验证」）
+├── test/                     # 全部回归测试（基线在 test/baseline/，见「回归与验证」）
+│   ├── dump_filter_chains.sh        # 裁剪脚本：滤镜链回归（16 行基线）
+│   ├── dump_cmd_default.sh          # 裁剪脚本：命令级回归（7 用例基线）
+│   ├── baseline/                    # 上面两个的基线文件
+│   ├── test_interp_2x_lock.sh       # 插帧脚本：单实例锁 / 并发安全
+│   └── test_interp_2x_orphan.sh     # 插帧脚本：中断收尾 / 孤儿 ffmpeg 自愈
 ├── verify/                   # 裁剪脚本的验证套件（单测 + CLI 层，都不需要 GPU）
 ├── probe/                    # 上机探针：T4 实测用（无 GPU 时只能跑 SELFTEST=1）
 ├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
@@ -1513,6 +1516,13 @@ python verify/verify_hwupload_worth.py    # auto 缩放的 hwupload 门槛
 bash   verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
 ```
 
+插帧脚本的回归（**需要 GPU + `nvinterpolate`**，会抢一点 GPU；退出码 0/1/2）：
+
+```bash
+bash test/test_interp_2x_lock.sh      # 单实例锁 / 并发安全
+bash test/test_interp_2x_orphan.sh    # 中断收尾 / 孤儿 ffmpeg 自愈
+```
+
 上机探针（**需要 NVIDIA GPU**；没有就只能跑装置自检）：
 
 ```bash
@@ -1540,7 +1550,7 @@ PROBE_VMAF=1 bash probe/probe_scale_cuda_crop.sh <源视频>   # 完整判据 A/
   CPU auto 并行度按实测收敛到「每路 1 核」（三轮 4→2→1：插帧滤镜串行、单片 ≈1 核）并感知 cgroup 已有负载；
   `--threads` 翻成 `-x265-params pools=N`（`-threads` 只改 frame threads、`-filter_complex_threads` 对 minterpolate 无效）；`-w` 相对路径的坑已修；
   中断收尾改为有界（TERM→3s→SIGKILL）并能在下次启动自愈孤儿 ffmpeg（ffmpeg 对 TERM 要 11–13s 才退，实测）；
-  并发度按「剩余待编片数」再收敛、撞锁报错打印持有者 pid/启动时间/命令行、新增 test_interp_2x_orphan.sh；
+  并发度按「剩余待编片数」再收敛、撞锁报错打印持有者 pid/启动时间/命令行、新增 test/test_interp_2x_orphan.sh；
   另有一条实测教训：**别"原位"改正在被执行的脚本**（bash 会按字节偏移重读、把跑完的循环再跑一遍）
 - [bash 并行调度的四个坑](memory/project_bash_parallel_pitfalls.md)
   —— `wait -n` 会提前返回、不能当完成信号；`while read < <(tail)` 能永久卡死在 pipe_read（0% CPU）；

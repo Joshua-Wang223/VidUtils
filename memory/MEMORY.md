@@ -20,7 +20,7 @@
   `--threads` 会被翻成 `-x265-params pools=N`（`-threads` 只改 frame threads、`-filter_complex_threads` 对 minterpolate 无效）；`-w` 相对路径的坑已修；
   4K 单片 4.2~4.6GB → 8GiB 机器只能 1 路（强开必被 OOM 杀，实测 oom_kill 3→9），失败诊断已能识别 OOM 并过滤 x265 噪声；
   中断收尾改为有界（TERM→3s→SIGKILL）并能在下次启动自愈孤儿 ffmpeg（ffmpeg 对 TERM 要 11–13s 才退，实测）；
-  并发度按「剩余待编片数」再收敛、撞锁报错打印持有者 pid/启动时间/命令行、新增 test_interp_2x_orphan.sh；
+  并发度按「剩余待编片数」再收敛、撞锁报错打印持有者 pid/启动时间/命令行、新增 test/test_interp_2x_orphan.sh；
   另有一条实测教训：**别"原位"改正在被执行的脚本**（bash 会按字节偏移重读、把跑完的循环再跑一遍）
 - [bash 并行调度的四个坑](project_bash_parallel_pitfalls.md)
   — `wait -n` 会提前返回不能当完成信号；`while read < <(tail)` 能永久卡死在 pipe_read（0% CPU）；

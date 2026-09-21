@@ -49,7 +49,7 @@ ffmpeg 是会话的子进程，codebuddy 一死就被一起带走；而 MP4 的 
 另外 `minterpolate` 的 `fps` **只吃具体数值**，写 `source_fps*2` 会报
 `Unable to parse option value … as video rate`（`nvinterpolate` 则支持该写法）。
 
-回归测试：`/workspace/VidUtils/test_interp_2x_lock.sh`（80 项断言，退出码 0/1/2；
+回归测试：`/workspace/VidUtils/test/test_interp_2x_lock.sh`（80 项断言，退出码 0/1/2；
 `SUT=` 指向变异版可验证它确实能抓到锁失效）。用独立 mktemp 工作目录，
 可以在正式任务跑着的时候执行。耗时取决于**实际后端**：GPU 后端几分钟，
 CPU 后端（本机 cgroup 配额 2 核）实测约 **15 分钟** —— 它要反复编解码十几遍 10 秒素材。
@@ -169,7 +169,7 @@ CPU 侧 HEAD_TRIM=0 → 与旧命令逐字节一致）。只动音轨起点、�
 - **撞锁时报持有者**：`lock_holder_pid` 扫 `/proc/<pid>/fd/*` 找指向本 `.lock` 的进程，报
   `pid + 启动时间 + 命令行`。占锁的未必是"另一个实例" —— 也可能是**上一个实例没退干净的
   run_job 子 shell**（子 shell 继承父进程的 fd 9，脚本本体没了锁照样不放）；实测就撞到过这种。
-- **新建 `test_interp_2x_orphan.sh`**（与 lock 测试并列）：用例 = 启动自愈 / 收尾有界 / 真孤儿自愈；
+- **新建 `test/test_interp_2x_orphan.sh`**（与 lock 测试并列）：用例 = 启动自愈 / 收尾有界 / 真孤儿自愈；
   拿不到前置（素材太短、后端太快抓不住"在飞的分片"、锁被子 shell 占着）一律记 `SKIP`，不会误判通过。
   实测两个 SUT 都通过（17 项断言 / 0 失败；v1 上 37s）。
 > 复现/测试时的两个坑：① `ps -o pid= --ppid` 在本环境**不可靠**（返回空），枚举子进程要直接读
@@ -298,7 +298,7 @@ CPU 槽位 = 4 核 ÷ 每路 1 核 = 4      → auto = min(4,1) = 1 路
   （+ 可选 `|ss=`），所以**同一个分片目录可以被两者互相接管**。更早的 GPU-only 版本写的旧格式
   （`slice=3|in=…|L|preset|…|cq|…|trim=…`，无 `backend`）会被就地升级而不是整体拒绝 ——
   这样脚本升级不会让已在跑/已跑完的长任务被迫重编。
-- 回归测试 `test_interp_2x_lock.sh` 默认 `SUT` 就是 GPU 专版的 `interp_2x_safe.sh`：
+- 回归测试 `test/test_interp_2x_lock.sh` 默认 `SUT` 就是 GPU 专版的 `interp_2x_safe.sh`：
   2026-09-15 用它跑 **80 项断言全过（0 失败 0 跳过，76s，GPU 后端）**，含 `-j 2` 并行等价性、
   换 `-j` 不触发重编、补单片、SIGKILL 后重跑等。
 

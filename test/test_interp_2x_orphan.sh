@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # interp_2x_safe*.sh 的回归测试：中断收尾 / 孤儿 ffmpeg
-# （与 interp_2x_safe.sh 同属 VidUtils；SUT 默认取本脚本同目录）
+# （与 interp_2x_safe.sh 同属 VidUtils；SUT 默认取仓库根下的 interp_2x_safe.sh）
 #
 # 背景（这个测试要守住的原始事故，2026-09-15）:
 #   用户在 4K 慢任务上按了 Ctrl+C 之后任务"还在跑"；过一会儿脚本本体没了，
@@ -23,9 +23,9 @@
 #      下次用同一个 -w 启动时必须被收掉。
 #
 # 用法:
-#   bash test_interp_2x_orphan.sh
-#   SUT=/path/to/interp_2x_safe_v1.sh bash test_interp_2x_orphan.sh
-#   SRC=/path/to/small1080p.mp4 bash test_interp_2x_orphan.sh    # 省掉现场生成素材
+#   bash test/test_interp_2x_orphan.sh
+#   SUT=/path/to/interp_2x_safe_v1.sh bash test/test_interp_2x_orphan.sh
+#   SRC=/path/to/small1080p.mp4 bash test/test_interp_2x_orphan.sh    # 省掉现场生成素材
 #
 # 退出码:  0 = 全部通过   1 = 有用例失败   2 = 环境不具备，跳过
 #
@@ -44,7 +44,9 @@
 # =============================================================================
 set -uo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# ROOT 是**仓库根**（本脚本在 test/ 下）：SUT 默认值相对它解析，
+# 整个 VidUtils 目录搬到哪儿都能直接跑。
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SUT=${SUT:-$ROOT/interp_2x_safe.sh}
 FFMPEG=${FFMPEG:-/usr/local/bin/ffmpeg}
 FFPROBE=${FFPROBE:-ffprobe}

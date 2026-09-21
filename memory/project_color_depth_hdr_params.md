@@ -65,6 +65,18 @@ type: project
   静默从 4:4:4 掉到 4:2:0 比直接报错更糟。`strict` 语义 = "不降级"，所以**等价让位
   （`yuv420p10le`→`p010le`）不算降级**，不报错；有信息损失才 raise。
 - 报结论时区分**链型**（软件帧链 / 零拷贝 CUDA 链），别笼统说"改了 pix_fmt"。
+- **让位路径的上机验证工装**（已就位，仍待跑）：`temp/probe_scale_cuda_crop.sh` +
+  `PROBE_10BIT=1` 会跑 A3/A4 两格——A3 = `format=p010le`（脚本让位后下发的滤镜形状），
+  A4 = A3 **再加 `-profile:v main10`**（脚本也会下发的那一项），两者是单变量对照，
+  **两格都成功**才算让位路径成立。
+  ⚠ A4 的 profile 项**没有分辨力**：10bit HEVC 必然 Main 10，传不传 `-profile:v` 都一样
+  （libx265 替身演练实测：with/without 都是 `Main 10,…`）→ 该格的增量信息是
+  "**不失败 + 输出仍是 yuv420p10le**"，别读成"profile 变了 ⇒ `-profile:v` 生效"。
+  又一个"恒等操作测不出东西"的实例（同 `project_cuda_scale_cover.md` 的恒等缩放陷阱）。
+- 探针里的 `dl_fmt_of()`（格式名 → 下载格式）是 `_src_download_fmt()`（位深整数 →
+  下载格式）的手工镜像，2026-09-21 补齐 16bit → `p012le`（原来 16bit 掉进 `nv12` 分支、
+  与脚本分叉，而注释还写着"保持一致"）。**改任一侧都要核另一侧**——这类"声明一致、
+  实际分叉"的手工镜像最容易悄悄漂移。
 - ⚠ **`--hdr sdr` 的 tone mapping 是全新能力，还没有 T4 实测数据**（滤镜配方、desat=0、
   算法选择都待验）。用于生产前必须在真实 HDR 片源（如 HLG 的 `new4_raw.mp4`）上验。
 - 相关：`project_t4_gpu_capabilities.md`（零拷贝 `-pix_fmt` 实测表 + `-profile:v` 要求）、

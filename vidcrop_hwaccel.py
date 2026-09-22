@@ -191,6 +191,7 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -2435,6 +2436,92 @@ def _setparams_from_color_args(extra_args: List[str]) -> Optional[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  产物色度自检（防复发钩子）
+# ═══════════════════════════════════════════════════════════════════
+# 为什么需要：2026-09-21 的色度归零缺陷（产物全绿）在线下跑了几个小时才被发现，
+# 因为当时没有任何"产物对不对"的检查，只有 ffmpeg 的 rc。这里给策略执行加一道
+# 像素级自检，失败即当成策略失败 → 复用既有的降级链（软解/软编策略），不用新写降级。
+#
+# 阈值口径（探针 SELFTEST 已验证不误伤，见 probe/probe_green_chroma.sh）：
+#   · 真灰度片是 U=V=128（中性），**不是 0** ⇒ 不触发；
+#   · 满屏纯绿 RGB(0,255,0) → U≈54 / V≈0 ⇒ U<16 不成立 ⇒ 不触发；
+#   · 本缺陷 U=V≈0 而源 U≈127 ⇒ 触发；
+#   · 源本身退化（U_src<16 且 V_src<16）⇒ 直接返回 OK。
+
+def _parse_signalstats_avg(text: str) -> Optional[Tuple[float, float, float]]:
+    """从 `signalstats,metadata=print` 的日志里取 (YAVG, UAVG, VAVG) 的帧均值。"""
+    out: List[float] = []
+    for key in ('YAVG', 'UAVG', 'VAVG'):
+        vals = [float(x) for x in
+                re.findall(r'lavfi\.signalstats\.' + key + r'=([0-9.]+)', text)]
+        if not vals:
+            return None
+        out.append(sum(vals) / len(vals))
+    return out[0], out[1], out[2]
+
+
+def _sample_uv_avg(path, ffmpeg_bin: str = 'ffmpeg', ss: float = 1.0,
+                   timeout: int = 30) -> Optional[Tuple[float, float, float]]:
+    """解码取样某文件的 (YAVG, UAVG, VAVG)。失败返回 None（由调用方按"不判定"处理）。"""
+    cmd = [ffmpeg_bin, '-nostdin', '-hide_banner', '-loglevel', 'info',
+           '-ss', f'{max(0.0, ss):.3f}', '-i', str(path), '-frames:v', '2', '-an',
+           '-vf', 'format=yuv420p,signalstats,metadata=print', '-f', 'null', '-']
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
+                           errors='replace', timeout=timeout, env=_ffmpeg_env())
+    except Exception:
+        return None
+    return _parse_signalstats_avg((r.stdout or '') + (r.stderr or ''))
+
+
+def _chroma_sample_ss(meta: Optional[Dict]) -> float:
+    """自检采样点：clamp(时长 × 0.1, 1, 60)。
+
+    不用固定的第 1 秒：实测片头常是空白帧（正常片 ss=1 时 Y=16.0、U=V=128），
+    落在 Y 门（16~235）之外会让"是否归零"根本无从判定，白白漏掉一次。
+    """
+    try:
+        dur = float((meta or {}).get('format', {}).get('duration') or 0.0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    return min(max(dur * 0.1, 1.0), 60.0)
+
+
+def _chroma_verdict(src: Tuple[float, float, float],
+                    out: Tuple[float, float, float]) -> Tuple[bool, str]:
+    """纯判定：给定源/产物的 (YAVG, UAVG, VAVG)，判断产物是否色度归零。
+
+    与 _sample_uv_avg 解耦，方便不启 ffmpeg 直接单测阈值（verify/verify_chroma_hook.py）。
+    """
+    _ys, us, vs = src
+    yo, uo, vo = out
+    if us < 16 and vs < 16:
+        return True, f'源本身无色度（U={us:.1f}/V={vs:.1f}），跳过自检'
+    bad = (16 <= yo <= 235) and (uo < 16) and (vo < 16) and (abs(uo - vo) < 8) \
+        and (us >= 16 or vs >= 16) \
+        and (abs(us - uo) > 32 or abs(vs - vo) > 32)
+    if bad:
+        return False, (f'产物色度疑似归零：源 U={us:.1f}/V={vs:.1f} → '
+                       f'产物 U={uo:.1f}/V={vo:.1f}')
+    return True, f'色度正常（U={uo:.1f}/V={vo:.1f}）'
+
+
+def _chroma_check(input_file, output_file, ffmpeg_bin: str = 'ffmpeg',
+                  ss: float = 1.0) -> Tuple[bool, str]:
+    """产物色度自检。返回 (是否正常, 说明)。
+
+    取样失败 / 源本身无色度时一律判"正常"——这道钩子是**宁可漏判也不能误伤**，
+    它只加一道保险，不该因为探针本身出问题就让整个任务失败。
+    """
+    src = _sample_uv_avg(input_file, ffmpeg_bin, ss)
+    out = _sample_uv_avg(output_file, ffmpeg_bin, ss)
+    if src is None or out is None:
+        return True, '取样失败，跳过色度自检'
+    ok, why = _chroma_verdict(src, out)
+    return ok, (why if ok else f'{why}（取样 t={ss:.0f}s）')
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  文件收集
 # ═══════════════════════════════════════════════════════════════════
 
@@ -3289,6 +3376,10 @@ _CUDA_NATIVE_FILTERS = frozenset({
     'hwupload_cuda', 'hwdownload', 'hwupload',
 })
 
+# 输出**显存帧**的滤镜：链尾是它们时帧还在 GPU 上，CPU 滤镜（如 setparams）接不住。
+# 与 _CUDA_NATIVE_FILTERS 的唯一差别是 hwdownload——它输出的是软件帧，所以不在内。
+_HW_OUTPUT_FILTERS = _CUDA_NATIVE_FILTERS - {'hwdownload'}
+
 
 def _prepend_hwdownload(vf_filter: str,
                         hwaccel_output_format: Optional[str],
@@ -3406,13 +3497,16 @@ def build_ffmpeg_cmd(
     cmd += pres['map']                   # 流映射 / -map_metadata / -map_chapters / creation_time
 
     # [COLOR-FIX] 色彩元数据注入：有值透传，unknown 按分辨率/位深/帧率推断。
-    # 软件编码器（libx264 等）对输出端 -color_primaries/-color_trc 不写 VUI，
-    # 需在滤镜链末尾追加 setparams；GPU 编码器（NVENC/AMF/QSV）靠输出端参数写 VUI，
-    # 且 crop_cuda 全 GPU 流水线不应被 CPU 滤镜破坏，故仅软件编码器追加。
+    # 所有编码器都在滤镜链末尾追加 setparams，把色彩属性写到**帧**上，而不只写输出端
+    # 参数。原因（2026-09-22 实测，见 memory/project_green_chroma_defect.md）：输出端
+    # -colorspace 与解码帧的 csp:unknown 不一致时，ffmpeg 会在滤镜链尾与编码器之间
+    # **自动插入一个 CPU scale**（debug 日志里的 auto_scale_0）去凑 codec context；
+    # 这个转换在「硬解 + NVENC」链上会把 U/V 清零 → 产物全绿。给帧标好属性后两者
+    # 一致，自动转换不再出现。vidcrop_cpu_v2.py 一直是这么做的（无条件 setparams）。
+    # 例外的只有「链尾仍是显存帧」与 copy（滤镜和流复制互斥），见下面的守卫。
     color_args = build_color_args(input_file, ffmpeg_bin, meta=meta,
                                   color_range=color_range, hdr_mode=_hdr_mode)
     _sp = _setparams_from_color_args(color_args)
-    _is_sw_codec = codec.lower() not in CQ_SUPPORTED_CODECS and codec.lower() != 'copy'
     # 强制 --color-range tv|pc 且与源实际值域不同 → 自动做真正的像素值域转换。
     # 必须在 _prepend_hwdownload 之前判断链首滤镜是否为 CUDA 原生。
     _conv = build_range_convert_filter(
@@ -3425,8 +3519,13 @@ def build_ffmpeg_cmd(
     # 就 hwdownload 过），且必须在 setparams 之前——setparams 写的是转换后的 SDR 属性。
     if _hdr_mode == 'sdr':
         vf_filter = f'{vf_filter},{build_tonemap_filter(_hdr_algo)}'
-    if _sp and _is_sw_codec:
-        vf_filter = f'{vf_filter},{_sp}'
+    # setparams 是 CPU 滤镜：链尾若还在显存里（没有 hwdownload 收尾的零拷贝链）就接不住，
+    # 那种情况跳过；空链 + hof=cuda 同理。其余（含全部 GPU 编码器）一律追加。
+    _tail = vf_filter.rsplit(',', 1)[-1].split('=', 1)[0].strip()
+    if (_sp and codec.lower() != 'copy'
+            and _tail not in _HW_OUTPUT_FILTERS
+            and not (not vf_filter and hwaccel_output_format == 'cuda')):
+        vf_filter = f'{vf_filter},{_sp}' if vf_filter else _sp
 
     # ── --pix-fmt / --bit-depth：显式指定时的落地 ──────────────────────
     # auto 完全沿用下面「[META-KEEP] 位深继承」那段既有逻辑（10bit 源才下发、
@@ -3621,8 +3720,10 @@ def build_ffmpeg_cmd(
     if extra_args:
         cmd += extra_args
 
-    # [COLOR-FIX] 输出端色彩参数（写入容器 colr box / GPU 编码器 VUI）；
+    # [COLOR-FIX] 输出端色彩参数（写入容器 colr box / 编码器 VUI）；
     # 置于 extra_args 之后，与主项目合并注入行为一致。
+    # 与上面的 setparams 是**互补**而非二选一：setparams 把属性写到帧上（避免 ffmpeg
+    # 自动插色彩转换），这里写容器标签。两者取值同源，不会互相冲突。
     cmd += color_args
 
     cmd += [str(output_file)]
@@ -3893,6 +3994,7 @@ def process_file(
     pix_fmt: Optional[str] = 'auto',
     bit_depth: Optional[int] = None,
     hdr: str = 'auto',
+    chroma_check: bool = True,
     queue_rest: Optional[float] = None,
     queue_cur: Optional[float] = None,
 ) -> Dict[str, object]:
@@ -3912,6 +4014,8 @@ def process_file(
         file_total      文件总数，用于 [i/n] 前缀
         flag            输出文件名后缀标记，None 时用默认 _cropped / _covered / _cropcovered
         crop_ratio      crop-cover 模式裁剪步骤所用比例 (分子, 分母)；None 时用目标宽高比
+        chroma_check    产物色度自检（默认 True）：策略成功后取样比对源与产物的 U/V，
+                        疑似归零则判该策略失败、走既有降级链；--no-chroma-check 关闭
         queue_rest / queue_cur  整批剩余时间的两个构件（秒），透传给进度条常驻
                                 显示；两者皆为 None 时不显示该字段
     """
@@ -4196,6 +4300,18 @@ def process_file(
                 stderr_text = (stderr_text or '') + \
                     '\nffmpeg 返回 0 但未生成输出文件'
 
+            # [CHROMA-CHECK] 产物色度自检（防复发钩子）。失败时把 rc 打成 1，
+            # 后面那段既有的"策略失败 → 清理产物 → 试下一策略"会原样接管，
+            # 自动退到软解/软编策略，不需要另写降级逻辑。
+            if rc == 0 and chroma_check:
+                _c_ss = _chroma_sample_ss(probe_full_metadata(input_file, ffmpeg_bin))
+                _c_ok, _c_why = _chroma_check(
+                    input_file, output_file, ffmpeg_bin, _c_ss)
+                if not _c_ok:
+                    rc = 1
+                    stderr_text = (stderr_text or '') + f'\n[色度自检] {_c_why}'
+                    print(f'  ⚠ 色度自检未通过：{_c_why}', file=sys.stderr)
+
             if rc == 0:
                 elapsed  = time.perf_counter() - t_file_start
                 in_size  = input_file.stat().st_size
@@ -4448,6 +4564,12 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                         help='覆盖已存在的输出文件')
     parser.add_argument('--no-skip-same-size', action='store_true',
                         help='即使源尺寸等于目标尺寸也强制转码（默认同尺寸跳过）')
+    parser.add_argument('--no-chroma-check', action='store_false', dest='chroma_check',
+                        default=True,
+                        help='关闭「产物色度自检」（默认开启）：每条策略成功后取样比对'
+                             '源与产物的 U/V，疑似把色度写没了（产物全绿）就判该策略失败、'
+                             '自动降级。每次多跑 2 次短取样 ffmpeg（约 0.1~0.5s）。'
+                             '源本身无色度、或取样失败时不判定，不会误伤。')
 
     # 解码轴（只管解码；编码看 --codec，缩放看 --scale-algo，三者互不干涉）
     parser.add_argument('--decode', type=_decode_value, default='auto', metavar='BACKEND',
@@ -4997,6 +5119,7 @@ def main() -> int:
                 pix_fmt=args.pix_fmt,
                 bit_depth=args.bit_depth,
                 hdr=args.hdr,
+                chroma_check=args.chroma_check,
                 queue_rest=q_rest,
                 queue_cur=q_cur,
             )

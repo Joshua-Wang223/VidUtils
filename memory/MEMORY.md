@@ -109,6 +109,15 @@
   **`--pix-fmt`×`--bit-depth` =「能落地者赢」**（2026-09-21 修）：先按 `--pix-fmt` 落地，
   它在当前链上不可用时由 `--bit-depth` 接管并明说让位代价（位深/色度，strict 下有损失报错）；
   恒定让谁赢两端都有反例；判据 `verify/verify_pixfmt_bitdepth.py`
+- [裁剪产物色度归零（全绿）：元凶是 ffmpeg 自动插入的 auto_scale](project_green_chroma_defect.md)
+  — 2026-09-22 定案：`-colorspace smpte170m` 与解码帧 `csp:unknown` 不一致 → ffmpeg 在
+  链尾自动插 CPU scale（`auto_scale_0`）→ 硬解 + NVENC 链上把 U/V 清零（下游 YUV→RGB 得
+  RGB(0,255,0) 全绿）；**不是** hwdownload / `-hwaccel auto` / NVENC 本身（都是上一轮的错方向）；
+  修法 = `setparams` 下发放宽到 GPU 编码器（与 cpu_v2 孪生行为对齐）+「链尾是 CUDA 原生滤镜
+  则不追加」守卫；新增产物色度自检 + `--no-chroma-check`（失败自动降级，采样点取
+  `clamp(时长×0.1,1,60)` 避开片头空白帧）；顺带修掉探针 6b「最小恢复集」算反（恒报 0 组）；
+  判据 `verify/verify_color_tagging.py`、`verify/verify_chroma_hook.py`、
+  `test/test_green_chroma_regression.sh`（含"删掉 setparams 必须复现"的红灯自检）
 
 ---
 

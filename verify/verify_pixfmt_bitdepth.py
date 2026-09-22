@@ -76,8 +76,13 @@ def run(pix_fmt='auto', bit_depth=None, policy='auto', codec='hevc_nvenc', cuda=
     def g(flag):
         v = [cmd[i + 1] for i, a in enumerate(cmd) if a == flag]
         return v[0] if v else None
-    return (g('-vf') or g('-filter:v:0')), g('-profile:v'), g('-pix_fmt'), \
-        err.getvalue(), None
+    vf = g('-vf') or g('-filter:v:0')
+    # 本脚本只关心"格式落到哪"；链尾的 setparams=（色彩属性标到帧上，2026-09-22 起
+    # GPU 编码器也会有）由 verify/verify_color_tagging.py 单独验证 → 这里剥掉，
+    # 免得每条断言都拖一段与 pix_fmt 无关的色彩后缀。
+    if vf and ',setparams=' in vf:
+        vf = vf.split(',setparams=', 1)[0]
+    return vf, g('-profile:v'), g('-pix_fmt'), err.getvalue(), None
 
 
 CUDA_10 = 'scale_cuda=640:360:interp_algo=lanczos:format=p010le,hwdownload,format=p010le'

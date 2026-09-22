@@ -362,6 +362,7 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--flag` | `_cropped` / `_covered` | 同 v2 |
 | `--audio-codec` / `--audio-bitrate` | `copy` / `128k` | 音频编码；WebM 下自动换 `libopus` |
 | `--no-skip-same-size` | 否 | 同尺寸强制转码 |
+| `--no-chroma-check` | 否 | 关闭「产物色度自检」（**默认开启**）：每条策略成功后取样比对源与产物的 U/V，疑似被写没（产物全绿）就判该策略失败并自动降级（复用既有降级链）。每次多 2 次短取样 ffmpeg（实测 +0.38s/文件）。源本身无色度、或取样失败时不判定，不会误伤 |
 | `--decode` | `auto` | 解码后端：`auto` / `cuda` / `vulkan` / `vaapi` / `opencl` / `cpu`（旧值 `none` ≡ `cpu`）。**只管解码**（见[硬件加速说明](#硬件加速说明)）；`auto` 的探测**按源编解码器**做（NVDEC 的能力是分编解码器的，T4 解不了 AV1）——拿真实输入试解 1 帧，结果按 codec 缓存；旧名 `--hwaccel` 已**硬更名**，用旧名直接报错退出 2 |
 | `--fallback-policy` | `auto` | 显式点名的后端不可用/失败时：`auto`=降级并提示 / `strict`=报错退出 2。旧值 `strict-cuda` / `nvenc-only` / `cpu-only` **已删除**，用旧值报错并给出等价三轴写法 |
 | `--cuda-diagnostics` | 否 | 输出多分辨率探针与详细错误，定位"硬解不可用"根因 |
@@ -1388,6 +1389,7 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 | **软解 + `hwupload_cuda` 只在高位深且真缩放时划算** | 上载 / 回下载开销固定，而 p010le 的 CPU 缩放比 8bit 贵得多。T4 两批共 12 组素材实测：**源 ≥10bit 且真在缩放 → +14~25%**；8bit 真缩放 → **+0.4% ~ −14%**；**恒等缩放（无论位深）→ −1.6% ~ −34.7%**（注意 10bit 恒等也是 −22%）。绝对值上软解链路整体 44~46s，而硬解零拷贝只要 12.8s | 有硬解时永远该走硬解。`--scale-algo auto` 只在显式 `--decode cpu` 下才自动走它，且要过两道关：**功能探针**（链真能跑通）+ **值不值**（≥10bit 且非恒等）；不满足时会打印具体理由。要强制使用请显式写 `--scale-algo cuda-lanczos` |
 | 显式 `cuda-*` 执行失败要等到运行期才发现 | `--scale-algo cuda-*` **不跑功能探针**（按设计直接执行） | `--fallback-policy auto`（默认）会自动降级到 `libswscale-<同档>`；要"不可用就报错"用 `strict` |
 | **零拷贝 CUDA 链不能传 `-pix_fmt`** | 该链上 `-hwaccel_output_format cuda` 时帧是 CUDA 帧，`-pix_fmt` 设的是 `AVFrame.format`（= `AV_PIX_FMT_CUDA`）而非 `sw_format`，传 `nv12` / `yuv420p` 实测都报 `Impossible to convert` | 已按链型分别落地：零拷贝链改用 `scale_cuda=format=` + `-profile:v`，只有软件帧链才下发 `-pix_fmt`。用户请求 `scale_cuda` 不支持的格式时按 `--fallback-policy` 降级或报错 |
+| **色彩标签曾把产物写坏（已修，2026-09-22）** | 输出端 `-colorspace`（如 SD 源推出的 `smpte170m`）与解码帧的 `csp:unknown` 不一致时，ffmpeg 会在滤镜链尾与编码器之间**自动插入一个 CPU `scale`**（debug 日志里的 `auto_scale_0`）去凑 codec context；在「硬解 + NVENC」链上这个转换会把 **U/V 清零** → 下游 YUV→RGB 得 RGB(0,255,0)、成品全绿。实测**单加 `-colorspace smpte170m` 即复现**，其余三参单独都无害；`bt709` 也会插转换、只是不归零（色度仍有偏移）。源侧正常、字节合法、能解码，只是像素被写坏 | 现已用 `setparams` 把色彩属性**标到帧上**（GPU 编码器同样下发，与 v2 的既有行为对齐；链尾还在显存里时不加），帧属性与输出端一致后 ffmpeg 不再插转换；输出端四参保留（写容器 colr box，`h264_nvenc` 的 primaries/transfer 标签也因此补全）。另加产物色度自检作防复发钩子（`--no-chroma-check` 可关），判据见 `verify/verify_color_tagging.py` 与 `test/test_green_chroma_regression.sh` |
 | **`tonemap_cuda` 上游不存在** | 实测 `ffmpeg -h filter=tonemap_cuda` → `Unknown filter`（与 `crop_cuda` 同款，非编译选项问题）。CUDA 侧没有硬件 HDR→SDR | `--hdr sdr` 走 CPU 的 `zscale` + `tonemap`；CUDA 链本来就先 `hwdownload` 成软件帧，直接接在链尾即可。滤镜缺失时会降级为 `--hdr drop` 并提示 |
 | `--hdr sdr` 的 tone mapping 未实测 | 这是全新能力：滤镜配方、desat、各算法（hable / mobius / reinhard）的观感差异都还没有 T4 数据 | 先在真实 HDR 片源（如 HLG 的 `new4_raw`）上验一遍再用于生产；算法可换（`--hdr sdr:hable`） |
 | `crop-cover` 不走 CUDA 缩放 | 它必须先裁剪，而裁剪只能在 CPU（无 `crop_cuda`）→ GPU 缩放要额外一次 `hwupload_cuda` | 保留 CPU 侧 `crop,scale`（该路径未实测）；要用 CUDA 缩放请改用 `--mode cover` |
@@ -1513,7 +1515,22 @@ python verify/verify_scale_algo.py        # --scale-algo 解析
 python verify/verify_pixfmt_bitdepth.py   # --pix-fmt × --bit-depth 的「能落地者赢」
 python verify/verify_cuda_decode_codec.py # 按源编解码器的硬解确认（AV1）
 python verify/verify_hwupload_worth.py    # auto 缩放的 hwupload 门槛
+python verify/verify_color_tagging.py     # 色彩属性标到帧上（setparams），命令级
+python verify/verify_chroma_hook.py       # 产物色度自检的阈值 / 取样 / 降级链
 bash   verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
+```
+
+> ⚠ `verify_decode_axis.sh` 第 ⑦ 组与 `verify_cuda_decode_codec.py` 第 ⑥ 组硬写了
+> 「本机无 CUDA / 无 N 卡」，**在有 GPU 的机器上必然失败**（T4 上实测如此，与本次改动无关）。
+> 其余项目两者都是全绿。
+
+色度回归（**需要 NVIDIA GPU**，端到端；没有 NVENC 会打印 SKIP 退出 0）：
+
+```bash
+bash test/test_green_chroma_regression.sh
+# 含"红灯自检"：把命令里的 setparams 删掉必须复现 U/V<16，否则测试本身算失效
+REAL_SRC=<真实原片> bash test/test_green_chroma_regression.sh   # 指定真片（默认 Dora S02E01）
+SKIP_REAL=1 bash test/test_green_chroma_regression.sh           # 跳过真片那一步
 ```
 
 插帧脚本的回归（**需要 GPU + `nvinterpolate`**，会抢一点 GPU；退出码 0/1/2）：

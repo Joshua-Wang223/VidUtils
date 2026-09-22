@@ -97,10 +97,8 @@ BEGIN{
   if (us < 16 && vs < 16) {
     printf "   ⚠ 源本身就没有正常色度（U/V<16）→ 换素材重跑，本轮结论无效\n"
   } else if (a0 >= 0 && a0 < 16 && a1 >= 0 && a1 >= 16) {
-    printf "   ⓪ **罪魁是 -hwaccel auto**：显式 cuda 解出来正常，auto 解出来就是 0\n"
-    printf "      → 别把 auto 丢给 ffmpeg（auto 未必等于 cuda，枚举顺序里 VDPAU 还在 CUDA 前）\n"
-    printf "      → de4c776 已把 --decode auto 改成「先探测、再下发具体后端」（74ed684 没改这点，\n"
-    printf "        它仍写 auto → 'auto'）；T4 pull 到含 de4c776 的 origin/main 后重跑 default 验收\n"
+    printf "   ⓪ -hwaccel auto 解码侧坏（显式 cuda 正常）—— 注意这条**已被 2026-09-21 第二轮推翻**：\n"
+    printf "      那轮里 auto→nvdec、A0 正常，而脚本 --decode cuda 同样绿 → auto 不是元凶\n"
   } else if (b0 >= 0 && b0 < 16 && b1 >= 0 && b1 >= 16) {
     printf "   ⓪** -hwaccel auto + NVENC 组合坏（auto 单独解码正常）→ 落在编码/上载段\n"
   } else if (a1 >= 0 && a1 < 16) {
@@ -114,7 +112,9 @@ BEGIN{
   } else if (b1 < 0 && b2 < 0 && b3 < 0) {
     printf "   ⚠ 三个编码变体都没跑通，看上面的 FAILED 行\n"
   } else {
-    printf "   ④ ffmpeg 层三格都正常 → 故障可能只在脚本发出的参数组合里，看第 4 节矩阵\n"
+    printf "   ④ 手写的 ffmpeg 命令全部正常 → 差别只可能来自脚本那条命令里多带的选项组\n"
+    printf "      → **看第 6 节的命令级二分**：V0 应复现绿色，逐组删选项后哪一格先恢复正常，\n"
+    printf "        那一格删掉的组就是元凶（V8/V9 用来判「硬解 × 输出色彩四参」是否要成对出现）\n"
   }
   if (b1 >= 0 && b1 < 16 && c1 >= 0 && c1 >= 16) {
     printf "   候选 1 有救：加 -hwaccel_output_format cuda + 显式 hwdownload 后色度正常\n"
@@ -151,12 +151,23 @@ backend_of() {
 }
 
 # chk <标签> <文件>：对产物取样，输出一行并把数值存进 LAST_*
+# ⚠ 取值管道末尾必须有 `|| true`：脚本是 `set -o pipefail`，只要**被测文件不存在**
+# （或 ffmpeg 因任何原因失败），`line=$(ffmpeg ... | awk ...)` 整条赋值就是非零，
+# `set -e` 会**当场杀掉整个探针**，后面所有格子一个都不跑、且不留任何报错。
+# 2026-09-21 本机自测时踩到：报错只有一个 `exit=127`、trace 还因缓冲被截断。
+_sanitize() {   # 把「无数据」行的 `-` 归一成 -1，免得下游 awk 把它当数值比较
+  # ⚠ 必须允许**前导空格**：AWK_YUV 用 `%6.1f` 输出，小于 100 的值会带一个空格
+  # （` 127.9`），写成 `^[0-9]` 会把好数据也判成"无数据"、整表变成 -1（实测踩到）。
+  if [[ ! "$LAST_U" =~ ^[[:space:]]*[0-9] ]]; then LAST_U=-1; LAST_V=-1; fi
+}
+
 chk() {
   local tag=$1 f=$2 line
   line=$("$FF" -nostdin -hide_banner -loglevel info -ss 1 -i "$f" -frames:v 2 -an \
         -filter:v:0 'format=yuv420p,signalstats,metadata=print' -f null - 2>&1 \
-        | awk "$AWK_YUV")
+        | awk "$AWK_YUV" || true)
   IFS=$'\t' read -r LAST_Y LAST_U LAST_V LAST_VD <<<"$line"
+  _sanitize
   printf '  %-26s Y=%-6s U=%-6s V=%-6s %s\n' "$tag" "$LAST_Y" "$LAST_U" "$LAST_V" "$LAST_VD"
 }
 
@@ -166,8 +177,9 @@ chkd() {
   local line
   line=$("$FF" -nostdin -hide_banner -loglevel info "$@" -ss 1 -i "$f" -frames:v 2 -an \
         -filter:v:0 'format=yuv420p,signalstats,metadata=print' -f null - 2>&1 \
-        | awk "$AWK_YUV")
+        | awk "$AWK_YUV" || true)
   IFS=$'\t' read -r LAST_Y LAST_U LAST_V LAST_VD <<<"$line"
+  _sanitize
   printf '  %-26s Y=%-6s U=%-6s V=%-6s %s\n' "$tag" "$LAST_Y" "$LAST_U" "$LAST_V" "$LAST_VD"
 }
 
@@ -287,8 +299,12 @@ chk '源[CPU解码,基准]' "$SEG"
 US=$LAST_U; VS=$LAST_V
 
 echo; echo "═══ 1. 解码层：NVDEC 解出来的帧是不是就已经是坏的 ═══"
-# ⚠ 2026-09-20 T4 第一轮实测：探针用 -hwaccel cuda 全是 ✓，而脚本的 -hwaccel auto 是 ✗。
-# 所以 auto 必须单独成格 —— 之前的矩阵只测了显式 cuda，正好漏掉唯一的变量。
+# ⚠ 这一格的来历（两轮实测的修正）：
+#   第一轮（09-20）：探针手写的 -hwaccel cuda 全 ✓，脚本（旧版策略 2）的 -hwaccel auto 是 ✗
+#     → 当时判定「auto 是元凶」。**该结论已被第二轮推翻。**
+#   第二轮（09-21，HEAD 已支持 --decode）：auto→nvdec、A0 正常，而脚本显式 --decode cuda
+#     **同样绿** → ffmpeg 那一层（含 auto）全清白，元凶在脚本命令多带的选项里（见第 6 节）。
+#   保留 A0 这一格是因为"auto 解析成哪个后端"本身仍值得记录，而不是因为它可疑。
 if gpu_ok; then
   chkd A0_硬解auto仅解码 "$SEG" -hwaccel auto
   A0U=$LAST_U
@@ -372,6 +388,151 @@ echo; echo "═══ 5. 远程真实命令（--dry-run，与本地 mock 枚举�
 "$PY" "$REPO/vidcrop_hwaccel.py" --input "$SEG" --output "$WORK/dry.mp4" --mode crop \
     --output-width 768 --output-height 432 --codec hevc_nvenc --overwrite --dry-run 2>&1 \
   | grep -E '策略|执行命令' | sed 's/^/  /' || true
+
+# ═══ 6. 命令级二分：拿脚本自己吐出来的那条真命令，逐组删选项再跑 ═══
+# 为什么需要这一节（2026-09-21 T4 第二轮）：第 1~3 节里**纯手写的 ffmpeg 命令全部正常**，
+# 而脚本的 default 与 --decode cuda **两种解码参数都绿** —— 说明既不是 -hwaccel auto，
+# 也不是 ffmpeg/NVDEC/NVENC 本身，而是脚本那条命令里**多带的某几组选项**。
+# 手写对照测不出来（我写的 B1 少了 6 组选项就正常了），所以这里改为：
+# 直接把 dry-run 打印的命令字符串拿来做输入，成组删除后重跑，谁删了谁恢复就是谁。
+echo; echo "═══ 6. 命令级二分：照脚本自己的命令成组删选项（含 6b 全组合穷举）═══"
+if [[ -f "$REPO/vidcrop_hwaccel.py" ]]; then
+  CMD=$("$PY" "$REPO/vidcrop_hwaccel.py" --input "$SEG" --output "$WORK/dry.mp4" \
+        --mode crop --output-width 768 --output-height 432 --codec hevc_nvenc \
+        --overwrite --dry-run 2>&1 \
+        | grep -m1 '执行命令' | sed -E 's/^.*执行命令[^:]*: //' || true)
+  if [[ -z "$CMD" ]]; then
+    echo "  ✗ 没能从 --dry-run 输出里解析出「执行命令」（看上面的打印）"
+  else
+    echo "  抓到的原命令长度: ${#CMD} 字符"
+    # drop <命令串> <sed 表达式...>：按顺序删掉若干组选项
+    drop() {
+      local c=$1; shift; local e
+      for e in "$@"; do c=$(printf '%s' "$c" | sed -E "$e"); done
+      printf '%s' "$c"
+    }
+    # prep_cmd <标签> <命令串> → 回显改好输出路径的命令；产物路径放进 VOUT
+    # 注意：不能写成 `local tag=$1 c=$2 out="$WORK/v_$tag.mp4"` —— bash 会把**所有**
+    # 参数词先展开再执行 local，那一刻 tag 还没绑定，set -u 直接报 unbound variable。
+    # ⚠ prep_cmd **不能**用 `c=$(prep_cmd ...)` 调用：命令替换会开子 shell，函数里
+    # 赋的 VOUT/VCMD 传不出来（`VOUT: unbound variable`，本机自测踩到）。所以它
+    # 什么都不回显，只负责设置下面这两个全局变量。
+    prep_cmd() {
+      local tag=$1 c=$2
+      VOUT="$WORK/v_$tag.mp4"
+      c=$(printf '%s' "$c" | sed "s|$WORK/dry\.mp4|$VOUT|")
+      # 兜底：Windows 上 python 打印的是 `'D:\...\dry.mp4'`，上面的 POSIX 路径 sed
+      # 匹配不到 → 命令会写回 dry.mp4、而检查的是 VOUT（本机自测时踩到）。必须把
+      # **整个路径 token** 换掉：只换 `dry.mp4` 会留下 `D:\...\chroma_work\` 这种残根，
+      # 拼出一个不存在的路径（也踩到过）。`[^ ']*` 匹配到引号为止，故 Windows 那份的
+      # 引号会被保留，eval 照样吃得下。
+      c=$(printf '%s' "$c" | sed -E "s|[^ ']*dry\.mp4|$VOUT|")
+      VCMD=$c
+    }
+    runv() {  # runv <标签> <命令字符串>：跑完打印一行（人类可读）
+      local tag=$1
+      prep_cmd "$tag" "$2"
+      rm -f "$VOUT"
+      if eval "$VCMD" >"$WORK/v_$tag.log" 2>&1; then
+        chk "$tag" "$VOUT"
+      else
+        LAST_U=-1
+        printf '  %-26s FAILED: %s\n' "$tag" "$(errline "$WORK/v_$tag.log")"
+      fi
+    }
+    runq() {  # runq <标签> <命令字符串>：静默版，只为穷举用；绿色返回 0
+      local tag=$1
+      prep_cmd "q_$tag" "$2"
+      rm -f "$VOUT"
+      if eval "$VCMD" >"$WORK/v_q_$tag.log" 2>&1; then
+        chk __q__ "$VOUT" >/dev/null      # 只为填 LAST_U，不打印
+      else
+        LAST_U=-1
+      fi
+      if [[ "$LAST_U" =~ ^[[:space:]]*[0-9] ]] && awk -v u="$LAST_U" 'BEGIN{exit !(u<16)}'; then
+        return 0                          # 绿色 = 复现了故障
+      fi
+      return 1
+    }
+    # 各组选项的 sed 删除表达式（`+`/`?` 在 -E 下要转义；-map 的取值可能带引号）
+    E_COL='s/ -colorspace [^ ]+ -color_primaries [^ ]+ -color_trc [^ ]+ -color_range [^ ]+//'
+    E_ERR='s/ -err_detect ignore_err -fflags \+genpts\+discardcorrupt//'
+    E_ROT='s/ -noautorotate//'
+    E_MAP='s/ -map [^ ]+ -map [^ ]+ -map_metadata 0 -map_chapters 0//'
+    # preset 的取值随策略变（NVENC 是 p5、降级到 libx265 是 medium）→ 用通配，
+    # 写死 p5 会在非 NVENC 策略上静默不匹配（本机自测时就是这样）
+    E_PRE='s/ -preset [^ ]+//'
+    E_TAIL='s/ -c:a copy -movflags \+faststart//'
+    E_HW='s/ -hwaccel cuda -hwaccel_device 0//'
+
+    runv V0_脚本原命令 "$CMD"                    # 应当复现绿色
+    runv V1_删输出色彩四参 "$(drop "$CMD" "$E_COL")"
+    runv V2_删err_detect_fflags "$(drop "$CMD" "$E_ERR")"
+    runv V3_删noautorotate "$(drop "$CMD" "$E_ROT")"
+    runv V4_删map一组 "$(drop "$CMD" "$E_MAP")"
+    runv V5_删preset "$(drop "$CMD" "$E_PRE")"
+    runv V6_删尾部ca_movflags "$(drop "$CMD" "$E_TAIL")"
+    VMIN=$(drop "$CMD" "$E_ERR" "$E_ROT" "$E_MAP" "$E_PRE" "$E_TAIL")
+    runv V7_最小集_删其余全部 "$VMIN"             # ≈ 第 2 节的 B1，应当正常
+    VCOL=$(drop "$CMD" "$E_ERR" "$E_ROT" "$E_MAP" "$E_PRE" "$E_TAIL")
+    runv V8_只留色彩四参_带硬解 "$VCOL"
+    runv V9_只留色彩四参_去硬解 "$(drop "$VCOL" "$E_HW")"
+    echo "  读法：V0 绿、V7 正常 → 元凶就在被删的那几组里；V1~V6 哪一格恢复正常 = 那一组是元凶；"
+    echo "        若 V1~V6 全仍绿 → 组合效应，看下面的穷举结果（V8/V9 判「硬解×色彩四参」是否成对）。"
+
+    # ── 6b. 全组合穷举（默认 2^6 = 64 组）：避免"组合效应"再往返一轮 ──
+    # 逐组删只能定位**单个**元凶；组合效应（两个选项同时在场才出问题）需要按子集枚举。
+    # 6 组共 64 个子集，每个只转 3 秒片段，在 T4 上是一两分钟的事，比再让用户手动来回一轮便宜。
+    # 本机自测时用 EXHAUST_BITS=2 快速验证循环本身。
+    GROUP_NAMES=(色彩四参 err_detect+fflags noautorotate map组 preset 尾部ca+movflags)
+    GROUP_SED=("$E_COL" "$E_ERR" "$E_ROT" "$E_MAP" "$E_PRE" "$E_TAIL")
+    EXHAUST_BITS=${EXHAUST_BITS:-6}
+    if (( EXHAUST_BITS > 0 )); then
+      echo; echo "  ── 6b. 全组合穷举（2^$EXHAUST_BITS 个子集）──"
+      TOTAL=$(( 1 << EXHAUST_BITS ))
+      GREEN_CNT=0; FAIL_CNT=0; MIN_N=99; MIN_MASK=-1
+      for (( m=0; m<TOTAL; m++ )); do
+        _ex=(); for (( b=0; b<EXHAUST_BITS; b++ )); do
+          (( (m >> b) & 1 )) && _ex+=("${GROUP_SED[$b]}")
+        done
+        # runq 返回 0 = 绿色（复现故障），返回非 0 = 这一格不是绿色。
+        if runq "$m" "$(drop "$CMD" ${_ex[@]+"${_ex[@]}"})"; then
+          GREEN_CNT=$(( GREEN_CNT + 1 ))
+        else
+          # LAST_U<0 ⇒ 该子集的命令**自己失败了**，不能当成"恢复正常"。
+          if [[ "$LAST_U" =~ ^[[:space:]]*[0-9] ]]; then
+            # 「最小恢复集」= 让故障消失的**最小删除集** → 在恢复正常的子集里取最小 popcount。
+            # ⚠ 原来这段写在绿色分支里，于是永远是 m=0（删 0 组），打印成"共 0 组"。
+            _n=0; for (( b=0; b<EXHAUST_BITS; b++ )); do (( (m >> b) & 1 )) && _n=$(( _n + 1 )); done
+            if (( _n < MIN_N )); then MIN_N=$_n; MIN_MASK=$m; fi
+          else
+            FAIL_CNT=$(( FAIL_CNT + 1 ))
+          fi
+        fi
+      done
+      printf '  绿 %d / 正常 %d / 失败 %d（共 %d 个子集）\n' \
+        "$GREEN_CNT" "$(( TOTAL - GREEN_CNT - FAIL_CNT ))" "$FAIL_CNT" "$TOTAL"
+      if (( MIN_MASK < 0 )); then
+        echo "  ✗ $TOTAL 个子集里**没有任何一个让故障消失** → 元凶不在这 $EXHAUST_BITS 组里："
+        echo "      · 说明连「删掉全部这几组」都还绿 → 触发条件在它们之外（换个思路查）"
+        echo "      · 也可能 m=0（原命令）本来就没复现 → 先确认第 4 节 default 是绿的"
+        echo "      · 下一步：把第 5 节那条命令与第 2 节手写命令逐 token diff"
+      else
+        _names=''
+        for (( b=0; b<EXHAUST_BITS; b++ )); do
+          (( (MIN_MASK >> b) & 1 )) && _names+="${GROUP_NAMES[$b]}  "
+        done
+        if (( MIN_N == 0 )); then
+          echo "  ✔ 最小恢复集 = 0 组：原命令（一个都不删）本来就正常 → 本轮**没有复现故障**。"
+          echo "      若脚本已打上色度修复，这是预期结果；否则先看第 4 节 default 是不是真的绿。"
+        else
+          printf '  ✔ 最小恢复集（删掉这些组后色度就正常，共 %d 组）: %s\n' "$MIN_N" "$_names"
+          echo "      即：元凶 = 上面这些组（若只列一组，就是那一个选项/一组选项）。"
+        fi
+      fi
+    fi
+  fi
+fi
 
 awk -v us="${US:--1}" -v vs="${VS:--1}" -v a0="${A0U:--1}" -v a1="${A1U:--1}" \
     -v b0="${B0U:--1}" -v b0b="${B0BU:--1}" -v b1="${B1U:--1}" \

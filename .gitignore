@@ -29,6 +29,8 @@ tmp/
 # 这两条是兜底：WORK 被改回脚本目录、或有人手工在仓库里跑探针时，产物也不会入库。
 chroma_work/
 probe_scale_cuda/
+# 探针的运行日志：正常都落在 temp/ 下，落到 probe/ 里也是本机产物、不该入库
+probe/*.log
 logs/
 output/
 archive/

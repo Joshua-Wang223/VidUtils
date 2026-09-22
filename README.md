@@ -1545,7 +1545,16 @@ bash test/test_interp_2x_orphan.sh    # 中断收尾 / 孤儿 ffmpeg 自愈
 ```bash
 SELFTEST=1 bash probe/probe_scale_cuda_crop.sh             # 只验计时/汇总装置，CPU-only
 PROBE_VMAF=1 bash probe/probe_scale_cuda_crop.sh <源视频>   # 完整判据 A/B/C/D/Q
+
+SELFTEST=1 bash probe/probe_green_chroma.sh                # 色度探针装置自检，CPU-only
+SRC=<源视频> bash probe/probe_green_chroma.sh               # 色度归零归因（目标默认 768x432）
+SRC=<源视频> OUT_W=640 OUT_H=360 bash probe/probe_green_chroma.sh   # 自定义目标尺寸
 ```
+
+> 色度探针的 `SRC` 必须是**裁剪前的原片**（两轴都大于目标）。源 == 目标时 crop 是恒等
+> 操作、且脚本会命中「同尺寸跳过」，第 2/3 节的手写对照与第 4/5/6 节都会失去判别力 ——
+> 探针会**直接终止**并提示换源或调 `OUT_W`/`OUT_H`（确实要测恒等 crop 才加
+> `ALLOW_IDENTITY_CROP=1`）。
 
 > 测试素材与探针工作目录都在 `temp/`（gitignored），**不入库**；
 > `verify/*.py` 需要 fixture 时会用 lavfi 按需生成。

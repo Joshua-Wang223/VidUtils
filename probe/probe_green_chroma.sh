@@ -11,9 +11,13 @@
 # 用法（只在有 NVIDIA GPU 的机器上跑，T4）：
 #   SRC=/path/原片.mp4 bash probe/probe_green_chroma.sh
 #   SRC=... SS=600 SECS=3 bash ...        # 截取片段的位置/长度
+#   SRC=... OUT_W=640 OUT_H=360 bash ...  # 目标尺寸（默认 768x432，原始缺陷口径）
 #   REPO=$HOME/VidUtils PY=python3 bash ...
 #   SELFTEST=1 bash ...                   # 无 GPU 也能跑：只验证取样/判词装置
 # ⚠ 工装已转正入库（probe/），随 git pull 同步，不再需要手动拷到 T4。
+# ⚠ 源必须是**裁剪前的原片**（两轴都大于目标）。源 == 目标时 crop 是恒等操作，第 2/3
+#   节的手写对照与第 6 节的命令级二分都将失去判别力 → 探针会直接终止（见第 0 节
+#   的可裁剪性预检）；确实要测「恒等 crop 下是否也复现」时用 ALLOW_IDENTITY_CROP=1。
 
 # ── 行尾自检（放在 set 之前：CRLF 会让下一行的 set 当场失败退出）──
 # 本机 Git Bash 容忍 CR、Linux 的 bash 不容忍 → 本机验证通过 ≠ 目标机能跑。
@@ -62,6 +66,9 @@ echo "  仓库根: $REPO"
 PY=${PY:-python3}
 SS=${SS:-600}          # 从原片第几秒开始截
 SECS=${SECS:-3}        # 截多长
+# 目标尺寸（crop 输出）。默认 768x432 = 原始缺陷的复现口径；源尺寸不足时用小一档的值。
+OUT_W=${OUT_W:-768}
+OUT_H=${OUT_H:-432}
 
 # ---------- awk 程序（全部 POSIX 子集：T4 是 mawk，本机是 gawk）----------
 # 规则：不许跨行三元（`?:` 前换行 mawk 直接语法错），判词一律 if/else 逐行赋值。
@@ -205,8 +212,10 @@ scrun() {
   rm -f "$out"
   # 注意：脚本只有长选项 --input / --output（没有 -i / -o），写短选项会直接
   # 报 "the following arguments are required: --input, --output"。
+  # --no-skip-same-size：见第 4 节 SKIP_OPT 的定义（老 checkout 没有就不传）。
   "$PY" "$REPO/vidcrop_hwaccel.py" --input "$SEG" --output "$out" --mode crop \
-      --output-width 768 --output-height 432 --overwrite "$@" \
+      --output-width "$OUT_W" --output-height "$OUT_H" --overwrite \
+      ${SKIP_OPT[@]+"${SKIP_OPT[@]}"} "$@" \
       >"$WORK/s_$tag.out" 2>&1 || true
   strat=$(grep -m1 '策略' "$WORK/s_$tag.out" | sed 's/^ *//' || true)
   if [[ -f "$out" ]]; then
@@ -284,9 +293,34 @@ echo "  推导的 hwdownload 下载格式: $DL_FMT"
 PATH_FF=$(command -v ffmpeg || true)
 echo "  探针用的 ffmpeg : $FF  $("$FF" -version 2>/dev/null | head -1 | awk '{print $3}')"
 echo "  脚本用的 ffmpeg : ${PATH_FF:-未找到}  $("${PATH_FF:-$FF}" -version 2>/dev/null | head -1 | awk '{print $3}')"
-SRC_H=$("$FP" -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$SRC")
-CROP_Y=$(( (SRC_H - 432) / 2 )); (( CROP_Y < 0 )) && CROP_Y=0
-echo "  居中裁剪 y 偏移 : $CROP_Y（与脚本 _build_crop_filter_str 同一算法）"
+SRC_WH=$("$FP" -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$SRC")
+SRC_W=${SRC_WH%,*}; SRC_H=${SRC_WH#*,}
+
+# ── 可裁剪性预检（2026-09-22 新增）──
+# 来历：此前对**已裁剪成品**（_Croped.mp4，源本身就是 768x432）跑过一轮，目标也是
+# 768x432 → 源 == 目标。后果有三，全是「白跑」而非报错：
+#   · 第 2/3 节手写命令的 crop 什么都不裁 → 那一排 ✓ 对「crop 触发绿色」无判别力；
+#   · 脚本命中 vidcrop_hwaccel.py:4066 的「同尺寸跳过」→ 第 4 节全「无产物」；
+#   · 该守卫在 dry-run 打印块（:4168）之前返回 → 第 5 节空、第 6 节抓不到执行命令。
+# 所以这里**默认终止**并给出两条出路，而不是静默换个跑法 —— 静默换法只是把
+# 「无信息」换成「尺寸不对口的信息」，一样不可核对。
+if (( OUT_W > SRC_W || OUT_H > SRC_H )); then
+  echo "  ✗ 目标尺寸 ${OUT_W}x${OUT_H} 大于源 ${SRC_W}x${SRC_H}：crop 模式不允许放大。"
+  echo "    改用不超过源的目标尺寸，例：OUT_W=640 OUT_H=360 bash $0"; exit 2
+fi
+if (( OUT_W == SRC_W && OUT_H == SRC_H )) && [[ "${ALLOW_IDENTITY_CROP:-0}" != 1 ]]; then
+  echo "  ✗ 源尺寸 ${SRC_W}x${SRC_H} == 目标尺寸 ${OUT_W}x${OUT_H}：这次 crop 是恒等操作，"
+  echo "    第 2/3 节手写对照与第 6 节命令级二分都没有判别力（本轮会白跑）。"
+  echo "    · 换裁剪前的原片：SRC=/path/未裁剪原片.mp4 ..."
+  echo "    · 或显式缩小目标：OUT_W=640 OUT_H=360 ..."
+  echo "    · 确实要测「恒等 crop 下是否也复现」：ALLOW_IDENTITY_CROP=1 ..."
+  exit 2
+fi
+# x/y 都用与 vidcrop_hwaccel.py `_build_crop_filter_str` 相同的居中算法
+# （历史 bug：这里 x 曾硬写 0，源比目标宽时与脚本发出的命令不一致）。
+CROP_X=$(( (SRC_W - OUT_W) / 2 )); (( CROP_X < 0 )) && CROP_X=0
+CROP_Y=$(( (SRC_H - OUT_H) / 2 )); (( CROP_Y < 0 )) && CROP_Y=0
+echo "  居中裁剪偏移   : x=$CROP_X y=$CROP_Y（与脚本 _build_crop_filter_str 同一算法）"
 
 SEG="$WORK/seg.mp4"
 "$FF" -nostdin -y -hide_banner -loglevel error -ss "$SS" -t "$SECS" -i "$SRC" \
@@ -326,7 +360,7 @@ chkd A2_软解仅解码 "$SEG"
 A2U=$LAST_U
 
 echo; echo "═══ 2. 编码层：同解码 + crop，换编码器（谁把色度弄丢的）═══"
-CROP="crop=768:432:0:$CROP_Y"     # 与脚本发出的裁剪参数逐字一致
+CROP="crop=$OUT_W:$OUT_H:$CROP_X:$CROP_Y"   # 与脚本发出的裁剪参数逐字一致
 if gpu_ok; then
   enc B0_auto+crop+nvenc   "$CROP" hevc_nvenc -hwaccel auto
   B0U=$LAST_U
@@ -352,11 +386,18 @@ else
   C1U=-1; echo "  C1_显式hwdownload+nvenc    （跳过：无 GPU）"
 fi
 
-echo; echo "═══ 4. 脚本矩阵：vidcrop_hwaccel.py（768x432 crop）═══"
+echo; echo "═══ 4. 脚本矩阵：vidcrop_hwaccel.py（${OUT_W}x${OUT_H} crop）═══"
 # T4 上跑的可能是旧版（没有 --decode，策略 2 硬写 -hwaccel auto）——先把版本摆出来，
 # 再按版本把「解码轴」翻译成它认的参数名，否则整节都是 unrecognized arguments。
 DECODE_NEW=1
 if ! "$PY" "$REPO/vidcrop_hwaccel.py" --help 2>&1 | grep -q -- '--decode'; then DECODE_NEW=0; fi
+# --no-skip-same-size：HEAD 已支持，但老 checkout 可能没有。第 0 节的可裁剪性预检已
+# 保证 crop 非恒等（同尺寸直接终止），这个开关是给 ALLOW_IDENTITY_CROP=1 放行时兜底；
+# 不支持就不传，免得 argparse 报 unrecognized arguments 把整节打死（同 DECODE_NEW 的顾虑）。
+SKIP_OPT=()
+if "$PY" "$REPO/vidcrop_hwaccel.py" --help 2>&1 | grep -q -- '--no-skip-same-size'; then
+  SKIP_OPT=(--no-skip-same-size)
+fi
 dec() {  # dec <auto|cpu|cuda> → 该版本对应的两个参数
   local v=$1
   if (( DECODE_NEW )); then
@@ -373,6 +414,11 @@ else
   echo "  支持 --decode：**否** → 旧版，策略 2 硬写 -hwaccel auto；"
   echo "                 先 `git -C $REPO pull` 到 HEAD 再跑一遍 default，看是否已修"
 fi
+if ((${#SKIP_OPT[@]})); then
+  echo "  支持 --no-skip-same-size：是（脚本侧同尺寸跳过不再会吞掉产物）"
+else
+  echo "  支持 --no-skip-same-size：**否**（旧 checkout；靠第 0 节预检保证 crop 非恒等）"
+fi
 if gpu_ok; then
   scrun default
   scrun decode-cpu     $(dec cpu)
@@ -386,7 +432,8 @@ scrun all-cpu        $(dec cpu) --codec libx265
 
 echo; echo "═══ 5. 远程真实命令（--dry-run，与本地 mock 枚举对照）═══"
 "$PY" "$REPO/vidcrop_hwaccel.py" --input "$SEG" --output "$WORK/dry.mp4" --mode crop \
-    --output-width 768 --output-height 432 --codec hevc_nvenc --overwrite --dry-run 2>&1 \
+    --output-width "$OUT_W" --output-height "$OUT_H" --codec hevc_nvenc --overwrite \
+    ${SKIP_OPT[@]+"${SKIP_OPT[@]}"} --dry-run 2>&1 \
   | grep -E '策略|执行命令' | sed 's/^/  /' || true
 
 # ═══ 6. 命令级二分：拿脚本自己吐出来的那条真命令，逐组删选项再跑 ═══
@@ -398,11 +445,14 @@ echo; echo "═══ 5. 远程真实命令（--dry-run，与本地 mock 枚举�
 echo; echo "═══ 6. 命令级二分：照脚本自己的命令成组删选项（含 6b 全组合穷举）═══"
 if [[ -f "$REPO/vidcrop_hwaccel.py" ]]; then
   CMD=$("$PY" "$REPO/vidcrop_hwaccel.py" --input "$SEG" --output "$WORK/dry.mp4" \
-        --mode crop --output-width 768 --output-height 432 --codec hevc_nvenc \
-        --overwrite --dry-run 2>&1 \
+        --mode crop --output-width "$OUT_W" --output-height "$OUT_H" --codec hevc_nvenc \
+        --overwrite ${SKIP_OPT[@]+"${SKIP_OPT[@]}"} --dry-run 2>&1 \
         | grep -m1 '执行命令' | sed -E 's/^.*执行命令[^:]*: //' || true)
   if [[ -z "$CMD" ]]; then
     echo "  ✗ 没能从 --dry-run 输出里解析出「执行命令」（看上面的打印）"
+    echo "    常见原因：源 == 目标 → 脚本命中「同尺寸跳过」，在 dry-run 打印之前就返回。"
+    echo "    第 0 节的可裁剪性预检默认已挡掉这种情况；只有「ALLOW_IDENTITY_CROP=1 放行」"
+    echo "    且「脚本不支持 --no-skip-same-size」同时成立时才会走到这里。"
   else
     echo "  抓到的原命令长度: ${#CMD} 字符"
     # drop <命令串> <sed 表达式...>：按顺序删掉若干组选项

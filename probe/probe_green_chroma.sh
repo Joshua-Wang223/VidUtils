@@ -118,10 +118,19 @@ BEGIN{
     printf "   ③ 只在 hevc_nvenc 上坏（软编正常）→ NVENC 输入端上载/格式协商的问题\n"
   } else if (b1 < 0 && b2 < 0 && b3 < 0) {
     printf "   ⚠ 三个编码变体都没跑通，看上面的 FAILED 行\n"
+  } else if (v0 >= 0 && v0 < 16) {
+    printf "   ④ 手写的 ffmpeg 命令全部正常，且**脚本原命令（V0）确实复现了绿色**\n"
+    printf "      → 差别只可能来自脚本那条命令里多带的选项组。看第 6 节的命令级二分：\n"
+    printf "        逐组删选项后哪一格先恢复正常，那一格删掉的组就是元凶\n"
+    printf "        （V8/V9 用来判「硬解 × 输出色彩四参」是否要成对出现）\n"
+  } else if (v0 >= 16) {
+    printf "   ⚠ 手写的 ffmpeg 命令与**脚本原命令（V0）都没有复现绿色** → 本轮没有复现故障，别下结论\n"
+    printf "      · 常见原因：源不在复现口径（尺寸/编码/内容不触发），或脚本已含修复\n"
+    printf "      · 先确认第 4 节 default 是绿的、第 0 节的源是复现口径，再换个复现源重跑\n"
   } else {
-    printf "   ④ 手写的 ffmpeg 命令全部正常 → 差别只可能来自脚本那条命令里多带的选项组\n"
-    printf "      → **看第 6 节的命令级二分**：V0 应复现绿色，逐组删选项后哪一格先恢复正常，\n"
-    printf "        那一格删掉的组就是元凶（V8/V9 用来判「硬解 × 输出色彩四参」是否要成对出现）\n"
+    printf "   ⚠ 手写的 ffmpeg 命令全部正常，但第 6 节没抓到脚本命令（V0 未跑）→ 无法定位\n"
+    printf "      · 先看第 4 节 default 是否复现绿色、第 5 节是否打印了「执行命令」\n"
+    printf "      · 两者正常后才会进第 6 节的命令级二分\n"
   }
   if (b1 >= 0 && b1 < 16 && c1 >= 0 && c1 >= 16) {
     printf "   候选 1 有救：加 -hwaccel_output_format cuda + 显式 hwdownload 后色度正常\n"
@@ -254,10 +263,29 @@ if [[ "${SELFTEST:-0}" == 1 ]]; then
   _y=$(posix_awk "$AWK_YUV" <<<'lavfi.signalstats.UAVG=0.01 lavfi.signalstats.YAVG=100 lavfi.signalstats.VAVG=0.01' 2>&1) || {
     echo "  ✗ AWK_YUV 解析/执行失败（T4 的 mawk 会报同样错）：$_y"; exit 1; }
   _v=$(posix_awk -v us=105 -v vs=122 -v a1=0.01 -v b1=0.01 -v b2=0.01 -v b3=105 -v c1=105 \
-       "$AWK_VERDICT" 2>&1) || {
+       -v v0=-1 "$AWK_VERDICT" 2>&1) || {
     echo "  ✗ AWK_VERDICT 解析/执行失败（T4 的 mawk 会报同样错）：$_v"; exit 1; }
   [[ -n "$_y" && -n "$_v" ]] || { echo "  ✗ awk 程序跑出了空输出"; exit 1; }
+  # ④ 分支的判别（2026-09-22 新增）：手写命令全正常时，必须再看脚本原命令 V0 是否复现绿色，
+  # 否则会在"本轮根本没复现故障"时照样断言「元凶在脚本多带的选项组」（上一轮就是被这句误导）。
+  # a0/b0 传 -1 是为了跳过 ⓪/⓪** 两个分支（它们用 a0/b0 是否 >=0 判断"跑过没有"）。
+  _v4a=$(posix_awk -v us=105 -v vs=122 -v a0=-1 -v a1=105 -v b0=-1 -v b1=105 -v b2=105 \
+         -v b3=105 -v c1=105 -v v0=0.01 "$AWK_VERDICT" 2>&1) || {
+    echo "  ✗ ④ 分支（V0 绿）执行失败：$_v4a"; exit 1; }
+  _v4b=$(posix_awk -v us=105 -v vs=122 -v a0=-1 -v a1=105 -v b0=-1 -v b1=105 -v b2=105 \
+         -v b3=105 -v c1=105 -v v0=105 "$AWK_VERDICT" 2>&1) || {
+    echo "  ✗ ④ 分支（V0 不绿）执行失败：$_v4b"; exit 1; }
+  _v4c=$(posix_awk -v us=105 -v vs=122 -v a0=-1 -v a1=105 -v b0=-1 -v b1=105 -v b2=105 \
+         -v b3=105 -v c1=105 -v v0=-1 "$AWK_VERDICT" 2>&1) || {
+    echo "  ✗ ④ 分支（V0 未跑）执行失败：$_v4c"; exit 1; }
+  printf '%s' "$_v4a" | grep -q '确实复现了绿色' \
+    || { echo "  ✗ ④ 分支没按 V0=绿 判成「元凶在脚本多带的选项组」"; exit 1; }
+  printf '%s' "$_v4b" | grep -q '没有复现故障' \
+    || { echo "  ✗ ④ 分支没按 V0=不绿 判成「本轮没有复现故障」"; exit 1; }
+  printf '%s' "$_v4c" | grep -q '没抓到脚本命令' \
+    || { echo "  ✗ ④ 分支没按 V0 未跑 判成「无法定位」"; exit 1; }
   echo "  ✓ 两段 awk 程序 POSIX 解析通过且有输出（-v 必须写在程序文本之前）"
+  echo "  ✓ ④ 分支按 V0 三分：绿→元凶在脚本选项组 / 不绿→本轮没复现 / 未跑→无法定位"
   printf '%s\n' "$_v" | sed 's/^/    /'
   exit 0
 fi
@@ -516,6 +544,7 @@ if [[ -f "$REPO/vidcrop_hwaccel.py" ]]; then
     E_HW='s/ -hwaccel cuda -hwaccel_device 0//'
 
     runv V0_脚本原命令 "$CMD"                    # 应当复现绿色
+    V0U=$LAST_U                                  # 交给尾判读的 ④ 分支：V0 不绿 = 本轮没复现
     runv V1_删输出色彩四参 "$(drop "$CMD" "$E_COL")"
     runv V2_删err_detect_fflags "$(drop "$CMD" "$E_ERR")"
     runv V3_删noautorotate "$(drop "$CMD" "$E_ROT")"
@@ -586,5 +615,6 @@ fi
 
 awk -v us="${US:--1}" -v vs="${VS:--1}" -v a0="${A0U:--1}" -v a1="${A1U:--1}" \
     -v b0="${B0U:--1}" -v b0b="${B0BU:--1}" -v b1="${B1U:--1}" \
-    -v b2="${B2U:--1}" -v b3="${B3U:--1}" -v c1="${C1U:--1}" "$AWK_VERDICT"
+    -v b2="${B2U:--1}" -v b3="${B3U:--1}" -v c1="${C1U:--1}" \
+    -v v0="${V0U:--1}" "$AWK_VERDICT"
 echo; echo "产物与日志都在 $WORK/"

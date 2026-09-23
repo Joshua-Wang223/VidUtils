@@ -121,6 +121,15 @@
   改为按 V0 三分（V0 不绿 → 判「本轮没有复现故障」，不再冤指脚本选项组）；
   判据 `verify/verify_color_tagging.py`、`verify/verify_chroma_hook.py`、
   `test/test_green_chroma_regression.sh`（含"删掉 setparams 必须复现"的红灯自检）
+- [码率控制轴：`--rc-mode` / `--qp` / `--lookahead` / `--bitrate`](project_rate_control_params.md)
+  — 四个参数默认值全部 = **不下发**（不传时命令逐字不变；第三道回归门
+  `test/dump_enc_options.sh` + `baseline/enc_before.txt` 钉住）；`-rc` / `-qp` 是
+  **NVENC 专属**（非 NVENC 告警忽略、hwaccel `strict` 下报错）；`--lookahead` 按编码器映射
+  （x264/NVENC 用 `-rc-lookahead`、x265 走 `-x265-params`、vp9/aom 用 `-lag-in-frames`、
+  svtav1 不下发），且**默认值三边不同**（NVENC 0（关闭）/ x265 20 / x264 自定）；
+  ⭐ 实测 `-x265-params A -x265-params B` 是**后者整条覆盖前者** → lookahead 必须与
+  HDR 元数据合并成同一条（已修，否则静默抹掉 HDR）；`constqp` × `--bitrate`/质量参数报错、
+  `vbr*`/`cbr*` 下与质量参数并存（= 受码率约束的恒定质量）；判据 `verify/verify_rc_lookahead.py`
 
 ---
 

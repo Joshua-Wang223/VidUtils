@@ -1,0 +1,12 @@
+hwaccel  默认编码器(无质量参数)   -c:v libx264 -crf 21 -preset medium 
+cpu_v2   默认编码器(无质量参数)   -c:v libx264 -crf 21 -preset medium -pix_fmt yuv420p 
+hwaccel  libx265                            -c:v libx265 -crf 21 -preset medium 
+cpu_v2   libx265                            -c:v libx265 -crf 21 -preset medium -pix_fmt yuv420p 
+hwaccel  libvpx-vp9                         -c:v libvpx-vp9 -b:v 0 -crf 32 
+cpu_v2   libvpx-vp9                         -c:v libvpx-vp9 -b:v 0 -crf 32 -pix_fmt yuv420p 
+hwaccel  libsvtav1                          -c:v libsvtav1 -crf 30 -preset 8 
+cpu_v2   libsvtav1                          -c:v libsvtav1 -crf 30 -preset 8 -pix_fmt yuv420p 
+hwaccel  libx264 显式 --cq(降级换算)  -c:v libx264 -crf 18 -preset medium 
+cpu_v2   libx264 显式 --cq(降级换算)  -c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p 
+hwaccel  hevc_nvenc 显式 --cq             -c:v libx265 -crf 16 -preset medium 
+cpu_v2   hevc_nvenc 显式 --cq             -c:v hevc_nvenc -cq 20 -preset p5 -pix_fmt yuv420p 

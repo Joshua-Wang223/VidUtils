@@ -143,6 +143,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -767,6 +768,27 @@ DEFAULT_PRESET_CPU = "medium"
 DEFAULT_PRESET_GPU = "p5"
 DEFAULT_PRESET_SVTAV1 = "8"
 
+# ── 码率控制轴：--rc-mode / --qp / --lookahead / --bitrate ────────────────
+# 与 vidcrop_hwaccel.py 的同名常量逐字一致（孪生约定）。本脚本没有 --fallback-policy，
+# 所以"能力不存在"时只能告警、没有 strict 分支；其余取值/量程/报错文案都一样。
+# 写法沿用 --scale-algo 的 `<backend>-<取值>` / 裸 `<取值>`：本轴只有 NVENC 一个后端
+# （`-rc` 是 NVENC 专属，libx264 / libx265 没有"码率控制模式"这个开关，它们用
+# -crf / -b:v / -qp 的组合表达），故裸名不歧义、与前缀写法同样收。
+_RC_BACKEND = "nvenc"
+_RC_MODES = ("constqp", "vbr", "vbr_hq", "cbr", "cbr_hq", "cbr_ld_hq")
+_RC_MODE_HELP = ("nvenc：" + " ".join(_RC_MODES)
+                 + "\n  （constqp=恒定 QP（配 --qp）；vbr / vbr_hq=可变码率；"
+                   "cbr / cbr_hq / cbr_ld_hq=恒定码率（配 --bitrate））")
+# 允许与 --bitrate 共存的 rc 模式（含 auto = 不下发 -rc）。constqp 不在其中：它是
+# 恒定 QP 模式、会完全无视 -b:v（T4 实测，见仓库 memory/project_t4_gpu_capabilities.md）。
+_RC_MODES_WITH_BITRATE = ("auto",) + tuple(m for m in _RC_MODES if m != "constqp")
+_LOOKAHEAD_RANGE = (0, 250)
+_QP_RANGE = (0, 51)
+_BITRATE_RE = re.compile(r"^\d+(\.\d+)?[kKmM]?$")
+# 量程报错里的"为什么"必须与 vidcrop_hwaccel.py 逐字一致（报错首行可对比）
+_LOOKAHEAD_HINT = f"x264 的上限就是 {_LOOKAHEAD_RANGE[1]}；不指定=沿用各编码器默认"
+_QP_HINT = "与 --cq 同量纲（NVENC 的 -qp 量程）"
+
 
 def detect_cpu_profile() -> Tuple[int, float]:
     """返回 (逻辑 CPU 核数, 可用内存 GB)。探测失败时回退 (os.cpu_count() or 4, 0.0)。"""
@@ -976,6 +998,69 @@ def _resolve_quality_params(
     return None, None
 
 
+def apply_rc_control_args(codec: str,
+                          rc_mode: str = "auto",
+                          qp: Optional[int] = None,
+                          lookahead: Optional[int] = None,
+                          warn: Optional[Callable[[str], None]] = None,
+                          ) -> Tuple[List[str], List[str]]:
+    """把 --rc-mode / --qp / --lookahead 落到 ffmpeg 参数上。
+
+    与 vidcrop_hwaccel.py 的同名函数对应（差别只有：本脚本没有 --fallback-policy，
+    故一律"告警 + 忽略"，没有 strict 分支）。
+
+    Returns:
+        (args, x265_params)
+        · args        直接追加进命令的选项（-rc / -qp / -rc-lookahead / -lag-in-frames）；
+        · x265_params **必须由调用方合并进同一条 -x265-params**（libx265 的 lookahead
+          只能这样传）。为什么不在这里直接发一条：实测两次 -x265-params 是"后者整条
+          覆盖前者"，而 HDR 静态元数据也走 -x265-params —— 各发一条会让后发的那条
+          **静默抹掉 HDR 元数据**，故统一交给 build_hdr_args() 合并。
+
+    取值与生效范围：
+      · `-rc` / `-qp`：只有 NVENC 认。本脚本默认编码器是 libx264，也没有硬件探测
+        （--codec *_nvenc 是原样透传给 ffmpeg），所以这里同样按**编码器名**判：
+        非 NVENC → 忽略并告知。
+      · lookahead：libx264 → `-rc-lookahead`；NVENC → `-rc-lookahead`；
+        libx265 → 写进 `-x265-params rc-lookahead=`（无顶层选项）；
+        libvpx / libvpx-vp9 / libaom-av1 → `-lag-in-frames`（vp9 另有 0~25 的
+        `-rc_lookahead`，但 `-lag-in-frames` 是两者通用且无上限的那个，故用它）；
+        其余（libsvtav1 / prores …）键名未实测 → 不下发，明确告知。
+    """
+    c = (codec or "").lower()
+    args: List[str] = []
+    x265_params: List[str] = []
+
+    def _ignore(what: str, why: str) -> None:
+        if warn:
+            warn(f"{what} 未生效（{why}），已忽略")
+
+    _want_rc = rc_mode != "auto" or qp is not None
+    if _want_rc:
+        if c in NVENC_CODECS:
+            if rc_mode != "auto":
+                args += ["-rc", rc_mode]
+            if qp is not None:
+                args += ["-qp", str(qp)]
+        else:
+            _asked = " 与 ".join(
+                n for n, on in (("--rc-mode", rc_mode != "auto"), ("--qp", qp is not None)) if on)
+            _ignore(_asked, f"-rc / -qp 是 NVENC 专属选项，编码器 {c} 没有这个开关")
+
+    if lookahead is not None:
+        if c in NVENC_CODECS or c == "libx264":
+            args += ["-rc-lookahead", str(lookahead)]
+        elif c == "libx265":
+            x265_params.append(f"rc-lookahead={lookahead}")
+        elif c in ("libvpx", "libvpx-vp9", "libaom-av1"):
+            args += ["-lag-in-frames", str(lookahead)]
+        else:
+            _ignore(f"--lookahead {lookahead}",
+                    f"编码器 {c} 的 lookahead 选项名未经实测，不代为下发")
+
+    return args, x265_params
+
+
 def _fmt_size(n_bytes: int) -> str:
     """格式化字节数为人类可读字符串。"""
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -1155,8 +1240,14 @@ def build_encoder_options_v2(
     preset: str,
     pix_fmt: Optional[str],
     warn: Callable[[str], None],
+    bitrate: Optional[str] = None,
 ) -> List[str]:
-    """V2 版本：支持 crf 和 cq 双参数"""
+    """V2 版本：支持 crf 和 cq 双参数
+
+    bitrate（--bitrate）只在这里参与判定 VP9 的 `-b:v 0`：用户给了码率时**不补这个 0**
+    （同一个 -b:v 发两次会互相打架，且此时要的正是"受码率约束"的语义）；真正的
+    `-b:v <码率>` 由调用方在下发完本函数的选项后追加，与 hwaccel 侧同序。
+    """
     c = codec.lower()
     opts: List[str] = ["-c:v", codec]
 
@@ -1166,7 +1257,7 @@ def build_encoder_options_v2(
     if cq is not None and encoder_supports_cq(codec):
         opts += ["-cq", str(cq)]
     elif crf is not None and encoder_supports_crf(codec):
-        if c in ("libvpx", "libvpx-vp9"):
+        if c in ("libvpx", "libvpx-vp9") and not bitrate:
             # VP8/VP9 的 CRF 必须配合 -b:v 0 才是纯恒定质量，否则退化成
             # 受码率上限约束的 constrained quality。
             opts += ["-b:v", "0"]
@@ -1761,36 +1852,41 @@ def resolve_audio_codec_for_container(audio_codec: str,
 
 def build_hdr_args(meta: Dict, codec: str,
                    warn: Optional[Callable[[str], None]] = None,
-                   hdr_mode: str = "auto") -> List[str]:
+                   hdr_mode: str = "auto",
+                   extra_x265_params: Optional[List[str]] = None) -> List[str]:
     """
     HDR10 静态元数据写入。色彩三参数由 build_color_args 从源透传，此处不重复指定。
 
     - libx265：显式 -x265-params master-display / max-cll / hdr10=1，可靠。
     - NVENC：依赖帧 side_data 自动传播；走 CPU 回退链路时会丢失，故告警。
     - 其余编码器：只能保住色彩三参数与位深。
+
+    extra_x265_params 是**另外要写进 -x265-params 的键**（目前唯一来源是 --lookahead，
+    见 apply_rc_control_args）。为什么必须合并成同一条：实测
+    `-x265-params A -x265-params B` 是**后者整条覆盖前者**（本机 ffmpeg：先
+    `rc-lookahead=40` 再 `log-level=info`，x265 报出的 Lookahead 回到默认 20）——
+    HDR 元数据与 lookahead 都走这条选项，各发一条会让后发的静默抹掉 HDR 元数据。
     """
-    d = meta["derived"]
-    if not d["is_hdr"]:
-        return []
-    if hdr_mode in _HDR_SDR_TAGGING_MODES:
-        return []
     c = (codec or "").lower()
-    out: List[str] = []
-    if c == "libx265" and d["master_display"]:
-        params = ["master-display=" + d["master_display"]]
-        if d["max_cll"]:
-            params.append("max-cll=" + d["max_cll"])
-        params.append("hdr10=1")
-        out += ["-x265-params", ":".join(params)]
-    elif c.endswith("_nvenc"):
-        # 实测（ffmpeg 6.1 + Tesla T4）：NVENC 不写入 mastering display / MaxCLL，
-        # hevc_metadata bsf 也无此能力，属编码器封装限制。
-        if warn and d["master_display"]:
-            warn("NVENC 不写入 mastering display / MaxCLL，HDR10 静态元数据会丢失"
-                 "（色彩三参数与 10bit 位深仍保留）；如需完整 HDR10 元数据请用 libx265")
-    elif warn and d["master_display"]:
-        warn(f"编码器 {c} 无法写入 mastering display / MaxCLL，仅保留色彩三参数与位深")
-    return out
+    extra = list(extra_x265_params or []) if c == "libx265" else []
+    d = meta["derived"]
+    params: List[str] = []
+    if d["is_hdr"] and hdr_mode not in _HDR_SDR_TAGGING_MODES:
+        if c == "libx265" and d["master_display"]:
+            params = ["master-display=" + d["master_display"]]
+            if d["max_cll"]:
+                params.append("max-cll=" + d["max_cll"])
+            params.append("hdr10=1")
+        elif c.endswith("_nvenc"):
+            # 实测（ffmpeg 6.1 + Tesla T4）：NVENC 不写入 mastering display / MaxCLL，
+            # hevc_metadata bsf 也无此能力，属编码器封装限制。
+            if warn and d["master_display"]:
+                warn("NVENC 不写入 mastering display / MaxCLL，HDR10 静态元数据会丢失"
+                     "（色彩三参数与 10bit 位深仍保留）；如需完整 HDR10 元数据请用 libx265")
+        elif warn and d["master_display"]:
+            warn(f"编码器 {c} 无法写入 mastering display / MaxCLL，仅保留色彩三参数与位深")
+    params += extra
+    return ["-x265-params", ":".join(params)] if params else []
 
 
 def build_aspect_args(meta: Dict) -> List[str]:
@@ -2229,6 +2325,69 @@ def parse_scale_algo(spec: Optional[str]) -> Tuple[str, str, str]:
     return backend, sw, cuda or _CUDA_SCALE_ALGO
 
 
+def parse_rc_mode(spec: Optional[str]) -> str:
+    """解析 --rc-mode → 'auto' | 'constqp' | 'vbr' | 'vbr_hq' | 'cbr' | 'cbr_hq' | 'cbr_ld_hq'。
+
+    与 vidcrop_hwaccel.py 的同名函数逐字对应（孪生约定：取值表、量程、报错首行都要
+    一致）。规则与 parse_scale_algo 同形（`<backend>-<取值>` 或裸 `<取值>`），但有两处
+    **有意**的不同：
+
+      · 本轴只有 NVENC 一个后端（`-rc` 是 NVENC 专属，libx264/libx265 没有这个开关），
+        故裸名不会歧义，一律接受；
+      · **允许显式写 auto**（其默认值就叫 auto），禁止它会重演"帮助里写的默认值
+        敲不出来"那个坑。
+    """
+    if not spec:
+        return "auto"
+    s = spec.strip().lower()
+    head, sep, tail = s.partition("-")
+    if sep:
+        if head != _RC_BACKEND:
+            raise ValueError(
+                f"--rc-mode '{spec}' 无效：未知后端前缀 '{head}-'"
+                f"（本轴只有 {_RC_BACKEND}- —— -rc 是 NVENC 专属选项）。\n"
+                f"  可用值：auto，或 <mode>（也可写 {_RC_BACKEND}-<mode>）。\n  {_RC_MODE_HELP}")
+        s = tail
+    if not s:
+        raise ValueError(
+            f"--rc-mode '{spec}' 无效：前缀 '{_RC_BACKEND}-' 后面缺少模式名。\n"
+            f"  可用值：auto，或 <mode>（也可写 {_RC_BACKEND}-<mode>）。\n  {_RC_MODE_HELP}")
+    # auto 也放行：它既是不传时的默认值，也允许显式写（含 nvenc-auto 前缀形式）
+    if s == "auto" or s in _RC_MODES:
+        return s
+    raise ValueError(
+        f"--rc-mode '{spec}' 无效：NVENC 没有模式 '{s}'。\n"
+        f"  可用值：auto，或 <mode>（也可写 {_RC_BACKEND}-<mode>）。\n  {_RC_MODE_HELP}")
+
+
+def parse_bitrate(spec: Optional[str]) -> Optional[str]:
+    """解析/校验 --bitrate（ffmpeg 记法：8M / 8000k / 12000000，裸数字按 bps）。
+
+    与 parse_rc_mode 一样只抛 ValueError —— 报错由调用方打成 `[ERROR] …`，这样两个
+    脚本的报错首行能逐字对比（交给 argparse 的 type= 会先印 usage 行）。
+    """
+    if not spec:
+        return None
+    s = str(spec).strip()
+    if not _BITRATE_RE.match(s):
+        raise ValueError(
+            f"--bitrate '{spec}' 无效：需要码率写法，如 8M / 8000k / 12000000"
+            f"（裸数字按 bps 解释）。")
+    return s
+
+
+def check_int_range(value: int, opt: str, rng: Tuple[int, int], why: str) -> int:
+    """校验整数量程（--lookahead / --qp 共用）；越界抛 ValueError。
+
+    非整数输入在 argparse 的 type=int 那层就被挡下了，此处只管量程。
+    """
+    lo, hi = rng
+    if not (lo <= value <= hi):
+        raise ValueError(
+            f"{opt} 超出范围：需要 {lo}~{hi} 的整数（{why}），收到 {value}。")
+    return value
+
+
 def build_crop_filter(src_w: int, src_h: int, dst_w: int, dst_h: int) -> str:
     if dst_w > src_w or dst_h > src_h:
         raise ValueError(
@@ -2481,6 +2640,10 @@ def build_ffmpeg_cmd(
     crop_ratio: Optional[Tuple[int, int]] = None,
     sw_algo: str = _SW_SCALE_FLAGS,
     hdr: str = "auto",
+    rc_mode: str = "auto",
+    qp: Optional[int] = None,
+    lookahead: Optional[int] = None,
+    bitrate: Optional[str] = None,
 ) -> List[str]:
     if codec.lower() == "copy":
         raise ValueError("使用视频滤镜时不能使用 -c:v copy，请改用 libx264 / libx265 等编码器")
@@ -2534,13 +2697,23 @@ def build_ffmpeg_cmd(
     cmd += ["-filter:v:0" if keep_metadata and meta is not None else "-vf", vf]
 
     # 编码器选项 (支持 crf 和 cq)
-    cmd += build_encoder_options_v2(codec, crf, cq, preset, pix_fmt, warn)
+    cmd += build_encoder_options_v2(codec, crf, cq, preset, pix_fmt, warn,
+                                    bitrate=bitrate)
     cmd += pres["post"]                  # 封面/字幕逐流 codec，需覆盖上面的 -c:v
     cmd += ["-threads", str(max(1, threads))]
 
+    # 码率控制轴（--rc-mode / --qp / --lookahead）：-rc / -qp 只有 NVENC 认，
+    # lookahead 按编码器分别下发；libx265 那条必须与 HDR 元数据**合并成同一条**
+    # -x265-params，故 rc_x265 交给下面的 build_hdr_args()。
+    rc_args, rc_x265 = apply_rc_control_args(codec, rc_mode, qp, lookahead, warn)
+    if bitrate:
+        cmd += ["-b:v", bitrate]
+    cmd += rc_args
+
     # [META-KEEP] HDR10 静态元数据（libx265 走 -x265-params，其余尽力而为）
     if meta is not None:
-        cmd += build_hdr_args(meta, codec, warn, hdr_mode=_hdr_mode)
+        cmd += build_hdr_args(meta, codec, warn, hdr_mode=_hdr_mode,
+                              extra_x265_params=rc_x265)
 
     # WebM 容器不接受 AAC 等音轨，必要时自动改 Opus 重编码
     audio_codec = resolve_audio_codec_for_container(audio_codec, dst.suffix, meta, warn)
@@ -3094,6 +3267,10 @@ def prepare_job_command(
             crop_ratio=crop_ratio,
             sw_algo=args.sw_algo,
             hdr=args.hdr,
+            rc_mode=args.rc_mode,
+            qp=args.qp,
+            lookahead=args.lookahead,
+            bitrate=args.bitrate,
         )
     except Exception as exc:
         job.status = "failed"
@@ -3383,6 +3560,48 @@ def parse_args() -> argparse.Namespace:
              "例：--codec hevc_nvenc --cq-ref 26 → -cq 28。与 --crf / --cq 互斥",
     )
     ap.add_argument(
+        "--rc-mode",
+        default="auto",
+        metavar="MODE",
+        help="NVENC 的码率控制模式（默认 auto=不下发 -rc，由 preset 决定，与不写等价）。"
+             "可选：constqp（恒定 QP，需 --qp）；vbr / vbr_hq（可变码率）；"
+             "cbr / cbr_hq / cbr_ld_hq（恒定码率，需 --bitrate）。写法 <mode> 或 "
+             "nvenc-<mode>（本轴只有 NVENC 一个后端，裸名不歧义）。"
+             "仅对 *_nvenc 编码器生效——本脚本默认编码器是 libx264，也没有硬件探测"
+             "（--codec *_nvenc 是原样透传给 ffmpeg），所以要用它得先显式 "
+             "--codec hevc_nvenc；其它编码器下告警忽略",
+    )
+    ap.add_argument(
+        "--qp",
+        type=int,
+        default=None,
+        metavar="N",
+        help="NVENC 恒定 QP 值（0-51）：只在 --rc-mode constqp 下生效，与该模式外的 "
+             "--cq / --crf / --crf-ref / --cq-ref 互斥（constqp 用 --qp 表达质量，"
+             "其它量纲混用无法判定意图）",
+    )
+    ap.add_argument(
+        "--lookahead",
+        type=int,
+        default=None,
+        metavar="N",
+        help="前向预测帧数（0-250）；不指定=沿用各编码器默认。按编码器分别下发："
+             "libx264 与 *_nvenc 用 -rc-lookahead，libx265 写进 -x265-params"
+             "（与 HDR 元数据合并成同一条），libvpx-vp9 / libaom-av1 用 -lag-in-frames；"
+             "其余编码器（如 libsvtav1）的选项名未实测，会告警忽略。"
+             "默认值本身不同：NVENC 是 0（关闭）、x265 是 20、x264 由自身决定",
+    )
+    ap.add_argument(
+        "--bitrate",
+        default=None,
+        metavar="RATE",
+        help="目标码率（如 8M / 8000k / 12000000），按编码器下发 -b:v。默认不指定。"
+             "与质量参数同给时按 rc 模式区分：auto / vbr* / cbr* 下并存 ="
+             "「受码率约束的恒定质量」（-b:v 视作上限）；constqp 下报错"
+             "（该模式完全无视 -b:v）。cbr* 模式未给本参数会落到 ffmpeg 默认码率"
+             "（200kbps），会告警",
+    )
+    ap.add_argument(
         "--preset",
         default=None,
         help="编码器预设。默认：CPU 编码器 medium，GPU 编码器 p5。"
@@ -3615,6 +3834,50 @@ def validate_and_finalize_args(args: argparse.Namespace) -> None:
             args.hdr = "drop"
             break
 
+    # ── 码率控制轴（--rc-mode / --qp / --bitrate）：取值/量程/量纲校验。
+    #    位置与报错首行都与 vidcrop_hwaccel.py 的 main() 一致（孪生约定）。
+    #    为什么"非 NVENC 编码器 → 忽略"不在这里判：要按**实际编码器**判，见
+    #    apply_rc_control_args()（本脚本 --codec 已在这里归一化，但把"生效范围"
+    #    与命令构建放一起，才能与 hwaccel 保持同一套措辞）。──
+    args.rc_mode = parse_rc_mode(args.rc_mode)
+    args.bitrate = parse_bitrate(args.bitrate)
+    if args.lookahead is not None:
+        check_int_range(args.lookahead, "--lookahead", _LOOKAHEAD_RANGE, _LOOKAHEAD_HINT)
+    if args.qp is not None:
+        check_int_range(args.qp, "--qp", _QP_RANGE, _QP_HINT)
+    _quality_given = [n for n, v in (("--crf", args.crf), ("--cq", args.cq),
+                                     ("--crf-ref", args.crf_ref),
+                                     ("--cq-ref", args.cq_ref)) if v is not None]
+    if args.rc_mode == "constqp":
+        if args.qp is None:
+            raise ValueError(
+                "--rc-mode constqp 需要 --qp 指定恒定 QP（0-51）。\n"
+                "  例：--rc-mode constqp --qp 23")
+        if args.bitrate:
+            raise ValueError(
+                "--rc-mode constqp 与 --bitrate 不能同时使用：\n"
+                "  constqp 是恒定 QP 模式，码率由 QP 决定，NVENC 会完全无视 -b:v。\n"
+                "  要限定码率请改用 --rc-mode vbr / vbr_hq / cbr*（或去掉 --rc-mode）。")
+        if _quality_given:
+            raise ValueError(
+                "--rc-mode constqp 与 " + " / ".join(_quality_given)
+                + " 不能同时使用：constqp 用 --qp 表达质量，而 "
+                + " / ".join(_quality_given)
+                + " 属于 VBR 家族的量纲，混用无法确定以哪个为准。")
+    else:
+        if args.qp is not None:
+            print(f"  ⚠ --qp 只在 --rc-mode constqp 下生效，当前 rc-mode={args.rc_mode}，"
+                  f"已忽略。")
+            args.qp = None
+        if args.bitrate and _quality_given:
+            print("提示：--bitrate 与 " + " / ".join(_quality_given)
+                  + " 同时给出 → 按 ffmpeg 语义是「受码率约束的恒定质量」"
+                    "（-b:v 视作上限，质量参数决定下限，VP9 下即 constrained quality）。"
+                    "要纯恒定质量请去掉 --bitrate。")
+        if args.rc_mode.startswith("cbr") and not args.bitrate:
+            print(f"  ⚠ --rc-mode {args.rc_mode} 是恒定码率模式但未给 --bitrate，"
+                  f"ffmpeg 会用它自己的默认码率（200kbps）。建议补 --bitrate 8M 之类。")
+
     # 量程检查必须排在 _resolve_quality_params 之前：否则 --crf-ref 99 这类超范围
     # 输入会先被换算并打印出一行"-crf 51"的建议值，紧接着才报范围错误，自相矛盾。
     if args.crf is not None and not (0 <= args.crf <= 63):
@@ -3782,6 +4045,19 @@ def main() -> int:
         + f"   pix_fmt: {args.pix_fmt_resolved or '不指定'}"
         + f"   color_range: {args.color_range}"
     )
+    # 码率控制轴：只在用户真的点了相关参数时才出现这一行（默认全空 → 概览块与引入
+    # 这四个参数之前逐字相同）。
+    _rc_bits = []
+    if args.rc_mode != "auto":
+        _rc_bits.append(f"rc-mode: {args.rc_mode}")
+    if args.qp is not None:
+        _rc_bits.append(f"QP: {args.qp}")
+    if args.bitrate:
+        _rc_bits.append(f"码率: {args.bitrate}")
+    if args.lookahead is not None:
+        _rc_bits.append(f"lookahead: {args.lookahead}")
+    if _rc_bits:
+        print(_label("码率控制") + "   ".join(_rc_bits))
     # 只展示真正会生效的缩放档：crop 模式不缩放；给了 --scale-algo 但用不上时说清楚
     if args.mode != "crop":
         print(_label("缩放") + f"libswscale-{args.sw_algo}（CPU）")

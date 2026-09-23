@@ -85,6 +85,9 @@
 | 软解 + 显存内缩放（`hwupload_cuda` 链） | ❌ | ❌ | ❌ | ✅⁴ |
 | 解码 / 缩放 / 编码三轴独立组合 | ❌ | ❌ | ❌ | ✅ |
 | `--scale-algo` 选缩放算法 | ❌ | ❌ | ✅（仅 libswscale） | ✅（含 `cuda-*`） |
+| `--bitrate` 目标码率（`-b:v`，全编码器） | ❌ | ❌ | ✅ | ✅ |
+| `--rc-mode` / `--qp` 码率控制模式与恒定 QP | ❌ | ❌ | ✅（仅 NVENC 编码器） | ✅（仅 NVENC 编码器） |
+| `--lookahead` 前向预测帧数（按编码器映射） | ❌ | ❌ | ✅ | ✅ |
 | 运行时硬件能力探测 | — | — | — | ✅ |
 | 策略链自动降级（6 级） | — | — | — | ✅ |
 | 编码器级降级（GPU 编码器 → CPU 软编） | — | — | ✅ | ✅ |
@@ -305,6 +308,10 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--cq` | `23` | GPU 编码器质量（0–51）；落到 CPU 软编时按等效表换算为 CRF |
 | `--crf-ref` | 无 | 以 **libx264 CRF** 为基准给出质量，按等效表换算到目标编码器；与 `--crf`/`--cq` 互斥 |
 | `--cq-ref` | 无 | 以 **h264_nvenc CQ** 为基准给出质量，按等效表换算；与 `--crf`/`--cq` 互斥 |
+| `--rc-mode` | `auto` | NVENC 码率控制模式（**只对 NVENC 编码器生效**）：`auto`=不下发 `-rc`（由 preset 决定，与不写等价）/ `constqp`（恒定 QP，需 `--qp`）/ `vbr` `vbr_hq`（可变码率）/ `cbr` `cbr_hq` `cbr_ld_hq`（恒定码率，需 `--bitrate`）。写法 `<mode>` 或 `nvenc-<mode>`（本轴只有一个后端，裸名不歧义）。⚠ 本脚本默认 `libx264` 且不做硬件探测（`--codec hevc_nvenc` 是原样透传给 ffmpeg），所以要用它得先显式 `--codec hevc_nvenc`；其它编码器下告警忽略 |
+| `--qp` | 无 | NVENC 恒定 QP（0–51）：只在 `--rc-mode constqp` 下生效，与 `--cq`/`--crf`/`--crf-ref`/`--cq-ref` **互斥（报错退出 2）**；非 constqp 模式给了它 → 告警忽略 |
+| `--lookahead` | 无（沿用各编码器默认） | 前向预测帧数 0–250。按编码器落不同选项：`libx264` / `*_nvenc` → `-rc-lookahead`；`libx265` → `-x265-params rc-lookahead=`（**与 HDR 元数据合并成同一条**）；`libvpx-vp9` / `libaom-av1` → `-lag-in-frames`；其余（如 `libsvtav1`）选项名未实测 → 告警忽略。⚠ **默认值本身不同**：NVENC `0`、x265 `20`、x264 由自身决定 |
+| `--bitrate` | 无 | 目标码率（`8M` / `8000k` / `12000000`），**所有编码器**都下发 `-b:v`。与质量参数同给时**按 rc 模式区分**：`auto` / `vbr*` / `cbr*` 下并存 =「受码率约束的恒定质量」（`-b:v` 视作上限，VP9 下即 constrained quality）；`constqp` 下**报错**（该模式完全无视 `-b:v`）。`cbr*` 模式未给码率会落到 ffmpeg 默认 200kbps，会告警 |
 | `--preset` | CPU `medium` / GPU `p5` | 支持 x264 风格与 NVENC `p1~p7`，自动双向映射；`libsvtav1` 自动转 0~13 整数档 |
 | `--pix-fmt` | `auto` | 输出像素格式（`yuv420p` / `yuv420p10le` / `p010le` / `yuv422p10le` …）；`auto`=继承源位深，`none`=不下发。显式给出时会校验该名字是否被 ffmpeg 认识 |
 | `--bit-depth` | `auto` | 目标位深 `8` / `10` / `12`；`auto`=继承源。按编码器选格式（如 `libx265` 的 10bit→`yuv420p10le`、`hevc_nvenc`→`p010le`）。与 `--pix-fmt` 语义重叠：**同时给出时以 `--pix-fmt` 为准**并提示；只关心位深时建议只用本参数（格式名要跟着编码器走，位深不用） |
@@ -354,6 +361,10 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--cq` | **`23`** | GPU 编码器质量（0–51）；字面量原样下发 |
 | `--crf` | **`21`** | CPU 编码器质量（0–51）；字面量原样下发 |
 | `--crf-ref` / `--cq-ref` | 无 | 统一质量基准（同上），与 `--crf`/`--cq` **互斥，混用直接报错退出** |
+| `--rc-mode` | `auto` | NVENC 码率控制模式（**只对 NVENC 编码器生效**）：`auto`=不下发 `-rc`（由 preset 决定，与不写等价）/ `constqp`（恒定 QP，需 `--qp`）/ `vbr` `vbr_hq`（可变码率）/ `cbr` `cbr_hq` `cbr_ld_hq`（恒定码率，需 `--bitrate`）。写法 `<mode>` 或 `nvenc-<mode>`。⚠ 实际编码器是**逐策略**定的：`--codec auto` 或 NVENC 不可用而降级到 CPU 编码器时，本参数会被**告警忽略**（`--fallback-policy strict` 下改为报错退出 2） |
+| `--qp` | 无 | NVENC 恒定 QP（0–51）：只在 `--rc-mode constqp` 下生效，与 `--cq`/`--crf`/`--crf-ref`/`--cq-ref` **互斥（报错退出 2）**；非 constqp 模式给了它 → 告警忽略 |
+| `--lookahead` | 无（沿用各编码器默认） | 前向预测帧数 0–250。按编码器落不同选项：`libx264` / `*_nvenc` → `-rc-lookahead`；`libx265` → `-x265-params rc-lookahead=`（**与 HDR 元数据合并成同一条**——实测两次 `-x265-params` 是后者整条覆盖前者，各发一条会静默抹掉 HDR 元数据）；`libvpx-vp9` / `libaom-av1` → `-lag-in-frames`；其余（如 `libsvtav1`）选项名未实测 → 告警忽略。⚠ **默认值本身不同**：NVENC `0`（关闭）、x265 `20`、x264 由自身决定 |
+| `--bitrate` | 无 | 目标码率（`8M` / `8000k` / `12000000`），**所有编码器**都下发 `-b:v`。与质量参数同给时**按 rc 模式区分**：`auto` / `vbr*` / `cbr*` 下并存 =「受码率约束的恒定质量」（`-b:v` 视作上限）；`constqp` 下**报错**（该模式完全无视 `-b:v`）。VP9 的 `-b:v 0` 在给了本参数时不再补（否则同选项打架）。`cbr*` 模式未给码率会落到 ffmpeg 默认 200kbps，会告警 |
 | `--preset` | GPU `p5` / CPU `medium` | NVENC（p1~p7）↔ libx264 风格双向映射；`libsvtav1` 自动转整数档。降级到 CPU 编码器时按**请求的编码器**换算，档位保持等效（`h264_nvenc` 的 p5 → `libx264` 的 medium、`av1_nvenc` 的 p5 → `libsvtav1` 的 8），概览块显示的就是实际下发的值 |
 | `--pix-fmt` | `auto` | 输出像素格式；`auto`=继承源位深、`none`=不下发，具体名会校验。**零拷贝 CUDA 链不能传 `-pix_fmt`**（实测 `Impossible to convert`）→ 那条链上改用 `scale_cuda=format=` 并自动配 `-profile:v`；`scale_cuda` 仅支持 `nv12` / `yuv420p` / `yuv444p` / `p010le`，链上不可用且给了 `--bit-depth` 时**由它接管**（明说让位代价），否则按 `--fallback-policy` 处理。与 `--bit-depth` 语义重叠：**需要特定色度/排布（4:4:4 / 4:2:2）时用它**，只关心位深请改用 `--bit-depth` |
 | `--bit-depth` | `auto` | 目标位深 `8` / `10` / `12`；`auto`=继承源。与 `--pix-fmt` 语义重叠：**优先按 `--pix-fmt` 落地**，它在当前链上不可用（零拷贝 CUDA 链只收 4 种格式）时**由本参数接管**并明说让位代价（位深/色度变化，`strict` 下有损失即报错）；只关心位深时建议只用本参数。`h264_nvenc` 只支持 8bit，要求 10bit+ 会告警降 8bit（`strict` 下报错） |
@@ -897,6 +908,24 @@ python vidcrop_hwaccel.py \
     --input ./videos --output ./out \
     --mode crop-cover --crop-ratio 16:9 --output-width 1280
 
+# 码率控制：NVENC 恒定码率 8Mbps（固定带宽分发 / 直播切片）
+python vidcrop_hwaccel.py \
+    --input ./videos --output ./out \
+    --output-width 1920 --output-height 1080 \
+    --codec hevc_nvenc --rc-mode cbr --bitrate 8M
+
+# 码率控制：受码率约束的恒定质量（-b:v 上限 + --cq 目标质量）
+python vidcrop_hwaccel.py \
+    --input ./videos --output ./out \
+    --output-width 1920 --output-height 1080 \
+    --codec hevc_nvenc --rc-mode vbr_hq --cq 20 --bitrate 12M
+
+# 前向预测：x265 默认 20，这里加到 40（更慢、码率分配更稳；CPU/GPU 版同名同语义）
+python vidcrop_cpu_v2.py \
+    --input ./videos --output ./out \
+    --output-width 1920 --output-height 1080 \
+    --codec libx265 --crf 20 --lookahead 40
+
 # 干跑预览实际命令
 python vidcrop_hwaccel.py \
     --input ./videos --output ./out \
@@ -1373,6 +1402,51 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 - 字面量模式下不做换算；只有"给的是 `--cq` 但落到 CPU 软编"时才按等效表换算
 - 同时指定 `--crf` 和 `--cq` 时，按实际落用的编码器自动选用对应参数
 
+### 码率控制与 lookahead（`--rc-mode` / `--qp` / `--lookahead` / `--bitrate`）
+
+CRF/CQ 管"画质档"，这一组管**码率控制模式**与**前向预测**。四个参数的默认值都表示
+**"不下发任何相关选项"**，即不传时命令与引入它们之前**逐字相同**（既有管道不受影响）。
+
+| 参数 | 取值 | 落到命令上的样子 |
+|---|---|---|
+| `--rc-mode` | `auto`（默认）/ `constqp` / `vbr` / `vbr_hq` / `cbr` / `cbr_hq` / `cbr_ld_hq`（可写 `nvenc-<mode>`） | `-rc <mode>`；`auto` 时**不发**（NVENC 用 preset 决定的默认，配 `--cq` 即"VBR + 目标质量"） |
+| `--qp` | `0–51` | `-qp N`（**只在 `--rc-mode constqp` 下**） |
+| `--lookahead` | `0–250` | `-rc-lookahead N`（libx264 / NVENC）、`-x265-params rc-lookahead=N`（libx265）、`-lag-in-frames N`（libvpx-vp9 / libaom-av1） |
+| `--bitrate` | `8M` / `8000k` / `12000000` | `-b:v <码率>`（所有编码器） |
+
+**三条硬规则**（都不是"静默取其一"）：
+
+1. **`--rc-mode` / `--qp` 是 NVENC 专属**——`-rc` 只有 NVENC 有；libx264 / libx265 没有
+   "码率控制模式"这个开关（它们用 `-crf` / `-b:v` / `-qp` 的组合表达）。非 NVENC 编码器
+   下给这两个参数会**告警忽略**（hwaccel 的 `--fallback-policy strict` 下改为报错退出 2）。
+   `--codec auto` 或 NVENC 不可用而降级时同理——判据是**实际用的编码器**。
+2. **`constqp` 与"码率/质量参数"互斥（报错退出 2）**：`constqp` 是恒定 QP，`-b:v` 会被
+   NVENC **完全无视**（T4 实测），所以 `--rc-mode constqp` + `--bitrate` 直接拒绝；
+   同理它用 `--qp` 表达质量，与 `--cq` / `--crf` / `--crf-ref` / `--cq-ref` 混用也拒绝。
+   与之相对，`auto` / `vbr*` / `cbr*` 下 `--bitrate` 与质量参数**可以并存**——
+   语义是"受码率约束的恒定质量"（`-b:v` 作上限；VP9 下即 constrained quality），会给提示。
+3. **`--lookahead` 在 libx265 上必须与 HDR 元数据合并成同一条 `-x265-params`**。实测
+   `-x265-params A -x265-params B` 是**后者整条覆盖前者**，各发一条会让后发的那条**静默抹掉
+   HDR 静态元数据**；现在统一由 `build_hdr_args()` 合并（`verify/verify_rc_lookahead.py` 第 ④ 组钉住）。
+
+```bash
+# NVENC：恒定码率 8Mbps（直播/固定带宽分发）
+--codec hevc_nvenc --rc-mode cbr --bitrate 8M
+# NVENC：恒定 QP（要可复现的逐帧量化参数）
+--codec hevc_nvenc --rc-mode constqp --qp 23
+# NVENC：高质量 VBR + 码率上限（受码率约束的恒定质量）
+--codec hevc_nvenc --rc-mode vbr_hq --cq 20 --bitrate 12M
+# x265：加大前向预测（默认 20 → 40；更慢、码率分配更稳）
+--codec libx265 --crf 20 --lookahead 40
+# x264：改前向预测（默认由 x264 自定）
+--codec libx264 --crf 20 --lookahead 40
+```
+
+> ⚠ **默认值本来就不一样，不要以为"没写就是同一个值"**：`-rc-lookahead` 的默认在
+> NVENC 上是 **0（关闭）**、x265 是 **20**、x264 由自身决定；`-rc` 的默认是"不覆盖 preset"。
+> 想让两个后端行为一致就**显式给** `--lookahead N`。`libsvtav1` 的 lookahead 键名未经实测，
+> 脚本**不代为下发**（会告警，需要时用 `--extra-args` 手工指定）。
+
 ---
 
 ## 已知限制
@@ -1399,6 +1473,10 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 | `--crop-ratio` + **只给一个**维度（非 crop-cover） | 互斥判据是"两个维度都给才算同时指定"，只给一个不算 → 那个维度被**静默忽略**（`--mode crop --crop-ratio 16:9 --output-width 320` 里 `320` 不生效）。两个脚本行为一致 | 按比例裁剪就别给尺寸；要指定最终尺寸用 `--mode crop-cover`（该模式明确支持单维度） |
 | hwaccel 不校验 `--original-width/height` | 只有 `vidcrop_cpu_v2.py` 校验正整数；hwaccel 传负值会一路带进尺寸计算 | 手填源尺寸时自己保证为正；不确定就用默认的 ffprobe 探测 |
 | `librav1e` 无 `-crf` | 编码器本身只支持 `-qp` | 脚本自动换算（实测标定） |
+| `--rc-mode` / `--qp` 只在 NVENC 上生效 | `-rc` / `-qp` 是 NVENC 专属选项；libx264 / libx265 没有"码率控制模式"这个开关（它们用 `-crf` / `-b:v` / `-qp` 的组合表达），libsvtav1 的 `-qp` 语义也不同（"初始 QP"、量程 0–63） | CPU 编码器要限码率用 `--bitrate`；要 `-rc` 就换 `*_nvenc`。给了不生效的参数会打印告警，不会静默；hwaccel 的 `strict` 下直接报错 |
+| `--lookahead` 的默认值三边不同 | NVENC 的 `-rc-lookahead` 默认 **0（关闭）**、x265 默认 **20**、x264 由自身决定（ffmpeg 侧默认 -1 = 交给 x264）。两个脚本默认编码器不同（hwaccel `h264_nvenc` / v2 `libx264`），所以"都不写"时同一批素材的前向预测深度本来就不一样 | 要一致就显式给 `--lookahead N`。本参数默认**不下发**，不改变现有行为 |
+| `cbr*` 模式没给码率 → 会落到 ffmpeg 默认 200kbps | `--rc-mode cbr` / `cbr_hq` / `cbr_ld_hq` 是恒定码率模式，码率由 `-b:v` 决定；不给就是 ffmpeg 的默认值（200kbps，画质会很难看） | 脚本会告警提示补 `--bitrate 8M` 之类；要恒定质量请用 `vbr*` 或默认的 `auto` |
+| 两次 `-x265-params` 会互相覆盖（已修） | `-x265-params` 是**字典型**选项，实测 `-x265-params A -x265-params B` 是 B **整条覆盖** A（本机：先 `rc-lookahead=40` 再 `log-level=info`，x265 报出的 Lookahead 回到默认 20）。而 HDR 静态元数据与 lookahead 都走这条选项 | `--lookahead` 的值由 `build_hdr_args()` **合并进同一条** `-x265-params`。但 `--extra-args -- -x265-params …` 仍会整条覆盖脚本自己发的那条（连 HDR 元数据一起）——要给 x265 加参数，优先用 `--lookahead` |
 | `h264_nvenc` 无 10bit | NVENC H.264 只做 8bit | 自动降 8bit 保硬件；需 10bit 用 `hevc_nvenc` / `av1_nvenc` |
 | 脚本依赖 `convert_crf.py` | 两个裁剪脚本运行时 import 同目录该文件 | 拷贝时一并带上 |
 | `interp_2x_safe.sh` 只做 **2 倍** | `fps=source_fps*2` 与片头去重帧数都按 2x 写死 | 要 1.25x / 2.5x 需改源码里这两处 |
@@ -1508,6 +1586,8 @@ bash test/dump_filter_chains.sh > /tmp/after.txt
 diff test/baseline/chains_before.txt /tmp/after.txt     # 16 行（8 用例 × 2 脚本）
 bash test/dump_cmd_default.sh > /tmp/after2.txt
 diff test/baseline/cmd_before.txt /tmp/after2.txt       # 7 个命令级用例
+bash test/dump_enc_options.sh > /tmp/after3.txt
+diff test/baseline/enc_before.txt /tmp/after3.txt       # 12 行（6 用例 × 2 脚本）编码/质量/码率控制 token
 
 # 2) 验证套件
 python verify/verify_cuda_scale.py        # CUDA 缩放链 + 策略生成
@@ -1517,8 +1597,15 @@ python verify/verify_cuda_decode_codec.py # 按源编解码器的硬解确认（
 python verify/verify_hwupload_worth.py    # auto 缩放的 hwupload 门槛
 python verify/verify_color_tagging.py     # 色彩属性标到帧上（setparams），命令级
 python verify/verify_chroma_hook.py       # 产物色度自检的阈值 / 取样 / 降级链
+python verify/verify_rc_lookahead.py      # --rc-mode / --qp / --lookahead / --bitrate
 bash   verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
 ```
+
+> 第三道门（`dump_enc_options.sh`）是专门为码率控制那组参数加的：`dump_filter_chains.sh`
+> 只比滤镜链、`dump_cmd_default.sh` 只比 `-hwaccel*`，而 `--rc-mode` / `--qp` /
+> `--lookahead` / `--bitrate` 全落在 `-c:v / -cq / -crf / -qp / -b:v / -rc /
+> -rc-lookahead / -lag-in-frames / -preset / -x265-params` 这一组上——
+> 只看前两道等于没回归。
 
 > ⚠ `verify_decode_axis.sh` 第 ⑦ 组与 `verify_cuda_decode_codec.py` 第 ⑥ 组硬写了
 > 「本机无 CUDA / 无 N 卡」，**在有 GPU 的机器上必然失败**（T4 上实测如此，与本次改动无关）。
@@ -1723,6 +1810,27 @@ nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv   # �
 > 顺带说明排查时的**参数命名**：解码轴参数是 `--decode`（旧名 `--hwaccel` 已硬更名）。`--decode cpu` 只关解码，不等于纯 CPU；要确认当前到底走了哪条链，看概览块的「缩放」与「组合」两行。
 
 实测对照（同一文件、同一条命令、`vidcrop_hwaccel.py`）：并发 SSIM 作业运行时 **1m11s（610 fps / 20.5x）**，该作业结束后同样命令 **32s（1378 fps / 46.7x）**。所以排查顺序是：先看 `speed`，再查并发作业，最后才怀疑脚本；批量任务与质量对比任务请错开运行。
+
+**Q14：`--rc-mode` / `--qp` 明明给了却没生效？`--lookahead` 的默认值到底是多少？**
+
+`--rc-mode` / `--qp` 是 **NVENC 专属**（`-rc` 只有 NVENC 有；libx264 / libx265 没有"码率控制模式"
+这个开关，它们用 `-crf` / `-b:v` / `-qp` 的组合表达），所以：
+
+- 用了 `libx264` / `libx265` 等 CPU 编码器 → 脚本会打印一行
+  `⚠ --rc-mode 未生效（-rc / -qp 是 NVENC 专属选项，编码器 libx264 没有这个开关），已忽略`
+  （hwaccel 的 `--fallback-policy strict` 下改为报错退出 2）；要限码率可以改用 `--bitrate`。
+- 在 hwaccel 上用了 `--codec auto`、或请求的 NVENC 不可用而降级到 CPU 编码器 → 同样按
+  **实际用的编码器**判定并告警；想确认到底走了哪条，看概览块新增的「码率控制」行与实际下发的命令
+  （`--dry-run`）。
+
+`--lookahead` 的默认值**本来就不是同一个数**：`-rc-lookahead` 在 NVENC 上是 **0（关闭）**、
+x265 是 **20**、x264 由自身决定；`-rc` 的默认是"不覆盖 preset"。而两个脚本的默认编码器不同
+（hwaccel `h264_nvenc` / v2 `libx264`），所以"都不写"时两条路的实际前向预测深度不一样——
+**要一致就显式给 `--lookahead N`**。另外 `libsvtav1` 的 lookahead 键名未经实测，脚本不代为下发
+（会告警；确实需要就用 `--extra-args` 手工指定）。
+
+四个参数的默认值都表示"不下发任何相关选项"，因此不传时命令与引入它们之前**逐字相同**；
+回归门见[回归与验证](#回归与验证)（`test/dump_enc_options.sh` + `verify/verify_rc_lookahead.py`）。
 
 ---
 

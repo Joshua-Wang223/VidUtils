@@ -1739,6 +1739,14 @@ python test/split_diff_by_theme.py --rules rules.json --out temp/split/a.patch -
   —— 两脚本同名同默认，**默认值全部 = 不下发**（不传时命令逐字不变）；`-rc` / `-qp` 是 NVENC
   专属（非 NVENC 告警忽略、`strict` 报错）；`--lookahead` 按编码器映射且默认值三边不同；
   实测 `-x265-params` 后者**整条覆盖**前者，故必须与 HDR 元数据合并成同一条
+- [按主题拆分同一文件里的两条改动线（`test/split_diff_by_theme.py`）](memory/project_commit_split_tool.md)
+  —— 分提交时的 hunk 手术固化成规则驱动工具（判定顺序 **整块覆盖 → 逐行规则 → 关键词 →
+  沿用上一段**，判不出来标 `?` + 告警，绝不静默分错线）；**只出 A 侧补丁**，B 侧 = 工作区减去
+  已提交的 A（反过来先造「对着 HEAD 的 B 补丁」再在 A 之后应用必然冲突）；`--verify` 在
+  临时索引上证明「A + 剩余 == 工作区」、`--selftest` 在临时仓库自证。⭐ 自证当场抓到 4 个真 bug
+  （Hunk 段落建太早 / 两线增行相邻时 git 只给一个变更组、无关键词的续行要沿用上一行 /
+  无关键词的替换组必须标 `?` / `@@` 头重算丢换行与计数少算 —— 后两个被 `git apply --recount`
+  掩盖，只有与 `git diff` 逐字节对比才暴露）
 
 写法沿用本机 codebuddy 自动记忆的约定：frontmatter 带 `name` / `description` / `type`，
 正文对 project / feedback 类用「事实 → **Why:** → **How to apply:**」的结构，

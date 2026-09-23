@@ -9,6 +9,9 @@
 # feedback_verify_consistency_claims.md「改命令构造却只比滤镜链」）。
 #
 # 判据：不传任何新参数时，本脚本的输出必须逐字不变。
+#   例外（2026-09-23，有意变更）：NVENC 的 `-cq` 现在默认配 `-b:v 0`（纯恒定质量，
+#   对照 Video_Enhancement 的 `-cq:v N -b:v 0`），故 `hevc_nvenc 显式 --cq` 一行比旧
+#   基线多一个 `-b:v 0`；基线已按新行为更新。行为判据见 verify/verify_rc_lookahead.py 第 ⑩ 组。
 # 用法: bash test/dump_enc_options.sh > out.txt
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1

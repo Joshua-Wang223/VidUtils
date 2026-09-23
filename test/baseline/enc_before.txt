@@ -9,4 +9,4 @@ cpu_v2   libsvtav1                          -c:v libsvtav1 -crf 30 -preset 8 -pi
 hwaccel  libx264 显式 --cq(降级换算)  -c:v libx264 -crf 18 -preset medium 
 cpu_v2   libx264 显式 --cq(降级换算)  -c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p 
 hwaccel  hevc_nvenc 显式 --cq             -c:v libx265 -crf 16 -preset medium 
-cpu_v2   hevc_nvenc 显式 --cq             -c:v hevc_nvenc -cq 20 -preset p5 -pix_fmt yuv420p 
+cpu_v2   hevc_nvenc 显式 --cq             -c:v hevc_nvenc -cq 20 -b:v 0 -preset p5 -pix_fmt yuv420p 

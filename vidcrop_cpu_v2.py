@@ -554,6 +554,16 @@ def compute_parallelism(
         workers = min(max_by_cpu, max_by_mem)
 
     workers = max(1, min(workers, num_pending))
+
+    # [D] 显式 --workers 时按**最终并发数**反推每任务线程预算，避免超订。
+    # 原算法只在 workers 走自动分支时才用 max_by_cpu 约束并发，一旦用户显式给
+    # --workers 就完全不回头压每任务线程数：8 核 + CODEC_PROFILE 默认 4 线程 +
+    # --workers 4 → 16 线程抢 8 核。这里在用户**未显式给 --threads** 时把每任务
+    # 线程钳到 cpu // workers（≥1），保证 workers × threads ≤ 逻辑核数。
+    # 用户显式给了 --threads 则尊重其意图（可能是有意的过订），不覆盖。
+    if workers_override > 0 and threads_override == 0:
+        threads_per_job = max(1, cpu // max(1, workers))
+
     return workers, threads_per_job
 
 
@@ -1021,7 +1031,9 @@ def apply_rc_control_args(codec: str,
       · `-rc` / `-qp`：只有 NVENC 认。本脚本默认编码器是 libx264，也没有硬件探测
         （--codec *_nvenc 是原样透传给 ffmpeg），所以这里同样按**编码器名**判：
         非 NVENC → 忽略并告知。
-      · lookahead：libx264 → `-rc-lookahead`；NVENC → `-rc-lookahead`；
+      · lookahead：libx264 → `-rc-lookahead`；NVENC → `-rc-lookahead`
+        （**但 `rc_mode == 'constqp'` 时不下发**：该模式下硬件静默禁用 lookahead，
+        与 vidcrop_hwaccel.py 逐字一致）；
         libx265 → 写进 `-x265-params rc-lookahead=`（无顶层选项）；
         libvpx / libvpx-vp9 / libaom-av1 → `-lag-in-frames`（vp9 另有 0~25 的
         `-rc_lookahead`，但 `-lag-in-frames` 是两者通用且无上限的那个，故用它）；
@@ -1048,7 +1060,14 @@ def apply_rc_control_args(codec: str,
             _ignore(_asked, f"-rc / -qp 是 NVENC 专属选项，编码器 {c} 没有这个开关")
 
     if lookahead is not None:
-        if c in NVENC_CODECS or c == "libx264":
+        if c in NVENC_CODECS:
+            if rc_mode == "constqp":
+                # constqp 下硬件静默禁用 lookahead（同 hwaccel）。
+                _ignore(f"--lookahead {lookahead}",
+                        "-rc constqp 下 NVENC 静默禁用 lookahead，未下发")
+            else:
+                args += ["-rc-lookahead", str(lookahead)]
+        elif c == "libx264":
             args += ["-rc-lookahead", str(lookahead)]
         elif c == "libx265":
             x265_params.append(f"rc-lookahead={lookahead}")
@@ -1256,6 +1275,12 @@ def build_encoder_options_v2(
 
     if cq is not None and encoder_supports_cq(codec):
         opts += ["-cq", str(cq)]
+        # [CQ-B0] NVENC 的 -cq 需配 -b:v 0 才是纯恒定质量，否则受 ffmpeg 默认码率
+        # 约束（等价于 constrained quality）。与 vidcrop_hwaccel.py 及
+        # Video_Enhancement 的 `-cq:v N -b:v 0` 一致。本脚本 *_nvenc 是原样透传
+        # （命中率低），但仍保持与 hwaccel 行为一致；给了 --bitrate 时不补这个 0。
+        if c in NVENC_CODECS and not bitrate:
+            opts += ["-b:v", "0"]
     elif crf is not None and encoder_supports_crf(codec):
         if c in ("libvpx", "libvpx-vp9") and not bitrate:
             # VP8/VP9 的 CRF 必须配合 -b:v 0 才是纯恒定质量，否则退化成
@@ -1850,7 +1875,7 @@ def resolve_audio_codec_for_container(audio_codec: str,
     return audio_codec
 
 
-def build_hdr_args(meta: Dict, codec: str,
+def build_hdr_args(meta: Optional[Dict], codec: str,
                    warn: Optional[Callable[[str], None]] = None,
                    hdr_mode: str = "auto",
                    extra_x265_params: Optional[List[str]] = None) -> List[str]:
@@ -1861,17 +1886,22 @@ def build_hdr_args(meta: Dict, codec: str,
     - NVENC：依赖帧 side_data 自动传播；走 CPU 回退链路时会丢失，故告警。
     - 其余编码器：只能保住色彩三参数与位深。
 
-    extra_x265_params 是**另外要写进 -x265-params 的键**（目前唯一来源是 --lookahead，
-    见 apply_rc_control_args）。为什么必须合并成同一条：实测
-    `-x265-params A -x265-params B` 是**后者整条覆盖前者**（本机 ffmpeg：先
-    `rc-lookahead=40` 再 `log-level=info`，x265 报出的 Lookahead 回到默认 20）——
-    HDR 元数据与 lookahead 都走这条选项，各发一条会让后发的静默抹掉 HDR 元数据。
+    extra_x265_params 是**另外要写进 -x265-params 的键**（来源见 apply_rc_control_args
+    与 build_ffmpeg_cmd：--lookahead 的 rc-lookahead、crf=0 的 lossless=1）。为什么
+    必须合并成同一条：实测 `-x265-params A -x265-params B` 是**后者整条覆盖前者**
+    （本机 ffmpeg：先 `rc-lookahead=40` 再 `log-level=info`，x265 报出的 Lookahead
+    回到默认 20）——HDR 元数据与 lookahead/lossless 都走这条选项，各发一条会让后发的
+    静默抹掉 HDR 元数据。
+
+    meta 允许为 None（探测失败 / 关掉元数据保留）：此时只落 extra_x265_params，HDR 部分
+    跳过。调用方**必须无条件调用本函数**——过去用 `if meta is not None` 包住，会把
+    lookahead / lossless 这些与 HDR 无关的键一起静默丢掉。
     """
     c = (codec or "").lower()
     extra = list(extra_x265_params or []) if c == "libx265" else []
-    d = meta["derived"]
+    d = meta["derived"] if meta else None
     params: List[str] = []
-    if d["is_hdr"] and hdr_mode not in _HDR_SDR_TAGGING_MODES:
+    if d and d["is_hdr"] and hdr_mode not in _HDR_SDR_TAGGING_MODES:
         if c == "libx265" and d["master_display"]:
             params = ["master-display=" + d["master_display"]]
             if d["max_cll"]:
@@ -2710,10 +2740,32 @@ def build_ffmpeg_cmd(
         cmd += ["-b:v", bitrate]
     cmd += rc_args
 
-    # [META-KEEP] HDR10 静态元数据（libx265 走 -x265-params，其余尽力而为）
-    if meta is not None:
-        cmd += build_hdr_args(meta, codec, warn, hdr_mode=_hdr_mode,
-                              extra_x265_params=rc_x265)
+    # [LOSSLESS] crf/cq == 0 的真无损改写（对照 Video_Enhancement 的 ffmpeg_io.py）：
+    #   · libx264 的 -crf 0 本身就是无损，无需改写；
+    #   · libx265 的 -crf 0 只是"近无损"，必须写 lossless=1（并入 -x265-params）；
+    #   · *_nvenc 的 -cq 0 不是无损 —— 本脚本 NVENC 是原样透传（无硬件探测、不等同
+    #     于 hwaccel 的逐策略路径），故**不擅自改写模式**，只提示走 constqp。
+    #     这正是与 vidcrop_hwaccel.py 的差异化处理：那边 rc_mode=auto 会直接改写。
+    _cl = codec.lower()
+    _quality_is_zero = (
+        (crf is not None and encoder_supports_crf(codec) and crf == 0)
+        or (cq is not None and encoder_supports_cq(codec) and cq == 0)
+    )
+    if _quality_is_zero:
+        if _cl == "libx265":
+            rc_x265.append("lossless=1")
+            # 走 warn 通道（本脚本所有命令内提示都经 warn → AggregatePanel 渲染），
+            # 不用 print（会绕开并发面板）。
+            warn("--crf 0 → libx265 真无损改写（lossless=1）")
+        elif _cl in NVENC_CODECS:
+            warn("--cq 0 在 NVENC 下不是真无损：如需无损请用 "
+                 "--rc-mode constqp --qp 0（勿与 --bitrate 同给）")
+
+    # [META-KEEP] HDR10 静态元数据（libx265 走 -x265-params，其余尽力而为）。
+    # 一律调用（meta 可能为 None）：rc_x265 里的 lookahead / lossless 也必须落地，
+    # 过去用 `if meta is not None` 包住会让探测失败时把它们连同 HDR 一起静默丢弃。
+    cmd += build_hdr_args(meta, codec, warn, hdr_mode=_hdr_mode,
+                          extra_x265_params=rc_x265)
 
     # WebM 容器不接受 AAC 等音轨，必要时自动改 Opus 重编码
     audio_codec = resolve_audio_codec_for_container(audio_codec, dst.suffix, meta, warn)

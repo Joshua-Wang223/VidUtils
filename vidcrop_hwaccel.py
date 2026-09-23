@@ -369,6 +369,12 @@ _BITRATE_RE = re.compile(r'^\d+(\.\d+)?[kKmM]?$')
 _LOOKAHEAD_HINT = f'x264 的上限就是 {_LOOKAHEAD_RANGE[1]}；不指定=沿用各编码器默认'
 _QP_HINT = '与 --cq 同量纲（NVENC 的 -qp 量程）'
 
+# [借鉴1] NVENC 策略失败时的 preset 降档重试表：只降不升，p4 及以下不再重试。
+# 对照 Video_Enhancement 的 SDK 路径——InitializeEncoder 返回 code=8（驱动不认该
+# preset）时降到 p4 重试一次、RC/LA 不变（见其 main.py _setup_level1_nvenc）。
+# p4 是实测在 T4/旧驱动上被接受的安全档。默认档是 p5，故 p5/p6/p7 都映射到 p4。
+_NVENC_PRESET_RETRY = {'p5': 'p4', 'p6': 'p4', 'p7': 'p4'}
+
 # ═══════════════════════════════════════════════════════════════════
 #  进程管理与信号处理
 # ═══════════════════════════════════════════════════════════════════
@@ -2100,7 +2106,7 @@ def resolve_subtitle_codec(src_subs: List[Optional[str]], container: str,
     return None, False
 
 
-def build_hdr_args(meta: Dict, codec: str,
+def build_hdr_args(meta: Optional[Dict], codec: str,
                    warn: Optional[Callable[[str], None]] = None,
                    hdr_mode: str = 'auto',
                    extra_x265_params: Optional[List[str]] = None) -> List[str]:
@@ -2115,17 +2121,22 @@ def build_hdr_args(meta: Dict, codec: str,
     - NVENC：依赖帧 side_data 自动传播；走 hwdownload/CPU 回退链路时会丢失，故告警。
     - 其余编码器：只能保住色彩三参数与位深。
 
-    extra_x265_params 是**另外要写进 -x265-params 的键**（目前唯一来源是 --lookahead，
-    见 apply_rc_control_args）。为什么必须合并成同一条：实测
-    `-x265-params A -x265-params B` 是**后者整条覆盖前者**（本机 ffmpeg：先
-    `rc-lookahead=40` 再 `log-level=info`，x265 报出的 Lookahead 回到默认 20）——
-    HDR 元数据与 lookahead 都走这条选项，各发一条会让后发的静默抹掉 HDR 元数据。
+    extra_x265_params 是**另外要写进 -x265-params 的键**（来源见 apply_rc_control_args
+    与 build_ffmpeg_cmd：--lookahead 的 rc-lookahead、crf=0 的 lossless=1）。为什么
+    必须合并成同一条：实测 `-x265-params A -x265-params B` 是**后者整条覆盖前者**
+    （本机 ffmpeg：先 `rc-lookahead=40` 再 `log-level=info`，x265 报出的 Lookahead
+    回到默认 20）——HDR 元数据与 lookahead/lossless 都走这条选项，各发一条会让后发的
+    静默抹掉 HDR 元数据。
+
+    meta 允许为 None（探测失败 / --keep-metadata 关闭）：此时只落 extra_x265_params，
+    HDR 部分跳过。调用方**必须无条件调用本函数**——过去用 `if meta is not None` 包住，
+    会把 lookahead / lossless 这些与 HDR 无关的键一起静默丢掉。
     """
     c = (codec or '').lower()
     extra = list(extra_x265_params or []) if c == 'libx265' else []
-    d = meta['derived']
+    d = meta['derived'] if meta else None
     params: List[str] = []
-    if d['is_hdr'] and hdr_mode not in _HDR_SDR_TAGGING_MODES:
+    if d and d['is_hdr'] and hdr_mode not in _HDR_SDR_TAGGING_MODES:
         if c == 'libx265' and d['master_display']:
             params = ['master-display=' + d['master_display']]
             if d['max_cll']:
@@ -3117,12 +3128,19 @@ def apply_rc_control_args(codec: str,
 
       · `-rc` / `-qp`：只有 NVENC 认。libx264 / libx265 没有"码率控制模式"这个开关
         （它们用 -crf / -b:v / -qp 的组合表达），故非 NVENC 编码器下忽略并告知。
-      · lookahead：libx264 → `-rc-lookahead`；NVENC → `-rc-lookahead`；
+      · lookahead：libx264 → `-rc-lookahead`；NVENC → `-rc-lookahead`
+        （**但 `rc_mode == 'constqp'` 时不下发**：该模式下硬件会静默禁用 lookahead，
+        与 Video_Enhancement 的 ffmpeg_io.py 一致，见下）；
         libx265 → 写进 `-x265-params rc-lookahead=`（无顶层选项）；
         libvpx / libvpx-vp9 / libaom-av1 → `-lag-in-frames`（vp9 另有 0~25 的
         `-rc_lookahead`，但 `-lag-in-frames` 是两者通用且无上限的那个，故用它）；
         其余（libsvtav1 / prores …）键名未实测 → 不下发，明确告知（不瞎发一个
         可能不存在的键）。
+
+    为什么 constqp 下的 lookahead 要拦下来：NVENC 在 constqp 模式会**静默忽略**
+    lookahead（对照 Video_Enhancement 的 ffmpeg_io.py——那条路径同样不发
+    `-rc-lookahead`，并在 SDK 侧把 la_depth 显式清零）。下发一条不生效的选项会让
+    用户以为设了却没生效，故按「能力不存在就明确告知」处理。
     """
     c = (codec or '').lower()
     args: List[str] = []
@@ -3148,7 +3166,14 @@ def apply_rc_control_args(codec: str,
             _ignore(_asked, f'-rc / -qp 是 NVENC 专属选项，编码器 {c} 没有这个开关')
 
     if lookahead is not None:
-        if c in NVENC_CODECS or c == 'libx264':
+        if c in NVENC_CODECS:
+            if rc_mode == 'constqp':
+                # constqp 下硬件静默禁用 lookahead（见函数 docstring）。
+                _ignore(f'--lookahead {lookahead}',
+                        '-rc constqp 下 NVENC 静默禁用 lookahead，未下发')
+            else:
+                args += ['-rc-lookahead', str(lookahead)]
+        elif c == 'libx264':
             args += ['-rc-lookahead', str(lookahead)]
         elif c == 'libx265':
             x265_params.append(f'rc-lookahead={lookahead}')
@@ -3584,6 +3609,7 @@ def build_ffmpeg_cmd(
     qp: Optional[int] = None,
     lookahead: Optional[int] = None,
     bitrate: Optional[str] = None,
+    nvenc_aq: bool = False,
 ) -> List[str]:
     """
     构建完整的 FFmpeg 命令列表。
@@ -3593,6 +3619,9 @@ def build_ffmpeg_cmd(
     extra_args: 追加到输出文件名之前的自定义 FFmpeg 参数（已剥离 '--' 前缀）。
     rc_mode / qp / lookahead / bitrate: 码率控制轴（默认值全部＝不下发任何相关选项，
                    即与引入这四个参数之前逐字相同）。
+    nvenc_aq:      True 时给 NVENC 编码器加 -spatial-aq 1 -temporal-aq 1
+                   （对照 Video_Enhancement SDK 的 enableAQ/enableTemporalAQ）。
+                   非 NVENC 编码器忽略并告警；默认 False（不改变既有输出）。
     """
     extra_args = extra_args or []
     if codec.lower() == 'copy' and vf_filter:
@@ -3786,9 +3815,32 @@ def build_ffmpeg_cmd(
     rc_args, rc_x265 = apply_rc_control_args(
         codec, rc_mode, qp, lookahead, policy, _warn)
 
-    # 质量参数（cq / crf 互斥，由 _resolve_quality_params 决定）
+    # 质量参数（cq / crf 互斥，由 _resolve_quality_params 决定）。
+    # [LOSSLESS] crf/cq == 0 的真无损改写（对照 Video_Enhancement 的 ffmpeg_io.py
+    # crf=0 分支）：
+    #   · libx264 的 -crf 0 本身就是无损，无需改写；
+    #   · libx265 的 -crf 0 只是"近无损"，必须写 lossless=1（并入 -x265-params）；
+    #   · *_nvenc 的 -cq 0 不是无损，rc_mode=auto 时改写为 -rc constqp -qp 0。
+    _quality_is_zero = (
+        (cq is not None and encoder_supports_cq(codec) and cq == 0)
+        or (crf is not None and encoder_supports_crf(codec) and crf == 0)
+    )
+    _nvenc_lossless = (_quality_is_zero and codec in NVENC_CODECS
+                       and rc_mode == 'auto' and not bitrate)
+
     if cq is not None and encoder_supports_cq(codec):
-        cmd += ['-cq', str(cq)]
+        if _nvenc_lossless:
+            # -cq 0 在 VBR 下不是无损；rc_mode=auto（用户未指定模式）时改写为真无损。
+            cmd += ['-rc', 'constqp', '-qp', '0', '-b:v', '0']
+            print('  提示：--cq 0 → NVENC 真无损改写（-rc constqp -qp 0 -b:v 0）')
+        else:
+            cmd += ['-cq', str(cq)]
+            # [CQ-B0] NVENC 的 -cq 必须配 -b:v 0 才是纯恒定质量，否则受 ffmpeg
+            # 默认码率约束（等价于 constrained quality）。对照 Video_Enhancement 的
+            # `-cq:v N -b:v 0`。constqp 用 --qp 表达质量、无 -cq；给了 --bitrate 时
+            # 用户要的正是"受码率约束"语义，两者都不补 0。
+            if codec in NVENC_CODECS and not bitrate and rc_mode != 'constqp':
+                cmd += ['-b:v', '0']
     elif crf is not None and encoder_supports_crf(codec):
         if codec in ('libvpx', 'libvpx-vp9') and not bitrate:
             # VP8/VP9 的 CRF 必须配合 -b:v 0 才是纯恒定质量，否则退化成
@@ -3801,12 +3853,31 @@ def build_ffmpeg_cmd(
             cmd += ['-qp', str(crf_to_rav1e_qp(crf))]
         else:
             cmd += ['-crf', str(crf)]
+        if _quality_is_zero and codec == 'libx265':
+            # libx265 的 -crf 0 不是无损，必须显式 lossless=1；与 HDR 元数据、
+            # lookahead 合并进同一条 -x265-params（见 build_hdr_args）。
+            rc_x265.append('lossless=1')
+            print('  提示：--crf 0 → libx265 真无损改写（lossless=1）')
+
+    # NVENC 且用户显式指定了别的 rc_mode（或给了 --bitrate）时，--cq 0 无法在不改模式
+    # 的前提下变无损 → 明确告知，不擅自改写。
+    if _quality_is_zero and codec in NVENC_CODECS and not _nvenc_lossless:
+        _warn('--cq 0 在 NVENC 下不是真无损：如需无损请用 '
+              '--rc-mode constqp --qp 0（勿与 --bitrate 同给）')
 
     # --bitrate：所有编码器都下发 -b:v（libx264/265、libvpx*、libaom、libsvtav1 都认）。
     # 与质量参数并存时按 rc 模式分别处理，规则集中在 main() 的量纲校验里。
     if bitrate:
         cmd += ['-b:v', bitrate]
     cmd += rc_args                      # -rc / -qp / -rc-lookahead / -lag-in-frames
+
+    # [借鉴2/E] NVENC 自适应量化（对照 Video_Enhancement SDK 的 enableAQ +
+    # enableTemporalAQ）。非 NVENC 编码器没有这两个选项 → 忽略并告知。
+    if nvenc_aq:
+        if codec in NVENC_CODECS:
+            cmd += ['-spatial-aq', '1', '-temporal-aq', '1']
+        else:
+            _warn(f'--nvenc-aq 仅对 *_nvenc 编码器生效，编码器 {codec} 已忽略')
 
     # libaom-av1 的速度档位：ffmpeg 默认 -cpu-used=1 慢到不可用（实测 320x240 仅 1fps），
     # 按资源自动取值；用户若已在 --extra-args 显式给过则尊重用户。
@@ -3859,10 +3930,11 @@ def build_ffmpeg_cmd(
         if audio_bitrate:
             cmd += ['-b:a', audio_bitrate]
 
-    # [META-KEEP] HDR10 静态元数据（libx265 走 -x265-params，其余尽力而为）
-    if meta is not None:
-        cmd += build_hdr_args(meta, codec, warn=_warn, hdr_mode=_hdr_mode,
-                              extra_x265_params=rc_x265)
+    # [META-KEEP] HDR10 静态元数据（libx265 走 -x265-params，其余尽力而为）。
+    # 一律调用（meta 可能为 None）：rc_x265 里的 lookahead / lossless 也必须落地，
+    # 过去用 `if meta is not None` 包住会让探测失败时把它们连同 HDR 一起静默丢弃。
+    cmd += build_hdr_args(meta, codec, warn=_warn, hdr_mode=_hdr_mode,
+                          extra_x265_params=rc_x265)
 
     # mp4/mov 快速启动
     if output_file.suffix.lower() in ('.mp4', '.m4v', '.mov'):
@@ -4096,12 +4168,18 @@ def _label(text: str, width: int = 12) -> str:
     return text + ' ' * max(1, width - cells) + ': '
 
 
-def _result(status: str, frames: int = 0, elapsed: float = 0.0) -> Dict[str, object]:
+def _result(status: str, frames: int = 0, elapsed: float = 0.0,
+            strategy: Optional[str] = None,
+            fallback: bool = False) -> Dict[str, object]:
     """统一 process_file 的返回结构，供调用方汇总统计。
 
     status: 'done' / 'skipped' / 'failed' / 'dry-run'
+    strategy / fallback: 成功时**实际生效**的那条策略名与它是否为降级策略。
+        供批汇总块报告"本次真正走的档位"（对照 Video_Enhancement 的 _active_level），
+        避免概览块报的计划档位与实跑不符。
     """
-    return {'status': status, 'frames': frames, 'elapsed': elapsed}
+    return {'status': status, 'frames': frames, 'elapsed': elapsed,
+            'strategy': strategy, 'fallback': fallback}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -4150,6 +4228,7 @@ def process_file(
     qp: Optional[int] = None,
     lookahead: Optional[int] = None,
     bitrate: Optional[str] = None,
+    nvenc_aq: bool = False,
     chroma_check: bool = True,
     queue_rest: Optional[float] = None,
     queue_cur: Optional[float] = None,
@@ -4173,6 +4252,8 @@ def process_file(
         rc_mode / qp / lookahead / bitrate  码率控制轴：逐**策略**落到命令上（因为实际
                         编码器是逐策略解析出来的）。默认值全部表示"不下发任何相关选项"，
                         即与引入这四个参数之前逐字相同。
+        nvenc_aq        True 时给 NVENC 策略加 -spatial-aq 1 -temporal-aq 1（逐策略判，
+                        非 NVENC 的那条策略会忽略并告警）；默认 False。
         chroma_check    产物色度自检（默认 True）：策略成功后取样比对源与产物的 U/V，
                         疑似归零则判该策略失败、走既有降级链；--no-chroma-check 关闭
         queue_rest / queue_cur  整批剩余时间的两个构件（秒），透传给进度条常驻
@@ -4367,6 +4448,7 @@ def process_file(
             qp=qp,
             lookahead=lookahead,
             bitrate=bitrate,
+            nvenc_aq=nvenc_aq,
             policy=policy,
         )
         print('  ' + _label('输出文件') + str(output_file))
@@ -4406,6 +4488,18 @@ def process_file(
         # 的编码器（见 strategy_preset），保证降级前后档位等效。
         norm_preset = strategy_preset(preset, codec, current_codec)
 
+        # [借鉴1] NVENC 策略失败时**先按 preset 降档重试一次**，再考虑整条策略降级。
+        # 对照 Video_Enhancement：SDK 在 InitializeEncoder 返回 code=8（驱动不认该
+        # preset）时降到 p4 重试、RC/LA 不变。ffmpeg CLI 侧没有 code=8 这一说，但
+        # 旧驱动/T4 对高档 preset 同样可能拒绝——先降档能保住 GPU 路径，避免直接掉到
+        # 软件编码（慢一个数量级）。只对 NVENC 且档位在 _NVENC_PRESET_RETRY 内追加；
+        # 其余策略只有原档位（_preset_tries 长度 1）。
+        _preset_tries: List[str] = [norm_preset]
+        _retry_preset = (_NVENC_PRESET_RETRY.get(norm_preset)
+                         if current_codec in NVENC_CODECS else None)
+        if _retry_preset and _retry_preset != norm_preset:
+            _preset_tries.append(_retry_preset)
+
         # [META-KEEP] 10bit 源 + hof=cuda 时 hwdownload 先试 p010；旧驱动或不支持
         # 10bit 下载的设备会失败，此时同一策略回退 nv12 再试一次（代价：降为 8bit、
         # HDR 帧级 side_data 一并丢失），而不是直接放弃整个 GPU 策略。
@@ -4420,85 +4514,96 @@ def process_file(
             _dl_formats.append('nv12')
 
         rc, stderr_text = 1, ''
-        for _dl in _dl_formats:
-            if _dl == 'nv12':
-                print('  ⚠ p010/p012 下载不被当前设备支持，回退为 8bit 下载'
-                      '（将降级为 8bit，HDR 静态元数据与精细色阶会丢失）',
+        for _pt_i, _preset_try in enumerate(_preset_tries):
+            if _pt_i > 0:
+                print(f'  ⚠ preset {norm_preset} 失败，降档到 {_preset_try} 重试'
+                      f'（对照 NVENC code=8 降档；RC / lookahead 不变）',
                       file=sys.stderr)
+            for _dl in _dl_formats:
+                if _dl == 'nv12':
+                    print('  ⚠ p010/p012 下载不被当前设备支持，回退为 8bit 下载'
+                          '（将降级为 8bit，HDR 静态元数据与精细色阶会丢失）',
+                          file=sys.stderr)
 
-            cmd = build_ffmpeg_cmd(
-                input_file=input_file,
-                output_file=output_file,
-                vf_filter=vf_filter,
-                codec=current_codec,
-                crf=current_crf,
-                cq=current_cq,
-                preset=norm_preset,
-                overwrite=overwrite,
-                hwaccel=hwaccel,
-                hwaccel_output_format=hwaccel_out_fmt,
-                ffmpeg_bin=ffmpeg_bin,
-                audio_codec=audio_codec,
-                audio_bitrate=audio_bitrate,
-                extra_args=extra_args,
-                hw_download_fmt=_dl,
-                color_range=color_range,
-                pix_fmt=pix_fmt,
-                bit_depth=bit_depth,
-                hdr=hdr,
-                rc_mode=rc_mode,
-                qp=qp,
-                lookahead=lookahead,
-                bitrate=bitrate,
-                policy=policy,
-            )
-
-            tag = '（降级）' if strategy.get('fallback', False) else ''
-            print('  ' + _label('策略')
-                  + f'[{i + 1}/{len(all_strategies)}] {strategy["name"]}{tag}')
-            print('  ' + _label('执行命令') + shlex.join(cmd))
-
-            rc, stderr_text = _run_with_progress(cmd, total_frames, queue_rest, queue_cur)
-
-            # rc=0 不代表产物存在：ffmpeg 在少数静默错误下会以 0 退出却不写文件。
-            # 直接 stat() 会抛 FileNotFoundError 中断整批处理，故显式判为策略失败。
-            if rc == 0 and not output_file.exists():
-                rc = 1
-                stderr_text = (stderr_text or '') + \
-                    '\nffmpeg 返回 0 但未生成输出文件'
-
-            # [CHROMA-CHECK] 产物色度自检（防复发钩子）。失败时把 rc 打成 1，
-            # 后面那段既有的"策略失败 → 清理产物 → 试下一策略"会原样接管，
-            # 自动退到软解/软编策略，不需要另写降级逻辑。
-            if rc == 0 and chroma_check:
-                _c_ss = _chroma_sample_ss(probe_full_metadata(input_file, ffmpeg_bin))
-                _c_ok, _c_why = _chroma_check(
-                    input_file, output_file, ffmpeg_bin, _c_ss)
-                if not _c_ok:
-                    rc = 1
-                    stderr_text = (stderr_text or '') + f'\n[色度自检] {_c_why}'
-                    print(f'  ⚠ 色度自检未通过：{_c_why}', file=sys.stderr)
-
-            if rc == 0:
-                elapsed  = time.perf_counter() - t_file_start
-                in_size  = input_file.stat().st_size
-                out_size = output_file.stat().st_size
-                ratio    = (1.0 - out_size / in_size) * 100 if in_size > 0 else 0.0
-                direction = '↓' if ratio >= 0 else '↑'
-                print(f'  ✔ 完成，用时 {_fmt_duration(elapsed)}')
-                print('  ' + _label('输出文件') + str(output_file))
-                print(
-                    '  ' + _label('大小变化')
-                    + f'{_fmt_size(in_size)} → {_fmt_size(out_size)}'
-                    f'（{direction}{abs(ratio):.1f}%）'
+                cmd = build_ffmpeg_cmd(
+                    input_file=input_file,
+                    output_file=output_file,
+                    vf_filter=vf_filter,
+                    codec=current_codec,
+                    crf=current_crf,
+                    cq=current_cq,
+                    preset=_preset_try,
+                    overwrite=overwrite,
+                    hwaccel=hwaccel,
+                    hwaccel_output_format=hwaccel_out_fmt,
+                    ffmpeg_bin=ffmpeg_bin,
+                    audio_codec=audio_codec,
+                    audio_bitrate=audio_bitrate,
+                    extra_args=extra_args,
+                    hw_download_fmt=_dl,
+                    color_range=color_range,
+                    pix_fmt=pix_fmt,
+                    bit_depth=bit_depth,
+                    hdr=hdr,
+                    rc_mode=rc_mode,
+                    qp=qp,
+                    lookahead=lookahead,
+                    bitrate=bitrate,
+                    nvenc_aq=nvenc_aq,
+                    policy=policy,
                 )
-                return _result('done', total_frames, elapsed)
 
-            if output_file.exists():
-                try:
-                    output_file.unlink()
-                except Exception:
-                    pass
+                tag = '（降级）' if strategy.get('fallback', False) else ''
+                print('  ' + _label('策略')
+                      + f'[{i + 1}/{len(all_strategies)}] {strategy["name"]}{tag}')
+                print('  ' + _label('执行命令') + shlex.join(cmd))
+
+                rc, stderr_text = _run_with_progress(
+                    cmd, total_frames, queue_rest, queue_cur)
+
+                # rc=0 不代表产物存在：ffmpeg 在少数静默错误下会以 0 退出却不写文件。
+                # 直接 stat() 会抛 FileNotFoundError 中断整批处理，故显式判为策略失败。
+                if rc == 0 and not output_file.exists():
+                    rc = 1
+                    stderr_text = (stderr_text or '') + \
+                        '\nffmpeg 返回 0 但未生成输出文件'
+
+                # [CHROMA-CHECK] 产物色度自检（防复发钩子）。失败时把 rc 打成 1，
+                # 后面那段既有的"策略失败 → 清理产物 → 试下一策略"会原样接管，
+                # 自动退到软解/软编策略，不需要另写降级逻辑。
+                if rc == 0 and chroma_check:
+                    _c_ss = _chroma_sample_ss(probe_full_metadata(input_file, ffmpeg_bin))
+                    _c_ok, _c_why = _chroma_check(
+                        input_file, output_file, ffmpeg_bin, _c_ss)
+                    if not _c_ok:
+                        rc = 1
+                        stderr_text = (stderr_text or '') + f'\n[色度自检] {_c_why}'
+                        print(f'  ⚠ 色度自检未通过：{_c_why}', file=sys.stderr)
+
+                if rc == 0:
+                    elapsed  = time.perf_counter() - t_file_start
+                    in_size  = input_file.stat().st_size
+                    out_size = output_file.stat().st_size
+                    ratio    = (1.0 - out_size / in_size) * 100 if in_size > 0 else 0.0
+                    direction = '↓' if ratio >= 0 else '↑'
+                    print(f'  ✔ 完成，用时 {_fmt_duration(elapsed)}')
+                    print('  ' + _label('输出文件') + str(output_file))
+                    print(
+                        '  ' + _label('大小变化')
+                        + f'{_fmt_size(in_size)} → {_fmt_size(out_size)}'
+                        f'（{direction}{abs(ratio):.1f}%）'
+                    )
+                    # 记录**实际生效**的策略（对照 Video_Enhancement 的 _active_level），
+                    # 供批汇总块报告真正走的档位，而非计划档位。
+                    return _result('done', total_frames, elapsed,
+                                   strategy=str(strategy['name']),
+                                   fallback=bool(strategy.get('fallback', False)))
+
+                if output_file.exists():
+                    try:
+                        output_file.unlink()
+                    except Exception:
+                        pass
 
         # 策略失败：打印 stderr 末 20 行，清理残留文件，尝试下一策略
         err_lines = [l for l in stderr_text.strip().splitlines() if l.strip()]
@@ -4757,6 +4862,11 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                              'auto / vbr* / cbr* 下并存 =「受码率约束的恒定质量」'
                              '（-b:v 视作上限）；constqp 下报错（该模式完全无视 -b:v）。'
                              'cbr* 模式未给本参数会落到 ffmpeg 默认码率（200kbps），会告警')
+    parser.add_argument('--nvenc-aq', action='store_true',
+                        help='给 NVENC 编码器开启自适应量化（-spatial-aq 1 -temporal-aq 1），'
+                             '同码率下画质略升、速度略降（对照 Video_Enhancement 的 '
+                             'enableAQ/enableTemporalAQ）。默认关闭；非 NVENC 策略会忽略'
+                             '并告警（逐策略判断，因为降级策略的编码器可能不是 NVENC）')
     parser.add_argument('--preset', default=None,
                         help='编码器预设。默认：CPU 编码器 medium，GPU 编码器 p5；'
                              'NVENC（p1~p7）与 libx264 风格（ultrafast~veryslow）自动双向映射')
@@ -5339,6 +5449,9 @@ def main() -> int:
 
     # 批量处理
     done_count = skipped_count = failed_count = 0
+    # [借鉴1] 实际生效档位统计（见循环里对 res['strategy']/res['fallback'] 的收集）
+    fallback_count = 0
+    _last_strategy = ''
     peak_fps = 0.0
     sum_frames = 0
     sum_enc_elapsed = 0.0
@@ -5410,6 +5523,7 @@ def main() -> int:
                 qp=args.qp,
                 lookahead=args.lookahead,
                 bitrate=args.bitrate,
+                nvenc_aq=args.nvenc_aq,
                 chroma_check=args.chroma_check,
                 queue_rest=q_rest,
                 queue_cur=q_cur,
@@ -5417,6 +5531,13 @@ def main() -> int:
             st = res['status']
             if st == 'done':
                 done_count += 1
+                # 统计**实际生效**的档位（对照 Video_Enhancement 的 _active_level）：
+                # 只关心"有多少个文件没能走首选策略"，用于批汇总块的一句提醒。
+                _used = res.get('strategy')
+                if _used:
+                    _last_strategy = str(_used)
+                if res.get('fallback'):
+                    fallback_count += 1
             elif st == 'failed':
                 failed_count += 1
             elif st == 'skipped':
@@ -5454,6 +5575,13 @@ def main() -> int:
         f'累计编码用时 {_fmt_duration(sum_enc_elapsed)}  '
         f'均速 {avg_fps:.0f}fps  峰值 {peak_fps:.0f}fps'
     )
+    # [借鉴1] 只在真有降级时多打一行——计划档位（概览块）与实际档位不符时给出提醒。
+    if fallback_count > 0:
+        print(
+            _label('实际档位')
+            + f'{fallback_count} 个文件走了降级策略（末次：{_last_strategy}），'
+            f'其余为各文件首选策略'
+        )
     print(_SEP)
 
     if _STOP_REQUESTED.is_set():

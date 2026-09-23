@@ -85,9 +85,12 @@ def both(codec, **kw):
     return hw(codec, **kw), cv(codec, **kw)
 
 
-print('── ① 默认（一个都不传）：命令里不得出现任何本轴选项 ──')
-for name, (c, _), want in (('hwaccel/hevc_nvenc', hw('hevc_nvenc', cq=20), '-cq 20'),
-                           ('cpu_v2/hevc_nvenc', cv('hevc_nvenc', cq=20), '-cq 20'),
+print('── ① 默认（一个都不传）：不得出现任何本轴选项 ──')
+# 注：NVENC 的 -cq 现在**默认配 -b:v 0**（纯恒定质量，对照 Video_Enhancement 的
+# `-cq:v N -b:v 0`）——这是 [A] 的有意改动，故 NVENC 的期望里多了 `-b:v 0`；
+# 用户级本轴选项（--rc-mode/--qp/--lookahead/--bitrate）仍一个都不出现。
+for name, (c, _), want in (('hwaccel/hevc_nvenc', hw('hevc_nvenc', cq=20), '-cq 20 -b:v 0'),
+                           ('cpu_v2/hevc_nvenc', cv('hevc_nvenc', cq=20), '-cq 20 -b:v 0'),
                            ('hwaccel/libx265', hw('libx265', crf=20), '-crf 20'),
                            ('cpu_v2/libx265', cv('libx265', crf=20), '-crf 20')):
     chk(f'① {name} 默认只有既有质量参数', tokens(c), want)
@@ -247,6 +250,67 @@ for extra, _ in cli_cases:
         lines.append(hit)
     chk(f'⑨ {" ".join(extra)} 两脚本报错首行一致', lines[0], lines[1])
     chk_in(f'⑨ {" ".join(extra)} 确有报错', '[ERROR]', lines[0])
+
+print('── ⑩ 借鉴项 [A/C/B/E]：NVENC 恒定质量 / 真无损 / constqp+LA / AQ ──')
+# [A] NVENC -cq 默认配 -b:v 0（恒定质量）；给了 --bitrate 时不补（受限质量语义）。
+chk('⑩ A hwaccel NVENC cq 默认补 -b:v 0',
+    '-b:v 0' in tokens(hw('hevc_nvenc', cq=20)[0]), True)
+chk('⑩ A cpu_v2 NVENC cq 默认补 -b:v 0',
+    '-b:v 0' in tokens(cv('hevc_nvenc', cq=20)[0]), True)
+chk('⑩ A NVENC cq + --bitrate 不重复下发 -b:v',
+    tokens(hw('hevc_nvenc', cq=20, bitrate='8M')[0]), '-cq 20 -b:v 8M')
+# [B] constqp 下 lookahead 不下发（硬件静默禁用）+ 告知；strict 下抛错。
+for name, (cmd, w) in (('hwaccel', hw('hevc_nvenc', rc_mode='constqp', qp=23, lookahead=40)),
+                       ('cpu_v2', cv('hevc_nvenc', rc_mode='constqp', qp=23, lookahead=40))):
+    chk(f'⑩ B {name} constqp+LA 不下发 -rc-lookahead',
+        '-rc-lookahead' in tokens(cmd), False)
+    chk_in(f'⑩ B {name} constqp+LA 有告知', '静默禁用', w)
+try:
+    hw('hevc_nvenc', rc_mode='constqp', qp=23, lookahead=40, policy='strict')
+    chk('⑩ B hwaccel strict 下 constqp+LA 抛错', 'no-raise', 'raise')
+except ValueError:
+    chk('⑩ B hwaccel strict 下 constqp+LA 抛错', 'raise', 'raise')
+# [C] 真无损：libx265 crf 0 → lossless=1；libx264 crf 0 本已无损不改写；
+#     NVENC cq 0 → hwaccel 在 rc_mode=auto 时改写 constqp、否则只告警；cpu_v2 只告警。
+chk('⑩ C libx265 crf 0 -> lossless=1（hwaccel）',
+    tokens(hw('libx265', crf=0)[0]), '-crf 0 -x265-params lossless=1')
+chk('⑩ C libx265 crf 0 -> lossless=1（cpu_v2）',
+    tokens(cv('libx265', crf=0)[0]), '-crf 0 -x265-params lossless=1')
+chk('⑩ C libx264 crf 0 保持 -crf 0（已无损，不改写）',
+    tokens(hw('libx264', crf=0)[0]), '-crf 0')
+chk('⑩ C NVENC cq 0 → constqp qp0（hwaccel，rc_mode=auto）',
+    tokens(hw('hevc_nvenc', cq=0)[0]), '-rc constqp -qp 0 -b:v 0')
+# 注意 token 顺序：质量块在前、rc_args 在后（既有顺序），故 -rc 出现在最后。
+chk('⑩ C NVENC cq 0 + 显式 rc_mode 只告警不改写（hwaccel）',
+    tokens(hw('hevc_nvenc', cq=0, rc_mode='vbr_hq')[0]), '-cq 0 -b:v 0 -rc vbr_hq')
+chk_in('⑩ C NVENC cq 0 告警（cpu_v2 差异化：原样透传、只告警）',
+       '不是真无损', cv('hevc_nvenc', cq=0)[1])
+# 合并落同一条 -x265-params（crf 0 + lookahead 同时给）
+_mc = hw('libx265', crf=0, lookahead=40)[0]
+chk('⑩ C lossless 与 lookahead 合并成一条 -x265-params',
+    (_mc.count('-x265-params'),
+     set(_mc[_mc.index('-x265-params') + 1].split(':'))),
+    (1, {'lossless=1', 'rc-lookahead=40'}))
+# [E] --nvenc-aq
+_c = hw('hevc_nvenc', cq=20, nvenc_aq=True)[0]
+chk('⑩ E --nvenc-aq 给 NVENC 加 -spatial-aq/-temporal-aq',
+    ('-spatial-aq' in _c and '-temporal-aq' in _c), True)
+_c2, _w2 = hw('libx264', crf=20, nvenc_aq=True)
+chk('⑩ E --nvenc-aq 对非 NVENC 忽略并告知',
+    ('-spatial-aq' not in _c2 and 'nvenc-aq' in _w2), True)
+
+print('── ⑪ 借鉴项 [D]：--workers 反推每任务线程预算（cpu_v2 专属）──')
+_w, _t = C.compute_parallelism(8, 'libx264', 8, 32.0, 16.0,
+                               workers_override=4, threads_override=0)
+chk('⑪ 显式 --workers 自动钳制线程（8 核 / 4 任务 → ≤2 线程）',
+    (_w, _t), (4, 2))
+_w, _t = C.compute_parallelism(8, 'libx264', 8, 32.0, 16.0,
+                               workers_override=4, threads_override=3)
+chk('⑪ 显式 --threads 尊重用户意图（不覆盖）', (_w, _t), (4, 3))
+_w, _t = C.compute_parallelism(8, 'libx264', 8, 32.0, 16.0,
+                               workers_override=0, threads_override=0)
+chk('⑪ 自动分支不受影响（仍按 CODEC_PROFILE 取 4 线程）',
+    _t <= 4, True)
 
 print()
 if fails:

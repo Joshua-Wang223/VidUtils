@@ -2532,7 +2532,7 @@ def make_output_file(
     container: Optional[str],
     batch_mode: bool,
     input_root: Optional[Path],
-    flag: Optional[str] = None,
+    suffix: Optional[str] = None,
     mode: str = "crop",
 ) -> Path:
     if batch_mode or output_path.is_dir() or not output_path.suffix:
@@ -2549,13 +2549,14 @@ def make_output_file(
                 pass
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        # 未指定 --flag 时与 vidcrop_hwaccel.py 一致：
+        # 未指定 --suffix 时与 vidcrop_hwaccel.py 一致：
         # cover → _covered，crop-cover → _cropcovered，其余 _cropped
-        suffix = flag if flag else {
+        # （局部变量名避开参数 suffix，也避开 pathlib 的 .suffix 语义）
+        name_suffix = suffix if suffix else {
             "cover": "_covered",
             "crop-cover": "_cropcovered",
         }.get(mode, "_cropped")
-        return out_dir / f"{src.stem}{suffix}{ext}"
+        return out_dir / f"{src.stem}{name_suffix}{ext}"
 
     dst = output_path
     if container:
@@ -2584,7 +2585,7 @@ def collect_jobs(
     recursive: bool,
     crop_ratio_num: Optional[int] = None,
     crop_ratio_den: Optional[int] = None,
-    flag: Optional[str] = None,
+    suffix: Optional[str] = None,
     mode: str = "crop",
 ) -> Tuple[List[Job], bool, Path]:
     if not input_path.exists():
@@ -2610,8 +2611,8 @@ def collect_jobs(
 
     input_root = input_path if input_path.is_dir() else input_path.parent
 
-    if flag and not batch_mode and output_path.suffix:
-        print("提示：--output 已指定完整文件名，--flag 不生效。", file=sys.stderr)
+    if suffix and not batch_mode and output_path.suffix:
+        print("提示：--output 已指定完整文件名，--suffix 不生效。", file=sys.stderr)
 
     jobs: List[Job] = []
     for src in sources:
@@ -2622,7 +2623,7 @@ def collect_jobs(
             container=container,
             batch_mode=batch_mode,
             input_root=input_root,
-            flag=flag,
+            suffix=suffix,
             mode=mode,
         )
 
@@ -3505,6 +3506,19 @@ def run_sequential(jobs: List[Job], args: argparse.Namespace, threads: int) -> N
 #  CLI
 # ═══════════════════════════════════════════════════════════════════
 
+class _RejectRenamedSuffixFlag(argparse.Action):
+    """旧名 --flag 命中即报错退出 2（硬更名为 --suffix，不做静默兼容）。"""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        _eq = f'--suffix {values}' if values is not None else '--suffix "<后缀>"'
+        parser.exit(
+            2,
+            '\n[ERROR] --flag 已更名为 --suffix（取值与语义完全不变）。\n'
+            f'  把 --flag 原样换成 --suffix 即可，例：{_eq}\n'
+            '  它只改自动生成的输出名后缀（默认 _cropped / _covered / _cropcovered）；\n'
+            '  --output 指定了完整文件名时不生效。\n')
+
+
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="批量视频裁剪 / 覆盖式缩放裁剪（CPU 多任务版）",
@@ -3660,14 +3674,18 @@ def parse_args() -> argparse.Namespace:
              "支持 libx264 风格 (ultrafast~veryslow) 和 NVENC 风格 (p1~p7)，自动双向映射",
     )
     ap.add_argument(
-        "--flag",
+        "--suffix",
         default=None,
         metavar="SUFFIX",
         help="输出文件名后缀标记，用于替代默认的 _cropped / _covered / _cropcovered。"
-             '例：--flag "_Croped" → abc.mp4 输出为 abc_Croped.mp4。'
+             '例：--suffix "_Croped" → abc.mp4 输出为 abc_Croped.mp4。'
              "仅对工具自动生成的输出名生效（批量模式或 --output 为目录）；"
-             "--output 指定了完整文件名时不改动。",
+             "--output 指定了完整文件名时不改动。"
+             "（旧名 --flag 已更名为 --suffix，用旧名直接报错）",
     )
+    # 旧名硬拒绝：注册成无操作、被隐藏的参数，命中即由 Action 报错退出 2
+    ap.add_argument("--flag", nargs="?", action=_RejectRenamedSuffixFlag,
+                    default=None, help=argparse.SUPPRESS)
     ap.add_argument(
         "--pix-fmt",
         default="auto",
@@ -4018,7 +4036,7 @@ def main() -> int:
             recursive=args.recursive,
             crop_ratio_num=args.crop_ratio_num if hasattr(args, 'crop_ratio_num') else None,
             crop_ratio_den=args.crop_ratio_den if hasattr(args, 'crop_ratio_den') else None,
-            flag=args.flag,
+            suffix=args.suffix,
             mode=args.mode,
         )
     except KeyboardInterrupt:

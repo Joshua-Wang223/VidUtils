@@ -3833,6 +3833,15 @@ def build_ffmpeg_cmd(
             # -cq 0 在 VBR 下不是无损；rc_mode=auto（用户未指定模式）时改写为真无损。
             cmd += ['-rc', 'constqp', '-qp', '0', '-b:v', '0']
             print('  提示：--cq 0 → NVENC 真无损改写（-rc constqp -qp 0 -b:v 0）')
+            # [借鉴2] 改写后**有效模式是 constqp**，而 constqp 下 NVENC 静默禁用
+            # lookahead（对照 Video_Enhancement：crf=0 强制 constqp 且 LA=0）。
+            # apply_rc_control_args 看到的仍是用户给的 rc_mode=auto，已按非 constqp
+            # 下发了 `-rc-lookahead` —— 那会是一条**不生效**的选项，故就地摘掉并说明。
+            if '-rc-lookahead' in rc_args:
+                _i = rc_args.index('-rc-lookahead')
+                del rc_args[_i:_i + 2]
+                _warn(f'--lookahead {lookahead} 未生效（--cq 0 已改写为 NVENC constqp'
+                      f' 真无损，该模式静默禁用 lookahead），已忽略')
         else:
             cmd += ['-cq', str(cq)]
             # [CQ-B0] NVENC 的 -cq 必须配 -b:v 0 才是纯恒定质量，否则受 ffmpeg
@@ -4214,7 +4223,7 @@ def process_file(
     dry_run: bool = False,
     file_index: int = 0,
     file_total: int = 0,
-    flag: Optional[str] = None,
+    suffix: Optional[str] = None,
     color_range: Optional[str] = None,
     crop_ratio: Optional[Tuple[int, int]] = None,
     scale_backend: str = 'auto',
@@ -4247,7 +4256,7 @@ def process_file(
         dry_run         True 时仅打印最优策略命令，不实际执行
         file_index      当前文件序号（1 起），用于 [i/n] 前缀
         file_total      文件总数，用于 [i/n] 前缀
-        flag            输出文件名后缀标记，None 时用默认 _cropped / _covered / _cropcovered
+        suffix          输出文件名后缀标记（`--suffix`），None 时用默认 _cropped / _covered / _cropcovered
         crop_ratio      crop-cover 模式裁剪步骤所用比例 (分子, 分母)；None 时用目标宽高比
         rc_mode / qp / lookahead / bitrate  码率控制轴：逐**策略**落到命令上（因为实际
                         编码器是逐策略解析出来的）。默认值全部表示"不下发任何相关选项"，
@@ -4333,11 +4342,12 @@ def process_file(
         ext = container if container else get_extension_from_codec(ext_codec)
         if ext is None:
             ext = input_file.suffix
-        suffix = flag if flag else {
+        # 未指定 --suffix 时用模式默认后缀：cover → _covered，crop-cover → _cropcovered
+        name_suffix = suffix if suffix else {
             'cover': '_covered',
             'crop-cover': '_cropcovered',
         }.get(mode, '_cropped')
-        output_file = output_dir / f'{input_file.stem}{suffix}{ext}'
+        output_file = output_dir / f'{input_file.stem}{name_suffix}{ext}'
     else:
         output_file = output_path
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -4719,6 +4729,19 @@ class _RejectRenamedFlag(argparse.Action):
             '      --decode cpu --scale-algo libswscale-lanczos --codec libx264\n')
 
 
+class _RejectRenamedSuffixFlag(argparse.Action):
+    """旧名 --flag 命中即报错退出 2（硬更名为 --suffix，不做静默兼容）。"""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        _eq = f'--suffix {values}' if values is not None else '--suffix "<后缀>"'
+        parser.exit(
+            2,
+            '\n[ERROR] --flag 已更名为 --suffix（取值与语义完全不变）。\n'
+            f'  把 --flag 原样换成 --suffix 即可，例：{_eq}\n'
+            '  它只改自动生成的输出名后缀（默认 _cropped / _covered / _cropcovered）；\n'
+            '  --output 指定了完整文件名时不生效。\n')
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description='批量裁剪视频，支持 NVIDIA CUDA 硬件加速及智能降级。',
@@ -4870,12 +4893,16 @@ preset 映射（NVENC ↔ libx264 自动转换）：
     parser.add_argument('--preset', default=None,
                         help='编码器预设。默认：CPU 编码器 medium，GPU 编码器 p5；'
                              'NVENC（p1~p7）与 libx264 风格（ultrafast~veryslow）自动双向映射')
-    parser.add_argument('--flag', default=None, metavar='SUFFIX',
+    parser.add_argument('--suffix', default=None, metavar='SUFFIX',
                         help='输出文件名后缀标记，用于替代默认的 _cropped / _covered / '
                              '_cropcovered。'
-                             '例：--flag "_Croped" → abc.mp4 输出为 abc_Croped.mp4。'
+                             '例：--suffix "_Croped" → abc.mp4 输出为 abc_Croped.mp4。'
                              '仅对工具自动生成的输出名生效（批量模式或 --output 为目录）；'
-                             '--output 指定了完整文件名时不改动。')
+                             '--output 指定了完整文件名时不改动。'
+                             '（旧名 --flag 已更名为 --suffix，用旧名直接报错）')
+    # 旧名硬拒绝：注册成无操作、被隐藏的参数，命中即由 Action 报错退出 2
+    parser.add_argument('--flag', nargs='?', action=_RejectRenamedSuffixFlag,
+                        default=None, help=argparse.SUPPRESS)
 
     # 音频编码
     parser.add_argument('--audio-codec', default='copy',
@@ -5314,8 +5341,8 @@ def main() -> int:
         print('[ERROR] 批量模式下 --input 和 --output 不能为同一目录。', file=sys.stderr)
         return 2
 
-    if args.flag and not batch_mode and output_path.suffix:
-        print('提示：--output 已指定完整文件名，--flag 不生效。', file=sys.stderr)
+    if args.suffix and not batch_mode and output_path.suffix:
+        print('提示：--output 已指定完整文件名，--suffix 不生效。', file=sys.stderr)
 
     input_root = input_path if input_path.is_dir() else input_path.parent
 
@@ -5509,7 +5536,7 @@ def main() -> int:
                 dry_run=args.dry_run,
                 file_index=idx,
                 file_total=len(video_files),
-                flag=args.flag,
+                suffix=args.suffix,
                 color_range=args.color_range,
                 crop_ratio=(crop_ratio_num, crop_ratio_den) if has_crop_ratio else None,
                 scale_backend=args.scale_backend,

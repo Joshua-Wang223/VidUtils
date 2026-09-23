@@ -69,7 +69,7 @@
 | 单文件 / 目录批量 | ✅ | ✅ | ✅ | ✅ |
 | 递归扫描目录（`-r`） | ✅ | ✅ | ✅ | ✅ |
 | `--crop-ratio` 按比例自动算裁剪尺寸 | ❌ | ❌ | ✅ | ✅ |
-| `--flag` 自定义输出名后缀 | ❌ | ❌ | ✅ | ✅ |
+| `--suffix` 自定义输出名后缀（旧名 `--flag`） | ❌ | ❌ | ✅ | ✅ |
 | `--color-range` 值域控制（含真转换） | ❌ | ❌ | ✅ | ✅⁵ |
 | `--pix-fmt` 输出像素格式 | ✅ | ❌ | ✅ | ✅⁶ |
 | `--bit-depth` 输出位深（8/10/12） | ❌ | ❌ | ✅ | ✅ |
@@ -283,7 +283,7 @@ vidls.cmd --install       :: 在仓库里这样敲；装好之后从任何目录
 
 ### `vidcrop_cpu_v2.py` — CPU 并发裁剪（推荐）
 
-v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码器别名、preset 双向映射、`--crop-ratio`、`--color-range`、`--flag` 与统一质量基准 `--crf-ref` / `--cq-ref`。
+v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码器别名、preset 双向映射、`--crop-ratio`、`--color-range`、`--suffix` 与统一质量基准 `--crf-ref` / `--cq-ref`。
 
 **支持的编码器：**
 
@@ -319,7 +319,7 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--bit-depth` | `auto` | 目标位深 `8` / `10` / `12`；`auto`=继承源。按编码器选格式（如 `libx265` 的 10bit→`yuv420p10le`、`hevc_nvenc`→`p010le`）。与 `--pix-fmt` 语义重叠：**同时给出时以 `--pix-fmt` 为准**并提示；只关心位深时建议只用本参数（格式名要跟着编码器走，位深不用） |
 | `--hdr` | `auto` | HDR 处理：`auto` / `keep`=尽力保留 HDR10 静态元数据；`drop`=不写元数据、**色彩标签按 SDR(bt709) 写，像素不动**；`sdr`=真的做 HDR→SDR tone mapping（可带算法 `sdr:hable` / `sdr:reinhard` …，默认 `mobius`） |
 | `--color-range` | `auto` | `tv` / `pc` 强制值域，且与源不同时会插入 scale 滤镜做**真值域转换** |
-| `--flag` | `_cropped` / `_covered` / `_cropcovered` | 自定义输出名后缀（仅对自动生成的输出名生效） |
+| `--suffix` | `_cropped` / `_covered` / `_cropcovered` | 自定义输出名后缀（仅对自动生成的输出名生效）。旧名 `--flag` 已**硬更名**为 `--suffix`：用旧名报错退出 2 并给出等价写法 |
 | `--audio-codec` / `--audio-bitrate` | `copy` / `128k` | 音频编码；WebM 容器下 `copy` 遇到不兼容音轨会自动换成 `libopus` |
 | `--workers` / `--threads` / `--mem-per-job` | `0`（自动） | 并发控制 |
 | `--sequential` | 否 | 强制顺序执行 |
@@ -372,7 +372,7 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--bit-depth` | `auto` | 目标位深 `8` / `10` / `12`；`auto`=继承源。与 `--pix-fmt` 语义重叠：**优先按 `--pix-fmt` 落地**，它在当前链上不可用（零拷贝 CUDA 链只收 4 种格式）时**由本参数接管**并明说让位代价（位深/色度变化，`strict` 下有损失即报错）；只关心位深时建议只用本参数。`h264_nvenc` 只支持 8bit，要求 10bit+ 会告警降 8bit（`strict` 下报错） |
 | `--hdr` | `auto` | 同 v2 的四种取值。⚠ `tonemap_cuda` 上游不存在，所以 CUDA 链上没有硬件 tone mapping——会先下载成软件帧再做（cover 链本来就在 crop 前 `hwdownload`） |
 | `--color-range` | `auto` | **不完全同 v2**：链首是 CUDA 原生滤镜（`scale_cuda` 等）时会跳过值域转换并告警，只写标签（见已知限制） |
-| `--flag` | `_cropped` / `_covered` | 同 v2 |
+| `--suffix` | `_cropped` / `_covered` | 同 v2（旧名 `--flag` 已硬更名，用旧名报错退出 2） |
 | `--audio-codec` / `--audio-bitrate` | `copy` / `128k` | 音频编码；WebM 下自动换 `libopus` |
 | `--no-skip-same-size` | 否 | 同尺寸强制转码 |
 | `--no-chroma-check` | 否 | 关闭「产物色度自检」（**默认开启**）：每条策略成功后取样比对源与产物的 U/V，疑似被写没（产物全绿）就判该策略失败并自动降级（复用既有降级链）。每次多 2 次短取样 ffmpeg（实测 +0.38s/文件）。源本身无色度、或取样失败时不判定，不会误伤 |
@@ -1431,7 +1431,7 @@ CRF/CQ 管"画质档"，这一组管**码率控制模式**与**前向预测**。
    `-x265-params A -x265-params B` 是**后者整条覆盖前者**，各发一条会让后发的那条**静默抹掉
    HDR 静态元数据**；现在统一由 `build_hdr_args()` 合并（`verify/verify_rc_lookahead.py` 第 ④ 组钉住）。
 
-**质量问题**（与码率控制轴相邻，容易踩坑；同样由 `verify/verify_rc_lookahead.py` 第 ⑩ 组钉住）：
+**质量问题**（与码率控制轴相邻，容易踩坑；同样由 `verify/verify_rc_lookahead.py` 第 ⑩ 组与 `verify/verify_borrow_enhancement.py` 钉住）：
 
 - **NVENC 的 `-cq` 默认配 `-b:v 0`**：不配的话 ffmpeg 会用默认码率上限约束 CQ，语义退化成
   "受码率约束的恒定质量"而非纯恒定质量（对照 Video_Enhancement 的 `-cq:v N -b:v 0`）。
@@ -1474,6 +1474,8 @@ CRF/CQ 管"画质档"，这一组管**码率控制模式**与**前向预测**。
 | cover 的 CUDA 缩放需自建 FFmpeg | 只有 `--enable-cuda-nvcc` 编出来的 FFmpeg 才有 `scale_cuda`，发行版 gpl 构建通常没有 | 没有就自动退回 CPU 侧 `scale`（结果正确、只是慢）；要拿那 51.9% 的提速需自建 |
 | `--decode cpu` 不再等于纯 CPU | 旧 `--hwaccel none` 会把整块 GPU 一起关掉；现在 `--decode cpu` 只关解码，`--scale-algo auto` 仍会优先尝试显存内缩放（软解时走 `hwupload_cuda`），`--codec` 默认仍是 `h264_nvenc` | 要纯 CPU 用三轴写法 `--decode cpu --scale-algo libswscale-lanczos --codec libx264`（会跳过全部 GPU 探测） |
 | 旧名 `--hwaccel` 与三个旧 `--fallback-policy` 值已删除 | `--hwaccel` 硬更名成 `--decode`；`strict-cuda` / `nvenc-only` / `cpu-only` 不是"策略"而是"三轴预设"，已移除 | 用旧名/旧值都会报错退出 2，并在提示里给出可直接抄的等价写法 |
+| 旧名 `--flag` 已更名为 `--suffix` | 只是名字换了，取值与语义完全不变（输出名后缀标记）。两脚本同批更名 | 把 `--flag X` 原样换成 `--suffix X` 即可；用旧名会被硬拒绝（退出 2，`[ERROR] --flag 已更名为 --suffix …`），不做静默兼容 |
+| NVENC `--cq 0` 与 `--lookahead` 同给时 lookahead 会被丢弃 | `--cq 0`（hwaccel、`rc auto`）会被改写成真无损的 `-rc constqp`，而 **constqp 下 NVENC 静默禁用 lookahead**（对照 Video_Enhancement：crf=0 强制 constqp 且 LA=0）。若不处理，`-rc-lookahead` 会是一条不生效的选项 | 脚本**主动摘掉**该 `-rc-lookahead` 并告警说明原因（`--lookahead N 未生效…已忽略`）；要保留 lookahead 就别用 `--cq 0`（真无损与 lookahead 天然互斥） |
 | 硬件解码能力**分编解码器**，不是"有 / 没有" | 能力探测里的 `has_decoder` 是拿 **H.264 微流**探出来的**机器级**标志；而 NVDEC 实际是分编解码器的——T4（Turing）能解 H.264 / HEVC / VP9 / MPEG-2/4 / VC-1，但**解不了 AV1**（要 Ampere 起的第 5 代）。拿机器级标志推断"这个源能硬解"会误判，代价不只是多一次无用尝试：`--decode auto` 会让每个 AV1 文件都白跑一次必然失败的链；`--fallback-policy strict` 下更是直接退出 2，而这条素材走软解其实完全可行（实测 `[av1 @ ...] Failed setup for format cuda: hwaccel initialisation returned error`） | 现在按**源编解码器**用**真实输入**试解 1 帧（`-frames:v 1 -f null`，几十毫秒），结果按 codec 名缓存、一批文件只探一次；解不了就按软解处理并提示，显式 `--decode cuda` + `strict` 则提前报错（不会白跑一次转码才发现）。正常素材（H.264 / HEVC）只多这一次 1 帧解码，命令逐字不变 |
 | **软解 + `hwupload_cuda` 只在高位深且真缩放时划算** | 上载 / 回下载开销固定，而 p010le 的 CPU 缩放比 8bit 贵得多。T4 两批共 12 组素材实测：**源 ≥10bit 且真在缩放 → +14~25%**；8bit 真缩放 → **+0.4% ~ −14%**；**恒等缩放（无论位深）→ −1.6% ~ −34.7%**（注意 10bit 恒等也是 −22%）。绝对值上软解链路整体 44~46s，而硬解零拷贝只要 12.8s | 有硬解时永远该走硬解。`--scale-algo auto` 只在显式 `--decode cpu` 下才自动走它，且要过两道关：**功能探针**（链真能跑通）+ **值不值**（≥10bit 且非恒等）；不满足时会打印具体理由。要强制使用请显式写 `--scale-algo cuda-lanczos` |
 | 显式 `cuda-*` 执行失败要等到运行期才发现 | `--scale-algo cuda-*` **不跑功能探针**（按设计直接执行） | `--fallback-policy auto`（默认）会自动降级到 `libswscale-<同档>`；要"不可用就报错"用 `strict` |
@@ -1625,6 +1627,7 @@ python verify/verify_hwupload_worth.py    # auto 缩放的 hwupload 门槛
 python verify/verify_color_tagging.py     # 色彩属性标到帧上（setparams），命令级
 python verify/verify_chroma_hook.py       # 产物色度自检的阈值 / 取样 / 降级链
 python verify/verify_rc_lookahead.py      # --rc-mode / --qp / --lookahead / --bitrate
+python verify/verify_borrow_enhancement.py # 从 Video_Enhancement 借鉴的那批：恒定质量/真无损/AQ/降档重试 + --flag→--suffix 更名
 bash   verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
 ```
 
@@ -1940,7 +1943,7 @@ x265 是 **20**、x264 由自身决定；`-rc` 的默认是"不覆盖 preset"。
 （会告警；确实需要就用 `--extra-args` 手工指定）。
 
 四个参数的默认值都表示"不下发任何相关选项"，因此不传时命令与引入它们之前**逐字相同**；
-回归门见[回归与验证](#回归与验证)（`test/dump_enc_options.sh` + `verify/verify_rc_lookahead.py`）。
+回归门见[回归与验证](#回归与验证)（`test/dump_enc_options.sh` + `verify/verify_rc_lookahead.py` + `verify/verify_borrow_enhancement.py`）。
 
 ---
 

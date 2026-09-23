@@ -1685,13 +1685,18 @@ python test/split_diff_by_theme.py --rules rules.json --out temp/split/a.patch -
 
 ```bash
 bash test/check_readme_refs.sh              # 漏登的逐条列出并 exit 1
-SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（四格，不碰本仓 README）
+SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（五格，不碰本仓 README）
 ```
 
-> 自检覆盖四个分支：正向（引用齐全）/ 漏登（列 `MISS` + exit 1）/ **空集**（一个工具文件都
-> 没扫到 → exit 2，防"过滤规则写错或 `git ls-files` 失败"被报成"全部引用齐全"）/
-> README 缺失（exit 2）。它不依赖本仓 README，在 `temp/` 里造临时仓库跑。
-> ⚠ 自检调子进程时**必须显式 `SELFTEST=0`** —— 否则子进程继承 `SELFTEST=1` 会无限递归建目录。
+> 自检覆盖五个分支：正向（引用齐全）/ 漏登（列 `MISS` + exit 1）/ **子目录**（从 `sub/` 跑
+> 仍须扫到仓库根）/ **空集**（一个工具文件都没扫到 → exit 2，防"过滤规则写错或
+> `git ls-files` 失败"被报成"全部引用齐全"）/ README 缺失（exit 2）。它不依赖本仓 README，
+> 在 `temp/` 里造临时仓库跑。
+>
+> 两条实测踩出来的坑：① `git ls-files` **按当前目录裁剪路径** —— 必须 `git -C "$ROOT"`
+> （否则从 `test/` 跑只扫到 8 个文件却照样报 ✓ exit 0，即"部分漏扫"型的假绿）；
+> ② 自检调子进程时**必须显式 `SELFTEST=0`** —— 否则子进程继承 `SELFTEST=1` 会再进自检、
+> 无限递归建目录（实测：拿掉那行 15s 内递归到 7 层并超时；有它则 3.4s 跑完）。
 
 > 范围与例外写在脚本头部；`test/baseline/` 夹具、`Plan/`、`*.md` 文档、`.gitignore` 等
 > 基础设施不在检查范围内。

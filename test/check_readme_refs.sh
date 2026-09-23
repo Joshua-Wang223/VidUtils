@@ -60,6 +60,13 @@ selftest() {
   printf '# README\n\n（故意不提）\n' > "$work/README.md"
   ck "负向：README 漏登 → 1" 1 "$(run)"
 
+  # 子目录格：从 <repo>/sub 跑也必须扫到仓库根（`git ls-files` 不带 -C 会按 cwd 裁剪，
+  # 曾漏扫 25/33 个文件却报绿）
+  mkdir -p "$work/sub"
+  ck "子目录：从 sub/ 跑仍扫到仓库根（漏登仍报 1）" 1 \
+     "$( (cd "$work/sub" && SELFTEST=0 bash ../test/check_readme_refs.sh >/dev/null 2>&1); echo $? )"
+  rmdir "$work/sub"
+
   # 空集：文件还在但不再被跟踪 → 扫到 0 个工具文件。**必须判失败**，
   # 否则"过滤规则写错 / git ls-files 失败"会被报成"全部引用齐全"。
   (cd "$work" && git rm -q --cached tool_demo.sh >/dev/null)
@@ -89,7 +96,9 @@ fi
 
 # 先把文件清单取全并把失败显式暴露出来：`while … < <(git ls-files | …)` 的进程替换
 # 若失败或为空，循环一次都不进、miss 仍是 0 → 会**静默报绿**（2026-09-23 实测）。
-raw=$(git ls-files) || { echo "✗ git ls-files 失败（不在 git 仓库里？）"; exit 2; }
+# ⚠ 必须 `git -C "$ROOT"`：`git ls-files` 会**按当前目录裁剪**路径 —— 从子目录（如 test/）
+#   跑时不加 -C 只扫到该目录下的 8 个文件，却照样打印 ✓ exit 0（2026-09-23 实测）。
+raw=$(git -C "$ROOT" ls-files) || { echo "✗ git ls-files 失败（$ROOT 不是 git 仓库？）"; exit 2; }
 list=$(printf '%s\n' "$raw" \
   | grep -E '^(probe/|verify/|test/[^/]+\.(sh|py)$|[^/]+\.(py|sh|cmd)$)' || true)
 total=$(printf '%s\n' "$list" | grep -c . || true)

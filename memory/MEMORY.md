@@ -121,6 +121,13 @@
   改为按 V0 三分（V0 不绿 → 判「本轮没有复现故障」，不再冤指脚本选项组）；
   判据 `verify/verify_color_tagging.py`、`verify/verify_chroma_hook.py`、
   `test/test_green_chroma_regression.sh`（含"删掉 setparams 必须复现"的红灯自检）
+- [按主题拆分同一文件里的两条改动线（test/split_diff_by_theme.py）](project_commit_split_tool.md)
+  — 规则驱动（整块覆盖 → 逐行规则 → 关键词 → 沿用上一段），**只出 A 侧补丁**；
+  `--verify` 在临时索引上证明「A + 剩余 == 工作区」，`--selftest` 在临时仓库自证；
+  ⭐ 自证当场抓到 4 个真 bug（Hunk 段落建太早 / 两条线相邻时 git 只给一个变更组、
+  无关键词的续行要沿用上一行 / 无关键词的替换组必须标 `?` 待复核 /
+  `@@` 头重算丢换行与计数少算 —— 后两个被 `git apply --recount` 掩盖，
+  只有与 `git diff` 逐字节对比才暴露）
 - [码率控制轴：`--rc-mode` / `--qp` / `--lookahead` / `--bitrate`](project_rate_control_params.md)
   — 四个参数默认值全部 = **不下发**（不传时命令逐字不变；第三道回归门
   `test/dump_enc_options.sh` + `baseline/enc_before.txt` 钉住）；`-rc` / `-qp` 是

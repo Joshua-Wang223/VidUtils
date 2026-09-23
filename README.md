@@ -1646,6 +1646,29 @@ SRC=<源视频> OUT_W=640 OUT_H=360 bash probe/probe_green_chroma.sh   # 自定�
 > 测试素材与探针工作目录都在 `temp/`（gitignored），**不入库**；
 > `verify/*.py` 需要 fixture 时会用 lavfi 按需生成。
 
+### 按主题拆分同一个文件里的两条改动线（`test/split_diff_by_theme.py`）
+
+同一个文件里压着两条互不相关的改动线时（例：`vidcrop_hwaccel.py` 既有「色度归零修复」
+又有「码率控制四参数」），提交要按主题拆 —— 难点不是 `git add -p`（逐 hunk），
+而是**一个 hunk 里就混着两条线的改动**。本工具把"怎么分"外置成规则 JSON：
+
+```bash
+python test/split_diff_by_theme.py --selftest                  # 工装自证（临时仓库，不碰本仓）
+python test/split_diff_by_theme.py --print-rules > rules.json  # 规则模板（照抄改成你的两条线）
+python test/split_diff_by_theme.py --rules rules.json --report # 只看分类报告
+python test/split_diff_by_theme.py --rules rules.json --out temp/split/a.patch --verify
+# 然后：git apply --cached --recount temp/split/a.patch → 提交 A → git add <files> → 提交 B
+```
+
+判定顺序：**整块覆盖 → 逐行规则 → 关键词 → 沿用上一段**；判定不出的一律**标记 `?` 待复核**
+（静默分错线是最坏结局）。`--verify` 在**临时索引**上证明「A + 剩余 == 工作区」，不碰真实索引。
+只输出 A 侧补丁 —— B 侧就是"工作区减去已提交的 A"，由 `git add` 自然得到。
+
+> 工装自证覆盖了四个真实踩过的坑：变更组必须**原子**（`-旧`/`+新` 同侧，否则 A 那次提交
+> 编译不过）；两条线的增行相邻时 git 只给**一个**变更组，无关键词的续行要**沿用上一行**；
+> 无关键词的替换组要**显式标记待复核**；`@@` 头重算时**换行与两侧计数**都不能丢
+> （丢了会 `patch does not apply`，而 `git apply --recount` 会把这个计数 bug 掩盖掉）。
+
 ---
 
 ## 工程记忆（memory/）

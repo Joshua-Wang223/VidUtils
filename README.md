@@ -1688,6 +1688,34 @@ SRC=<源视频> OUT_W=640 OUT_H=360 bash probe/probe_green_chroma.sh   # 自定�
   **AV1 硬解硬编都没有**（`av1_cuvid` 在列表里，运行时报 not supported）；
   「本机 AV1 完全编不出来」这条已更正为：custom `ffmpeg` 7.1 没有 AV1 软编，
   但系统 `ffmpeg` 6.1.1 有 `libsvtav1`/`libaom-av1`；零拷贝管线里 `-pix_fmt` 无效
+- [解码/缩放/编码三轴模型（`--hwaccel` 已硬更名 `--decode`）](memory/project_three_axis_model.md)
+  —— 把 `--hwaccel` 拆成三个正交轴（`--decode` / `--scale-algo` / `--codec`）外加纯策略开关
+  `--fallback-policy(auto/strict)`；旧 `--hwaccel` 与 `strict-cuda`/`nvenc-only`/`cpu-only`
+  全部硬删除（用旧名报错退出）；新增「软解 + `hwupload_cuda`」显存缩放链；
+  `scale_cuda` 探测与 `can_cuda_scale` 不再绑在解码轴上
+- [cover 模式的 CUDA 缩放（`scale_cuda`）：实测数据与两条硬约束](memory/project_cuda_scale_cover.md)
+  —— 真实 4K→1440x1080 实测比 lanczos 基准快 51.9~52.9%（对旧 bicubic 基准 44.5%），
+  质量门 PSNR 46.60dB + VMAF 97.21；**必须显式写 `hwdownload` 否则 crop 被静默丢弃**；
+  `crop_cuda` 上游不存在；顺带修掉 `_src_download_fmt` 的 p010/p012 非法 pix_fmt 名；
+  探针的 awk **跨行三元**在 T4 的 mawk 上炸过（gawk 兼容 ≠ mawk 兼容）；
+  软解 + hwupload 链比软解 + CPU 缩放快 2.9~3.2%、画质逐位相同，但绝对值 44~46s vs
+  硬解零拷贝 12.8s → 定位仍是「NVDEC 用不了时的出路」；10bit p010le 路径仍空白
+- [像素格式 / 位深 / HDR 三参数（`--pix-fmt` / `--bit-depth` / `--hdr`）](memory/project_color_depth_hdr_params.md)
+  —— 零拷贝 CUDA 链**不能传 `-pix_fmt`**（设的是 `AVFrame.format` 而非 `sw_format`），
+  改用 `scale_cuda=format=` + `-profile:v`；`tonemap_cuda` 上游不存在（HDR→SDR 只能走 CPU）；
+  `--pix-fmt` 与 `--bit-depth` 语义重叠 → 按「**能落地者赢**」，让位要说明代价、`strict` 下报错
+- [裁剪产物色度归零（全绿）：元凶是 ffmpeg 自动插入的 auto_scale](memory/project_green_chroma_defect.md)
+  —— 输出端 `-colorspace smpte170m` 与解码帧 `csp:unknown` 不一致时，ffmpeg 在滤镜链尾自动插
+  一个 CPU `scale`（`auto_scale_0`）去凑 codec context；在「硬解 + NVENC」链上这个转换把
+  **U/V 清零** → 下游 YUV→RGB 得 RGB(0,255,0)、成品全绿。实测**单加 `-colorspace` 即复现**，
+  其余三参单独无害。**不是** hwdownload / `-hwaccel auto` / NVENC 本身（都是上一轮的错方向）；
+  修法 = `setparams` 下发放宽到 GPU 编码器 +「链尾是 CUDA 原生滤镜则不追加」守卫；新增产物
+  色度自检钩子（`--no-chroma-check` 可关）；探针侧随之修了 6b「最小恢复集」算反、尾判读 ④
+  按脚本原命令 V0 三分、以及源 == 目标（恒等 crop）时的可裁剪性预检
+- [码率控制轴：`--rc-mode` / `--qp` / `--lookahead` / `--bitrate`](memory/project_rate_control_params.md)
+  —— 两脚本同名同默认，**默认值全部 = 不下发**（不传时命令逐字不变）；`-rc` / `-qp` 是 NVENC
+  专属（非 NVENC 告警忽略、`strict` 报错）；`--lookahead` 按编码器映射且默认值三边不同；
+  实测 `-x265-params` 后者**整条覆盖**前者，故必须与 HDR 元数据合并成同一条
 
 写法沿用本机 codebuddy 自动记忆的约定：frontmatter 带 `name` / `description` / `type`，
 正文对 project / feedback 类用「事实 → **Why:** → **How to apply:**」的结构，

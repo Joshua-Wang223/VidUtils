@@ -1559,15 +1559,23 @@ vidutils/
 ├── vidls.cmd                 # 同上 Windows 版启动器（纯 ASCII + CRLF：cmd.exe 按 ANSI 代码页解析批处理）
 ├── vidll.cmd                 # Windows 版 vidll（只转发给 vidls.cmd）
 ├── vidls_win.py              # Windows 版内核：版式判据按实测重写、控制台编码自适应、写启动器的 --install
-├── test/                     # 全部回归测试（基线在 test/baseline/，见「回归与验证」）
-│   ├── dump_filter_chains.sh        # 裁剪脚本：滤镜链回归（16 行基线）
-│   ├── dump_cmd_default.sh          # 裁剪脚本：命令级回归（7 用例基线）
-│   ├── baseline/                    # 上面两个的基线文件
-│   ├── test_interp_2x_lock.sh       # 插帧脚本：单实例锁 / 并发安全
-│   └── test_interp_2x_orphan.sh     # 插帧脚本：中断收尾 / 孤儿 ffmpeg 自愈
-├── verify/                   # 裁剪脚本的验证套件（单测 + CLI 层，都不需要 GPU）
-├── probe/                    # 上机探针：T4 实测用（无 GPU 时只能跑 SELFTEST=1）
+├── test/                     # 全部回归测试与工装（基线在 test/baseline/，见「回归与验证」）
+│   ├── dump_filter_chains.sh            # 裁剪脚本：滤镜链回归（16 行基线）
+│   ├── dump_cmd_default.sh              # 裁剪脚本：命令级回归（7 用例基线）
+│   ├── dump_enc_options.sh              # 裁剪脚本：编码/质量/码率控制 token 回归（enc_before.txt）
+│   ├── test_green_chroma_regression.sh  # 裁剪脚本：色度归零端到端回归（含删 setparams 的红灯自检）
+│   ├── split_diff_by_theme.py           # 分提交工装：按主题拆分同一文件里的两条改动线
+│   ├── check_readme_refs.sh             # 收尾核对：README 必须引用每个工具文件名
+│   ├── baseline/                        # 各 dump_*.sh 的逐字基线
+│   ├── test_interp_2x_lock.sh           # 插帧脚本：单实例锁 / 并发安全
+│   └── test_interp_2x_orphan.sh         # 插帧脚本：中断收尾 / 孤儿 ffmpeg 自愈
+├── verify/                   # 裁剪脚本的验证套件（单测 + CLI 层，都不需要 GPU；清单见「回归与验证」）
+├── probe/                    # 上机探针（无 GPU 时只能跑 SELFTEST=1）
+│   ├── probe_green_chroma.sh            # 色度归零归因：解码层 / 编码层 / 命令级二分
+│   ├── probe_scale_cuda_crop.sh         # CUDA 缩放裁剪：计时与画质 A/B/C/D/Q
+│   └── enum_cmds.py                     # 无 GPU 时 mock 远程能力、枚举脚本真正下发的命令
 ├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
+├── Plan/                     # 立项任务书与过程归档（含 vidls 对话记录 .txt）
 ├── AV1_VP9_UPGRADE_PLAN_v2.md # AV1/VP9 升级方案归档
 ├── docs/                     # （规划）设计文档与性能基准
 ├── examples/                 # （规划）示例素材与演示脚本
@@ -1668,6 +1676,19 @@ python test/split_diff_by_theme.py --rules rules.json --out temp/split/a.patch -
 > 编译不过）；两条线的增行相邻时 git 只给**一个**变更组，无关键词的续行要**沿用上一行**；
 > 无关键词的替换组要**显式标记待复核**；`@@` 头重算时**换行与两侧计数**都不能丢
 > （丢了会 `patch does not apply`，而 `git apply --recount` 会把这个计数 bug 掩盖掉）。
+
+### 收尾核对：README 是否漏登工具文件（`test/check_readme_refs.sh`）
+
+入库新工具（`probe/` `verify/` `test/` 下的脚本、仓库根的 `*.py`/`*.sh`/`*.cmd`）后跑一遍，
+确认 README 里提到了每一个文件名 —— 漏登过的有 `probe/enum_cmds.py`、`test/` 目录结构树的
+三个脚本、以及 memory/ 索引（后者另有 `memory/MEMORY.md` 把关）：
+
+```bash
+bash test/check_readme_refs.sh    # 漏登的逐条列出并 exit 1
+```
+
+> 范围与例外写在脚本头部；`test/baseline/` 夹具、`Plan/`、`*.md` 文档、`.gitignore` 等
+> 基础设施不在检查范围内。
 
 ---
 

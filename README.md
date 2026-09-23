@@ -1684,8 +1684,14 @@ python test/split_diff_by_theme.py --rules rules.json --out temp/split/a.patch -
 三个脚本、以及 memory/ 索引（后者另有 `memory/MEMORY.md` 把关）：
 
 ```bash
-bash test/check_readme_refs.sh    # 漏登的逐条列出并 exit 1
+bash test/check_readme_refs.sh              # 漏登的逐条列出并 exit 1
+SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（四格，不碰本仓 README）
 ```
+
+> 自检覆盖四个分支：正向（引用齐全）/ 漏登（列 `MISS` + exit 1）/ **空集**（一个工具文件都
+> 没扫到 → exit 2，防"过滤规则写错或 `git ls-files` 失败"被报成"全部引用齐全"）/
+> README 缺失（exit 2）。它不依赖本仓 README，在 `temp/` 里造临时仓库跑。
+> ⚠ 自检调子进程时**必须显式 `SELFTEST=0`** —— 否则子进程继承 `SELFTEST=1` 会无限递归建目录。
 
 > 范围与例外写在脚本头部；`test/baseline/` 夹具、`Plan/`、`*.md` 文档、`.gitignore` 等
 > 基础设施不在检查范围内。

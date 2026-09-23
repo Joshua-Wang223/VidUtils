@@ -301,8 +301,8 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--input` / `--output` | 必选 | 输入 / 输出（文件或目录） |
-| `--output-width` / `--output-height` | 与 `--crop-ratio` 二选一 | 目标视频宽 / 高；`crop-cover` 模式下配合 `--crop-ratio` 时可只给一个维度（另一个按比例推导，取偶数） |
-| `--crop-ratio` | 无 | 目标宽高比（`16:9` / `4:3` / 浮点 `1.777`），自动算最大化裁剪尺寸；`crop-cover` 模式下与 `--output-width/height` 并用（前者定裁剪比例、后者定最终尺寸） |
+| `--output-width` / `--output-height` | 与 `--crop-ratio` 二选一 | 目标视频宽 / 高；配合 `--crop-ratio` 时可只给一个维度（另一个按比例推导，取偶数）。**两个都给**才与 `--crop-ratio` 互斥 |
+| `--crop-ratio` | 无 | 目标宽高比（`16:9` / `4:3` / 浮点 `1.777`），单独用时自动算最大化裁剪尺寸；与 `--output-width/height` 并用时**前者定画面比例、后者定分辨率**（`crop-cover` 下后者是裁剪后缩放覆盖的目标尺寸） |
 | `--mode` | `crop` | `crop` / `cover` / `crop-cover`（`crop-cover`=先按 `--crop-ratio`（未给出时即目标宽高比）最大化裁剪，再缩放覆盖到最终尺寸） |
 | `--codec` | `libx264` | 视频编码器；支持别名（`vp9`→`libvpx-vp9`、`av1`→`libaom-av1`、`svtav1`→`libsvtav1`、`rav1e`→`librav1e` …）；`auto` 等同 `libx264`（本脚本为纯 CPU 路径，与硬件版的 `auto` 在无 NVENC 时解析结果一致） |
 | `--crf` | `21` | CPU 编码器质量（0–51）；**字面量原样下发，不换算** |
@@ -354,8 +354,8 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 |---|---|---|
 | `--input` / `--output` | 必选 | 输入 / 输出（文件或目录） |
 | `-r, --recursive` | 否 | 递归扫描输入目录，输出自动镜像原始子目录结构 |
-| `--output-width` / `--output-height` | 与 `--crop-ratio` 二选一 | 目标视频宽 / 高；`crop-cover` 模式下配合 `--crop-ratio` 时可只给一个维度（另一个按比例推导，取偶数） |
-| `--crop-ratio` | 无 | 目标宽高比，自动算最大化裁剪尺寸；`crop-cover` 模式下与 `--output-width/height` 并用（前者定裁剪比例、后者定最终尺寸） |
+| `--output-width` / `--output-height` | 与 `--crop-ratio` 二选一 | 目标视频宽 / 高；配合 `--crop-ratio` 时可只给一个维度（另一个按比例推导，取偶数）。**两个都给**才与 `--crop-ratio` 互斥 |
+| `--crop-ratio` | 无 | 目标宽高比，单独用时自动算最大化裁剪尺寸；与 `--output-width/height` 并用时**前者定画面比例、后者定分辨率**（`crop-cover` 下后者是裁剪后缩放覆盖的目标尺寸） |
 | `--mode` | `crop` | `crop` / `cover` / `crop-cover`（`crop-cover`=先按 `--crop-ratio`（未给出时即目标宽高比）最大化裁剪，再缩放覆盖到最终尺寸）（注¹） |
 | `--scale-algo` | 裸 `lanczos` | 缩放算法，写法 `<backend>-<algo>` 或裸 `<algo>`（后端自动）。`libswscale-*`：同 v2 的那 10 个；`cuda-*`：`nearest` `bilinear` `bicubic` `lanczos`（**仅 cover 模式**，走显存内缩放，需自建 FFmpeg）。前缀用于**强制**后端；裸名字要求两表都认（只在一个后端有的必须带前缀，如 `libswscale-spline`）。降级与冲突处理见[硬件加速说明](#硬件加速说明) |
 | `--original-width/height` | 自动检测 | 手动指定源尺寸，跳过 ffprobe |
@@ -1487,7 +1487,8 @@ CRF/CQ 管"画质档"，这一组管**码率控制模式**与**前向预测**。
 | CPU 侧缩放是 lanczos（比旧版慢） | `cover` / `crop-cover` 默认用 `flags=lanczos`（原先是 libswscale 默认的 bicubic），抽头更多 → CPU 侧吞吐略降 | 这是为了与 GPU 侧同档、避免降级时画质变软。换档用 `--scale-algo`（如 `--scale-algo bicubic`） |
 | v0 / v1 与 v2/hwaccel 的缩放档位不同 | v0/v1 仍吃 libswscale 的默认 `bicubic`（它们定位是"对照旧行为"，这次没跟着改） | 要同档用 v2 / hwaccel；要对照旧输出用 v0/v1 |
 | `--scale-algo` 的裸名字在 v2 与 hwaccel 上不完全等价 | v2 只有一个后端 → **任何 libswscale 算法都能省前缀**（`--scale-algo spline` 可用）；hwaccel 有两个后端 → 裸名字要求两表都认，`spline` 这类只有 libswscale 有的**必须**写成 `libswscale-spline`，否则报错 | 想让同一条命令两边都能跑就统一带前缀（`libswscale-<algo>`）；只在 v2 上用才可省 |
-| `--crop-ratio` + **只给一个**维度（非 crop-cover） | 互斥判据是"两个维度都给才算同时指定"，只给一个不算 → 那个维度被**静默忽略**（`--mode crop --crop-ratio 16:9 --output-width 320` 里 `320` 不生效）。两个脚本行为一致 | 按比例裁剪就别给尺寸；要指定最终尺寸用 `--mode crop-cover`（该模式明确支持单维度） |
+| ~~`--crop-ratio` + 只给一个维度~~（**已修，2026-09-23**） | 旧行为：互斥判据是"两个维度都给才算同时指定"，只给一个不算 → 那个维度被**静默忽略**。踩过的坑：`--mode cover --crop-ratio 16:9 --output-height 1080` 作用在**本身就是 16:9** 的源上时，目标被算成"源的 16:9 最大化裁剪"= 源尺寸 → 直接命中同尺寸跳过｜**不报错、不转码**，把 1080p 请求变成 no-op | 现在**三个模式**统一：`--crop-ratio` + 单维度 → 按比例补全另一个（比例定形状、尺寸定分辨率），并打印补全结果；`crop` 模式下补全后若超过源尺寸仍按"目标不得大于源"跳过。两个都给才仍报错。判据 `verify/verify_ratio_single_dim.py` |
+| 「跳过行」的**格式**两边不同（**既有，保留**） | 同一份文件记跳过时，hwaccel 打印 `  ⏭  跳过：<消息>`，cpu_v2 打印 `⏭  跳过 <文件名>: <消息>`（多了文件名、缩进与冒号不同）。**消息文本与记账口径已对齐**（2026-09-23） | 这是 v2 顺序执行器对**所有**跳过原因的统一样式（「已存在」等同款），只改这一条反而变成不一致。crop 模式「目标大于源」现两边都记**跳过**、退出码 0（原先 v2 记失败、rc=1） |
 | hwaccel 不校验 `--original-width/height` | 只有 `vidcrop_cpu_v2.py` 校验正整数；hwaccel 传负值会一路带进尺寸计算 | 手填源尺寸时自己保证为正；不确定就用默认的 ffprobe 探测 |
 | `librav1e` 无 `-crf` | 编码器本身只支持 `-qp` | 脚本自动换算（实测标定） |
 | `--rc-mode` / `--qp` 只在 NVENC 上生效 | `-rc` / `-qp` 是 NVENC 专属选项；libx264 / libx265 没有"码率控制模式"这个开关（它们用 `-crf` / `-b:v` / `-qp` 的组合表达），libsvtav1 的 `-qp` 语义也不同（"初始 QP"、量程 0–63） | CPU 编码器要限码率用 `--bitrate`；要 `-rc` 就换 `*_nvenc`。给了不生效的参数会打印告警，不会静默；hwaccel 的 `strict` 下直接报错 |
@@ -1629,6 +1630,7 @@ python verify/verify_color_tagging.py     # 色彩属性标到帧上（setparams
 python verify/verify_chroma_hook.py       # 产物色度自检的阈值 / 取样 / 降级链
 python verify/verify_rc_lookahead.py      # --rc-mode / --qp / --lookahead / --bitrate
 python verify/verify_borrow_enhancement.py # 从 Video_Enhancement 借鉴的那批：恒定质量/真无损/AQ/降档重试 + --flag→--suffix 更名
+python verify/verify_ratio_single_dim.py  # --crop-ratio + 单维度 → 按比例补全（三模式 + 两脚本 lockstep）
 bash   verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
 ```
 
@@ -1841,6 +1843,19 @@ SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（五格，不�
 # 不给 --crop-ratio 时裁剪比例就是目标宽高比，两个维度都必须给
 --mode crop-cover --output-width 1280 --output-height 720
 ```
+
+`--crop-ratio` + **只给一个维度**的写法在**三个模式**下通用（比例定画面形状、尺寸定分辨率，
+缺的维度按比例推导为偶数）：
+
+```bash
+# 1920x1080（源 1536x864，本身即 16:9 —— 只给高度即可）
+--mode cover --crop-ratio 16:9 --output-height 1080
+# crop 模式下同样按 16:9 与给定高度定位后再居中裁剪
+--mode crop  --crop-ratio 16:9 --output-height 432      # → 768x432
+```
+
+> 注意：`--mode crop` 的"目标不得大于源"仍然生效——补全后若超过源尺寸，该文件不会产出命令，
+> 两边都记「跳过」（退出码 0）。想放大请用 `cover` / `crop-cover`。
 
 `cover` 模式的缩放现在可以留在显存里，有两种形态：
 

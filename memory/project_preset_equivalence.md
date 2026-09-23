@@ -104,18 +104,41 @@ preset 字段。
 `_resolve_quality_params()` **之前**。cpu_v2 原先顺序反了，`--crf-ref 99` 会先打印
 `提示：--crf-ref 99 (libx264 CRF 基准) → libx264 的 -crf 51。` 再报"范围为 0-51"，自相矛盾。
 hwaccel 的完整顺序是：`-ref` 互斥 → 尺寸校验（crop-cover 分支 / 互斥 / 正整数 / crop-ratio
-解析 / 单维度补全）→ `--crf`/`--cq` 量程 → `-ref` 量程 →（`_resolve_quality_params` 留到
+解析 / 单维度补全——**三个模式通用**，比例定形状、尺寸定分辨率）→ `--crf`/`--cq` 量程 →
+`-ref` 量程 →（`_resolve_quality_params` 留到
 `process_file` 里）。cpu_v2 的 `validate_and_finalize_args()` 已按同一顺序重排。
 
 推导出的维度必须取**偶数**（两文件同名函数 `derive_even_dimension()`，取整后奇数就 +1，
 不低于 2）：4:2:0 系 pix_fmt（`yuv420p` / `yuv420p10le` / `p010le`）要求宽高均为偶数。
 
-**已知仍未对齐的（暂按现状，两边行为一致所以不构成分叉）**：
+**~~已知仍未对齐~~ 的第一条已于 2026-09-23 修掉**（用户的真机踩坑推动，见下）：
 
-- 非 crop-cover 模式下 `--crop-ratio` + **只给一个**维度（如 `--mode crop --crop-ratio 16:9
-  --output-width 320`）：两边都**静默忽略**那个维度（判据是 `has_explicit_size` 要求两个都
-  给，只给一个不算"同时指定"）。要改就两边一起改成报错。
+- ~~非 crop-cover 模式下 `--crop-ratio` + **只给一个**维度：两边都**静默忽略**那个维度。~~
+  → 现改为**三个模式统一按比例补全**（比例定画面形状、尺寸定分辨率），并打印补全结果。
+  触发它的真实事故：`--mode cover --crop-ratio 16:9 --output-height 1080` 作用在源本身
+  就是 16:9（1536×864）的片子上，目标被算成"源的 16:9 最大化裁剪"= 1536×864 = 源尺寸
+  → 直接命中**同尺寸跳过**，不报错、不转码，把 1080p 请求变成 no-op。判据
+  `verify/verify_ratio_single_dim.py`（含 crop / cover / crop-cover 三模式 + 两脚本 lockstep
+  + 负向：ratio 单独用仍是源最大化裁剪、两个维度都给仍报错）。用户当时选的是
+  **"按比例推导"**而非"报错退出 2"。
+  实现要点：hwaccel 在 `main()` 里用 before-mutation 的 `has_any_size` 判"尺寸是不是由
+  ratio 自己决定"；cpu_v2 的校验是独立函数 → 必须把这个判定**挂到 `args.use_auto_crop_size`**
+  上传给 `prepare_job_command()`（那里 args.output_* 已被补全，读不出来了）。
 - hwaccel **没有** `--original-width/height` 的正整数校验（cpu_v2 有），传负值会一路带下去。
+
+**同轮（2026-09-23）还对齐了另外两处既有分叉**（都按"以 hwaccel 为权威"，用户拍板）
+—— 它们是查上面那条时顺路发现的，判据一并进 `verify/verify_ratio_single_dim.py`：
+
+| 分叉 | 改法 |
+|---|---|
+| cpu_v2 在 `crop-cover` + `--crop-ratio` + 给尺寸时多打一条提示「`--output-width/height` 是缩放后的最终尺寸，裁剪步骤按 `--crop-ratio` 计算。」 | **删掉**（hwaccel 没有 ⇒ 同一条命令一边多一行输出）。信息没丢：概览的「最终尺寸: WxH」与逐文件目标尺寸行都在 |
+| `crop` 模式「目标大于源」：hwaccel 记**跳过**（`⏭`，rc=0），cpu_v2 记**失败**（`✘`，使整批 `rc=1`） | cpu_v2 改成 **skipped + rc=0**，消息文本逐字对齐 hwaccel（`crop 模式下目标尺寸 (WxH) 大于原始尺寸 (WxH)`） |
+| 附带：同尺寸跳过的消息文本也不同（`目标尺寸与源尺寸相同，…可强制转码` vs hwaccel 的 `目标尺寸与原始尺寸相同（…）。`） | cpu_v2 改成 hwaccel 那句（含全角括号与句号） |
+
+⚠ **仍然保留的一处**（有意不改）：**跳过行的外层格式**两边不同 —— hwaccel 是
+`  ⏭  跳过：<消息>`，cpu_v2 是 `⏭  跳过 <文件名>: <消息>`（带文件名、缩进与冒号不同）。
+那是 v2 顺序执行器对**所有**跳过原因的统一样式（「已存在」等同款），只对齐这一条反而
+制造新的不一致。⇒ 判据里断言的是**消息文本**这一层，不是整行。
 
 **② 滤镜链**：`crop=<按 ratio 最大化裁剪>,<cover 缩放>`。未给 `--crop-ratio` 时第二段的
 比例与裁剪结果一致，整条链退化成 `crop=...,scale=W:H`（纯裁剪 + 纯缩放，没有二次裁剪）。

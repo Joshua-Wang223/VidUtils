@@ -53,7 +53,15 @@
   （先裁剪再缩放覆盖；无 `--crop-ratio` 必须给全宽高、有则只给一个按比例推导；
   后缀 `_cropcovered`；比例与源不同时即使同尺寸也不能跳过）；
   同日又逐字对齐了 17 条校验文案与校验顺序（cpu_v2 的「crop-ratio + 显式尺寸」由
-  「忽略+提示」改为**报错**、量程检查提到 `_resolve_quality_params` 之前）
+  「忽略+提示」改为**报错**、量程检查提到 `_resolve_quality_params` 之前）；
+  **2026-09-23**：`--crop-ratio` + **只给一个** `--output-*` 维度从"静默丢弃该维度"
+  改为**三个模式统一按比例补全**（比例定形状、尺寸定分辨率）—— 真机踩坑是
+  `--mode cover --crop-ratio 16:9 --output-height 1080` 打在本身 16:9 的源上会算成
+  源尺寸 → **同尺寸跳过**（1080p 请求变 no-op）；两个都给仍报错，
+  判据 `verify/verify_ratio_single_dim.py`；
+  同轮还按"以 hwaccel 为权威"对齐了两处既有分叉（**crop 模式目标大于源：v2 由「失败」
+  改「跳过」、rc 1→0**；删掉 v2 在 crop-cover 下多打的一条提示）+ 同尺寸跳过的措辞；
+  唯一保留：跳过行的外层格式（v2 带文件名）两边仍不同
 - [cover 的 CUDA 缩放：实测数据、两条硬约束与质量门](project_cuda_scale_cover.md)
   — 2026-09-20 给 `vidcrop_hwaccel.py` 的 cover 加了「`scale_cuda` + 显式 `hwdownload` + CPU crop」
   策略：真实 4K→1440x1080 实测 **26.65s → 12.82s（快 51.9%）**，CPU 侧 `scale(lanczos)` 占 28.4%

@@ -10,11 +10,11 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
       - crop （默认）：直接居中裁剪（目标尺寸不得大于源尺寸）
       - cover：等比缩放至完全覆盖目标区域后居中裁剪（任意尺寸）
       - crop-cover：先对源画面做裁剪，再把裁剪结果缩放覆盖到最终尺寸（可放大）。
-                    裁剪步骤的比例由 --crop-ratio 决定，未给出时即目标宽高比，
-                    因此该模式下 --crop-ratio 可与 --output-width/height 并用：
-                    有 --crop-ratio 时最终尺寸只需给一个维度，另一个按比例推导。
-  • --crop-ratio 自动按目标宽高比（如 16:9）最大化裁剪，无需指定输出尺寸
-    （crop-cover 模式下与 --output-width/height 并用，用于指定最终的缩放尺寸）
+                    裁剪步骤的比例由 --crop-ratio 决定，未给出时即目标宽高比。
+  • --crop-ratio 自动按目标宽高比（如 16:9）最大化裁剪，无需指定输出尺寸；
+    与 --output-width/height 并用时前者定画面比例、后者定分辨率，可只给一个维度
+    （另一个按比例推导为偶数；crop / cover 下该尺寸即最终尺寸，
+    crop-cover 下是裁剪后缩放覆盖的目标尺寸）
   • --scale-algo 选缩放算法，写法 <backend>-<algo> 或裸 <algo>（后端自动）：
         libswscale-*  fast_bilinear bilinear bicubic neighbor area bicublin
                       gauss sinc lanczos spline
@@ -147,6 +147,11 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
   python vidcrop_hwaccel.py \\
       --input video.mp4 --output out.mp4 \\
       --mode crop-cover --crop-ratio 16:9 --output-width 1280   # → 1280x720
+
+  # 2h) 其余模式 + --crop-ratio + 单维度：比例定形状、尺寸定分辨率（→ 1920x1080）
+  python vidcrop_hwaccel.py \\
+      --input video.mp4 --output out.mp4 \\
+      --mode cover --crop-ratio 16:9 --output-height 1080
 
   # 3) 递归扫描 + 音频重编码 + 追加参数
   python vidcrop_hwaccel.py \\
@@ -4810,14 +4815,14 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                         help='原始视频高度（不提供则自动通过 ffprobe 检测）')
     parser.add_argument('--output-width',  type=int, default=None,
                         help='目标视频宽度（与 --crop-ratio 二选一；'
-                             '--mode crop-cover 配合 --crop-ratio 时可只给一个维度）')
+                             '配合 --crop-ratio 时可只给一个维度，另一个按比例推导）')
     parser.add_argument('--output-height', type=int, default=None,
                         help='目标视频高度（与 --crop-ratio 二选一；'
-                             '--mode crop-cover 配合 --crop-ratio 时可只给一个维度）')
+                             '配合 --crop-ratio 时可只给一个维度，另一个按比例推导）')
     parser.add_argument('--crop-ratio', type=str, default=None,
                         help='自动计算裁剪尺寸的目标宽高比，如 16:9 或 1.777'
-                             '（与 --output-width/height 二选一；'
-                             '--mode crop-cover 下两者并用，前者定裁剪比例、后者定最终尺寸）')
+                             '（与 --output-width/height 二选一；与其一并用时'
+                             '前者定画面比例、后者定分辨率；crop-cover 下后者是缩放目标）')
 
     # 处理模式
     parser.add_argument('--mode', choices=['crop', 'cover', 'crop-cover'], default='crop',
@@ -5085,17 +5090,21 @@ def main() -> int:
             print(f'[ERROR] {exc}', file=sys.stderr)
             return 2
 
-    # crop-cover + --crop-ratio：只给了一个维度时，按裁剪比例补全另一个。
-    # 比例即最终画面比例（裁剪后按比例缩放覆盖，不产生黑边或额外裁剪），
-    # 故 width : height == crop_ratio_num : crop_ratio_den。
-    if is_crop_cover and has_crop_ratio and not has_explicit_size:
+    # --crop-ratio + 只给了一个维度：按裁剪比例补全另一个。三个模式同语义 ——
+    # 比例定画面形状，尺寸定分辨率（crop-cover 下补全的即最终尺寸；crop / cover
+    # 下尺寸本来就是最终尺寸，crop 模式仍受"目标不得大于源"限制）。
+    # 补全后的尺寸即目标尺寸，故 width : height == crop_ratio_num : crop_ratio_den。
+    # 此前非 crop-cover 模式下那个维度会被**静默丢弃**：`--crop-ratio 16:9
+    # --output-height 1080` 会退化成"按 16:9 最大化裁剪"，源恰为 16:9 时直接命中
+    # 同尺寸跳过、什么都没做（把 1080p 请求变成 no-op）。
+    if has_crop_ratio and has_any_size and not has_explicit_size:
         if args.output_width is None:
             args.output_width = derive_even_dimension(
                 args.output_height * crop_ratio_num / crop_ratio_den)
         else:
             args.output_height = derive_even_dimension(
                 args.output_width * crop_ratio_den / crop_ratio_num)
-        print(f'提示：--mode crop-cover 仅给了一个维度，已按裁剪比例 '
+        print(f'提示：--mode {args.mode} 仅给了一个维度，已按裁剪比例 '
               f'{crop_ratio_num}:{crop_ratio_den} 补全为 '
               f'{args.output_width}x{args.output_height}。')
 
@@ -5354,9 +5363,10 @@ def main() -> int:
     print(_SEP)
     print(_label('待处理文件') + f'{len(video_files)} 个')
     if has_crop_ratio:
-        # crop-cover 下 --crop-ratio 定的是裁剪比例，最终尺寸另由 --output-* 给出
+        # 给了尺寸就一并显示（crop-cover 的尺寸定的是缩放目标；crop / cover 下
+        # ratio 与尺寸并用时，尺寸就是最终尺寸 —— 只给一个维度时已按比例补全）
         _tail = (f'  最终尺寸: {args.output_width}x{args.output_height}'
-                 if is_crop_cover else '')
+                 if has_any_size else '')
         print(_label('处理模式')
               + f'{mode_label}  自动裁剪比例: {crop_ratio_num}:{crop_ratio_den}{_tail}')
     else:
@@ -5491,9 +5501,10 @@ def main() -> int:
             if _STOP_REQUESTED.is_set():
                 break
 
-            # crop-ratio 在 crop / cover 模式下决定输出尺寸；crop-cover 模式下它
-            # 只决定裁剪步骤的比例，最终尺寸固定为 --output-width/height。
-            if has_crop_ratio and not is_crop_cover:
+            # --crop-ratio 自己决定输出尺寸，仅限「crop / cover 且没给任何
+            # --output-*」：给了任一维度就不再是"源最大化裁剪"，缺失的那个已在
+            # 参数校验里按比例补全；crop-cover 只把 ratio 当裁剪比例，尺寸另给。
+            if has_crop_ratio and not is_crop_cover and not has_any_size:
                 if args.original_width is not None and args.original_height is not None:
                     src_w, src_h = args.original_width, args.original_height
                 else:

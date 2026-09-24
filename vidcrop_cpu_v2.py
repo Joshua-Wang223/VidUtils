@@ -512,14 +512,17 @@ def _detect_memory_gb() -> Tuple[float, float, str]:
     return 2.0, 1.6, "fallback default"
 
 
-def detect_system_resources() -> Tuple[int, float, float]:
+def detect_system_resources() -> Tuple[int, float, float, str, str]:
+    """返回 (逻辑核数, 总内存 GB, 可用内存 GB, CPU 探测来源, 内存探测来源)。
+
+    ⚠ 本函数**不再自己打印**：概览块的 `系统资源` 一行已经把这几个值（含两个来源）
+    都写进去了。此前它打一行 `资源探测 : CPU=… MEM 总=… 可用=…`、紧接着概览块又打
+    一行 `系统资源 : CPU 逻辑核 … 内存 总 … / 可用 …` —— 同样的数字出现两遍
+    （与 vidcrop_hwaccel.py 的概览块对齐时顺手合并成一行）。
+    """
     cpu, cpu_src = _detect_cpu()
     total_gb, avail_gb, mem_src = _detect_memory_gb()
-    print(
-        f"资源探测    : CPU={cpu} ({cpu_src})   "
-        f"MEM 总={total_gb:.2f}GB 可用={avail_gb:.2f}GB ({mem_src})"
-    )
-    return cpu, total_gb, avail_gb
+    return cpu, total_gb, avail_gb, cpu_src, mem_src
 
 
 def compute_parallelism(
@@ -4284,7 +4287,7 @@ def main() -> int:
         print(f"[INFO] 未在 {input_path} 中找到可处理的视频。")
         return 0
 
-    cpu, total_mem, avail_mem = detect_system_resources()
+    cpu, total_mem, avail_mem, cpu_src, mem_src = detect_system_resources()
 
     pending = [j for j in jobs if j.status == "pending"]
 
@@ -4300,7 +4303,8 @@ def main() -> int:
     )
 
     print("─" * 64)
-    print(f"系统资源    : CPU 逻辑核 {cpu}  ·  内存 总 {total_mem:.1f} GB / 可用 {avail_mem:.1f} GB")
+    print(f"系统资源    : CPU 逻辑核 {cpu}（{cpu_src}）  ·  "
+          f"内存 总 {total_mem:.1f} GB / 可用 {avail_mem:.1f} GB（{mem_src}）")
     print(
         f"待处理文件  : {len(pending)} 个"
         + (f"（另有 {len(jobs) - len(pending)} 个已存在或将跳过）" if len(jobs) != len(pending) else "")
@@ -4338,7 +4342,12 @@ def main() -> int:
     if args.cq_ref is not None:
         quality_parts.append(f"CQ-ref: {args.cq_ref}（h264_nvenc 基准，按等效表换算）")
     if not quality_parts:
-        if encoder_supports_cq(args.codec):
+        if args.rc_mode == "constqp":
+            # constqp 下质量由 -qp 表达，命令里**不会**出现 -cq/-crf —— 别再印一个
+            # 根本不存在的 `CQ: 23`（那是修 hwaccel 同款显示矛盾时一并发现的：
+            # 概览写 `CQ: 23` + `QP: 18`，而命令里只有 `-rc constqp -qp 18`）。
+            quality_parts.append(f"QP: {args.qp if args.qp is not None else DEFAULT_CQ}")
+        elif encoder_supports_cq(args.codec):
             quality_parts.append(f"CQ: {DEFAULT_CQ}")
         elif encoder_supports_crf(args.codec):
             quality_parts.append(f"CRF: {DEFAULT_CRF}")
@@ -4346,20 +4355,21 @@ def main() -> int:
     # build_encoder_options() 里 encoder_supports_preset() 为假时根本不下发，展示了就是假信息。
     _preset_field = (f"preset: {args.preset}   "
                      if encoder_supports_preset(args.codec) else "")
+    # color_range 非 auto 时带上"必要时自动做值域转换"，与 vidcrop_hwaccel.py 同串。
+    _cr_disp = (args.color_range
+                + ("（必要时自动做值域转换）" if args.color_range != "auto" else ""))
     print(
         _label("编码器")
         + f"{args.codec}   {_preset_field}"
         + "   ".join(quality_parts)
         + f"   pix_fmt: {args.pix_fmt_display}"
-        + f"   color_range: {args.color_range}"
+        + f"   color_range: {_cr_disp}"
     )
     # 码率控制轴：只在用户真的点了相关参数时才出现这一行（默认全空 → 概览块与引入
     # 这四个参数之前逐字相同）。
     _rc_bits = []
     if args.rc_mode != "auto":
         _rc_bits.append(f"rc-mode: {args.rc_mode}")
-    if args.qp is not None:
-        _rc_bits.append(f"QP: {args.qp}")
     if args.bitrate:
         _rc_bits.append(f"码率: {args.bitrate}")
     if args.lookahead is not None:
@@ -4372,6 +4382,11 @@ def main() -> int:
     elif args.scale_algo:
         print(_label("缩放") + "不适用（crop 模式不缩放）")
     print(f"音频        : {args.audio_codec}" + (f" @ {args.audio_bitrate}" if args.audio_codec != "copy" else ""))
+    # 额外参数 / 解码两个字面字段与 vidcrop_hwaccel.py 对齐（取长补短：此前只有它有）。
+    if args.extra_args_normalized:
+        print("额外参数    : " + shlex.join(args.extra_args_normalized))
+    print("解码        : 软件（本脚本是纯 CPU 路径，不做硬件探测；"
+          "要硬件加速/自动降级请用 vidcrop_hwaccel.py）")
 
     if pending:
         print(
@@ -4380,6 +4395,14 @@ def main() -> int:
         )
     else:
         print("并发策略    : 无待处理任务")
+
+    # 运行模式与 vidcrop_hwaccel.py **同一位置**（概览块内、分隔线之前）——
+    # 放在 dry-run 分支之前，`--dry-run` 下也能看到（hwaccel 的概览块就在 dry-run 之前）。
+    sequential = args.sequential or workers <= 1 or len(pending) <= 1
+    print(
+        "运行模式    : "
+        + ("顺序执行（细粒度实时进度条）" if sequential else "并行执行（聚合进度面板）")
+    )
 
     # Dry-run 模式：仅生成命令并退出
     if args.dry_run:
@@ -4407,11 +4430,6 @@ def main() -> int:
         print("─" * 64)
         return 0
 
-    sequential = args.sequential or workers <= 1 or len(pending) <= 1
-    print(
-        "运行模式    : "
-        + ("顺序执行（细粒度实时进度条）" if sequential else "并行执行（聚合进度面板）")
-    )
     print("─" * 64)
 
     try:

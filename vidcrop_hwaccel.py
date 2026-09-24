@@ -5597,6 +5597,14 @@ def main() -> int:
         'crop-cover': 'crop-cover（先裁剪后缩放覆盖）',
     }.get(args.mode, 'crop（居中裁剪）')
     print(_SEP)
+    # 系统资源：与 vidcrop_cpu_v2.py 同一字段（取长补短）。CPU 用 **cgroup 感知**的值
+    # （它才是 -threads 的依据，与下面「并发策略」的 CPU 槽一致、不会自相矛盾）；
+    # 内存只在探测得到时显示 —— 该探测读的是 /proc/meminfo，Windows 上拿不到，
+    # 印一个 0.0 GB 反而是误导。
+    _cpu_n, _cpu_src = _detect_cpu()
+    _avail_gb = detect_cpu_profile()[1]
+    print(_label('系统资源') + f'CPU 逻辑核 {_cpu_n}（{_cpu_src}）'
+          + (f'  ·  内存 可用 {_avail_gb:.1f} GB' if _avail_gb > 0 else ''))
     print(_label('待处理文件') + f'{len(video_files)} 个')
     if has_crop_ratio:
         # 给了尺寸就一并显示（crop-cover 的尺寸定的是缩放目标；crop / cover 下
@@ -5659,8 +5667,24 @@ def main() -> int:
     # build_ffmpeg_cmd 里 encoder_supports_preset() 为假时根本不下发，展示了就是假信息。
     _preset_field = (f'preset: {_shown_preset}   '
                      if encoder_supports_preset(_effective_codec) else '')
+    # pix_fmt / color_range 与 vidcrop_cpu_v2.py **同措辞、同行内**（两个概览块取长补短：
+    # 此前 hwaccel 完全不展示 pix_fmt、color_range 另起一行，而 cpu_v2 是行内展示）。
+    # pix_fmt 显示"实际会下发什么"：auto + 8bit 源不下发（交给编码器协商）。
+    _pf_arg_now = (args.pix_fmt or 'auto').strip().lower()
+    if _pf_arg_now == 'none':
+        _pf_disp = '不指定'
+    elif _pf_arg_now == 'auto' and args.bit_depth is None:
+        _pf_disp = '自动（8bit 源不下发，10bit+ 按源位深继承）'
+    elif _pf_arg_now == 'auto':
+        _pf_disp = (resolve_pix_fmt_for_depth(args.codec, args.bit_depth)
+                    or args.pix_fmt or '不指定')
+    else:
+        _pf_disp = args.pix_fmt
+    _cr_disp = (args.color_range
+                + ('（必要时自动做值域转换）' if args.color_range != 'auto' else ''))
     print(_label('编码器')
-          + f'{_effective_codec}   {_preset_field}' + '   '.join(quality_parts))
+          + f'{_effective_codec}   {_preset_field}' + '   '.join(quality_parts)
+          + f'   pix_fmt: {_pf_disp}   color_range: {_cr_disp}')
     # 码率控制轴：只在用户真的点了相关参数时才出现这一行（默认全为空 → 概览块与
     # 引入这四个参数之前逐字相同）。
     _rc_bits = []
@@ -5702,8 +5726,6 @@ def main() -> int:
               + f'{args.codec} 不可用（{_why}），实际将改用 CPU 编码器 {_effective_codec}。')
     print(_label('音频') + args.audio_codec
           + (f' @ {args.audio_bitrate}' if args.audio_codec.lower() != 'copy' else ''))
-    if args.color_range != 'auto':
-        print(_label('color_range') + args.color_range + '（必要时自动做值域转换）')
     if extra_args:
         print(_label('额外参数') + shlex.join(extra_args))
     if all_cpu:
@@ -5724,6 +5746,17 @@ def main() -> int:
             _dec_desc = f'{_want_hw} → {_eff_hw}'
         print(_label('解码') + f'{_dec_desc}   '
               + (hw_caps.summary(only_detected=True) or '无可用加速组件'))
+    # 并发策略（与 vidcrop_cpu_v2.py 的同一字段互通有无）：hwaccel 是**串行**处理
+    # （一次一个文件、逐条策略尝试），没有 cpu_v2 那种文件级并发 —— 所以这里报的是
+    # "串行 × 每任务线程数"。⚠ 线程数只对**软件编码器**有意义（硬件编码器不下发
+    # -threads，见 _HW_ENCODERS），故硬件编码器时明说一句，免得误以为没生效。
+    _th = args.threads_resolved
+    if _effective_codec.lower() in _HW_ENCODERS:
+        print(_label('并发策略')
+              + f'串行（一次一个文件）、{_effective_codec} 不下发 -threads')
+    else:
+        print(_label('并发策略')
+              + f'串行（一次一个文件）× 每任务 {_th} 线程  (≈ {_th} CPU 槽)')
     print(_label('运行模式') + '顺序执行（细粒度实时进度条）')
     if args.dry_run:
         print(_SEP)

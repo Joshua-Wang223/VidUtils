@@ -1662,6 +1662,7 @@ python verify/verify_scale_algo.py        # --scale-algo 解析
 python verify/verify_pixfmt_bitdepth.py   # --pix-fmt × --bit-depth 的「能落地者赢」
 python verify/verify_quality_mapping.py   # 质量参数单点换算：--qp 降级 / -ref→constqp 的 qp / --crf→-cq / 0 值无损 / 下界钳 1
 python verify/verify_cli_parsing.py       # --extra-args 的两种写法（含文档里的 `--` 形式）+ 输出尺寸偶数校验的两脚本一致性
+python verify/verify_overview_lockstep.py # 两个概览块的字段序列对齐 + 显示量纲必须与命令一致（`--selftest` 自检判词装置）
 python verify/verify_cuda_decode_codec.py # 按源编解码器的硬解确认（AV1）
 python verify/verify_hwupload_worth.py    # auto 缩放的 hwupload 门槛
 python verify/verify_color_tagging.py     # 色彩属性标到帧上（setparams），命令级

@@ -314,6 +314,18 @@ CQ_SUPPORTED_CODECS = {
 # AV1 与 H.264/HEVC 同属此族（av1_nvenc 同样是 NVENC 封装）。
 NVENC_CODECS = {'h264_nvenc', 'hevc_nvenc', 'av1_nvenc'}
 
+# 硬件编码器族：ffmpeg 的帧级 `-threads` 对它们没有意义（NVENC/QSV/AMF 在硬件侧
+# 自行调度，VideoToolbox / VA-API 由各自驱动托管），下发只会多一个不生效的选项
+# ⇒ 两脚本一律**跳过 -threads**（--threads 显式给了也只在软编上生效）。
+# ⚠ 这张表必须与 vidcrop_cpu_v2.py 的同名常量**逐字相同**（孪生约定，判据里断言相等）。
+_HW_ENCODERS = {
+    'h264_nvenc', 'hevc_nvenc', 'h265_nvenc', 'av1_nvenc',
+    'h264_qsv', 'hevc_qsv', 'av1_qsv', 'vp9_qsv',
+    'h264_amf', 'hevc_amf', 'av1_amf',
+    'h264_vaapi', 'hevc_vaapi',
+    'h264_videotoolbox', 'hevc_videotoolbox',
+}
+
 # libsvtav1 的 -preset 是 0~13 的整数（越大越快、质量越低），**不接受**
 # ultrafast~veryslow 或 p1~p7 这类名字——实测传 'medium' 直接报
 # "Unable to parse option value"，故必须单独换算。
@@ -1220,6 +1232,29 @@ def normalize_extra_args(extra: Optional[List[str]]) -> List[str]:
     return args
 
 
+def _split_extra_args(argv: List[str]) -> Tuple[List[str], Optional[List[str]]]:
+    """把 `--extra-args` 之后的整段切出来（前导的 `--` 分隔符剥掉一个）。
+
+    ⚠ 为什么不交给 argparse 的 `nargs=argparse.REMAINDER`：**Python 3.12 起它不再容忍
+    开头的 `--`** —— 实测 `--extra-args -- -max_muxing_queue_size 4096` 直接报
+    `unrecognized arguments: -- -max_muxing_queue_size 4096`，而"跟一个 `--`"正是
+    README / docstring / `--help` 一直在教的写法（`normalize_extra_args()` 里剥 `--`
+    的那段因此长期是死代码）。自己切一刀最稳，也不影响 `--help` 里的选项说明。
+
+    Returns:
+        (交给 argparse 的头部 argv, extra 参数列表或 None)。
+        None 表示用户压根没写 `--extra-args`，此时调用方**不要**覆盖 argparse 的默认值。
+    """
+    key = '--extra-args'
+    if key not in argv:
+        return argv, None
+    i = argv.index(key)
+    head, tail = argv[:i + 1], list(argv[i + 1:])
+    if tail and tail[0] == '--':
+        tail = tail[1:]
+    return head, tail
+
+
 def get_extension_from_codec(codec: str) -> Optional[str]:
     """根据编码器返回推荐容器扩展名；copy 返回 None（沿用源扩展名）。"""
     if codec == 'copy':
@@ -1377,6 +1412,47 @@ def detect_cpu_profile() -> Tuple[int, float]:
     except Exception:
         avail_gb = 0.0
     return cpu, avail_gb
+
+
+def _detect_cpu() -> Tuple[int, str]:
+    """返回 (逻辑 CPU 核数, 探测来源)。与 vidcrop_cpu_v2.py 的同名函数逐字一致。
+
+    为什么不用裸 `os.cpu_count()`：容器里它报的是**宿主机**核数，按它下发 `-threads`
+    会超订（cgroup 只给了 N 个核，却开 M 个线程）。本函数读 cgroup v2/v1 配额，
+    再退到 `sched_getaffinity`。
+
+    ⚠ 本函数**只**用于 `--threads` 的自动取值。`detect_cpu_profile()`（AV1 的
+    `-cpu-used` / libsvtav1 档位）刻意保持原样 —— 那是另一条轴，不在本次统一范围内。
+    """
+    try:
+        with open('/sys/fs/cgroup/cpu.max', 'r', encoding='utf-8') as f:
+            parts = f.read().strip().split()
+        if len(parts) == 2 and parts[0] != 'max':
+            quota = int(parts[0])
+            period = int(parts[1])
+            if quota > 0 and period > 0:
+                return max(1, int(round(quota / period))), f'cgroup v2 ({quota}/{period})'
+    except Exception:
+        pass
+
+    try:
+        with open('/sys/fs/cgroup/cpu/cpu.cfs_quota_us', 'r', encoding='utf-8') as f:
+            quota = int(f.read().strip())
+        with open('/sys/fs/cgroup/cpu/cpu.cfs_period_us', 'r', encoding='utf-8') as f:
+            period = int(f.read().strip())
+        if quota > 0 and period > 0:
+            return max(1, int(round(quota / period))), f'cgroup v1 ({quota}/{period})'
+    except Exception:
+        pass
+
+    try:
+        n = len(os.sched_getaffinity(0))
+        if n > 0:
+            return n, 'sched_getaffinity'
+    except Exception:
+        pass
+
+    return max(1, os.cpu_count() or 1), 'os.cpu_count'
 
 
 # 按资源自动选"编码器速度档位"的档位表：(最小逻辑核数, libaom-av1 的 -cpu-used,
@@ -3021,6 +3097,20 @@ def cq_to_crf(cq: int, target_codec: str, src_codec: str = 'h264_nvenc') -> int:
     return int(round(v)) if v is not None else int(cq)
 
 
+def crf_to_cq(crf: int, target_codec: str, src_codec: str = 'libx264') -> int:
+    """
+    libx264 CRF → 目标硬件编码器的等效 CQ/QP（`cq_to_crf` 的反向，同一张表、同一个中轴）。
+
+    用途：`--crf N` 落在只认 `-cq`/`-qp` 的编码器（NVENC / AMF / QSV）上时。
+    此前这种组合会被"忽略 + 回落默认 CQ"，用户给的值直接蒸发；现在按等效表换算过去。
+
+    ⚠ 调用方负责把结果钳到 ≥1：目标编码器的 0 是**无损档**，不是"最高质量"，
+    线性表在低端会把小值算成 0 而意外命中无损（见 `_resolve_quality_params` 的 [LOSSLESS] 段）。
+    """
+    v = convert_quality(src_codec, crf, target_codec)
+    return int(round(v)) if v is not None else int(crf)
+
+
 def crf_to_rav1e_qp(crf: int) -> int:
     """
     librav1e 没有 -crf（实测传 -crf 只会被 ffmpeg 静默忽略并告警，质量退回默认值），
@@ -3039,23 +3129,84 @@ def _resolve_quality_params(
     src_codec: Optional[str] = None,
     crf_ref: Optional[int] = None,
     cq_ref: Optional[int] = None,
-) -> Tuple[Optional[int], Optional[int]]:
+    qp: Optional[int] = None,
+    rc_mode: str = 'auto',
+    quiet: bool = False,
+) -> Tuple[Optional[int], Optional[int], Optional[int]]:
     """
-    根据编码器类型确定最终 (crf, cq) 值，处理参数不匹配和降级映射。
+    根据编码器类型确定最终 **(crf, cq, qp)** 三元组，处理参数不匹配、降级映射与边界。
 
-    两种取值方式（由调用方保证互斥，混用会被拒绝执行）：
-      1. --crf / --cq：字面量原样下发——GPU 编码器用 --cq，CPU 编码器用 --crf，
-         都不换算；只有"请求 GPU 却降级到 CPU 软编"时才按等效表换算。
-      2. --crf-ref / --cq-ref：统一基准轴——先归一到 libx264 CRF，
-         再换算到目标编码器（见 convert_crf.py 的 QUALITY_MAP）。
+    本函数是**全脚本唯一的质量换算点**：先归一到 libx264 CRF 中轴（convert_crf.py 的
+    QUALITY_MAP），再投影到目标编码器的原生参数。三个返回值至多一个非 None，
+    分别由 build_ffmpeg_cmd / apply_rc_control_args 落到 `-crf` / `-cq` / `-qp`。
+
+    三种取值方式（由调用方保证互斥，混用会被拒绝执行）：
+      1. --crf / --cq：字面量原样下发——GPU 编码器用 --cq，CPU 编码器用 --crf；
+         只有"落到不支持该量纲的编码器"时才按等效表换算（--cq 落到 CPU 软编、
+         --crf 落到只认 -cq/-qp 的硬件编码器）。
+      2. --crf-ref / --cq-ref：统一基准轴——先归一到 libx264 CRF，再换算到目标编码器；
+         目标处于 `--rc-mode constqp` 时结果落到 `-qp`（qp 与 cq 同量纲，见 _QP_HINT）。
+      3. --qp（只在 `--rc-mode constqp` 下有效）：目标支持 -qp 就透传，
+         落到 CPU 编码器时换算为等效 `-crf`（此前是"静默丢弃、回落默认 CRF 21"）。
+
+    ⚠ **0 是无损哨兵，不参与线性换算**：各编码器的 0 都是"无损"档（libx265 还要配
+    `lossless=1`、VP9 要配 `-b:v 0` 才是真无损），而线性表会把 0 当普通下界 ——
+    后果是 cq 0~5 被算成同一个"接近无损"值，甚至**意外命中目标编码器的 0（无损）**。
+    故任一质量输入为 0 时直接投影成目标的无损档（见下方 [LOSSLESS]）。
+    非无损换算的结果**统一钳到 ≥1**：`--cq 4 --codec libx264` 以前会算出 `-crf 0`
+    （真无损、文件巨大），现在得到 `-crf 1`。
 
     Args:
         codec: 实际要用的编码器
-        user_crf / user_cq: 用户原始参数（None 表示未指定）
-        src_codec: 用户原本请求的编码器，用于判断 --cq 的量纲
+        user_crf / user_cq / qp: 用户原始参数（None 表示未指定）
+        src_codec: 用户原本请求的编码器，用于判断 --cq / --qp 的量纲
         crf_ref: --crf-ref，以 libx264 CRF 为基准
         cq_ref: --cq-ref，以 h264_nvenc CQ 为基准
+        rc_mode: 当前的 -rc 模式（'constqp' 时质量由 -qp 表达）
+        quiet: True 时不打换算提示（供任务概览块这类"只取值"的调用方用，
+               否则同一条提示会在概览与逐文件两处各打一遍）
     """
+    # --cq / --qp 的量纲取决于用户原本请求的编码器；请求的就是 CPU 编码器时
+    # （没有可参照的 GPU 编码器）按默认 GPU 编码器 h264_nvenc 解释。
+    _src = src_codec if (src_codec and encoder_supports_cq(src_codec)) else 'h264_nvenc'
+
+    # quiet=True 供"只取值、不改命令"的调用方（任务概览块）使用：
+    # 否则同一条换算提示会在概览与逐文件两处各打一遍。
+    def _say(msg: str) -> None:
+        if not quiet:
+            print(msg)
+
+    # ── [LOSSLESS] 0 = 无损：跳过换算，直接给目标编码器的无损档 ──────────────
+    _zero = next((_n for _n, _v in (('--crf', user_crf), ('--cq', user_cq),
+                                    ('--qp', qp), ('--crf-ref', crf_ref),
+                                    ('--cq-ref', cq_ref)) if _v == 0), None)
+    if _zero is not None:
+        if codec in NVENC_CODECS:
+            if rc_mode == 'constqp':
+                return None, None, 0
+            # 非 constqp：返回 cq=0，交给 build_ffmpeg_cmd 的 [LOSSLESS] 改写块
+            # （它发 -rc constqp -qp 0 -b:v 0，与 --cq 0 走同一条路）
+            return None, 0, None
+        if encoder_supports_crf(codec):
+            _say(f'  提示：{_zero}=0 是无损请求，已按编码器 {codec} 的无损档下发。')
+            return 0, None, None
+        _say(f'  警告：{_zero}=0 是无损请求，但编码器 {codec} 没有无损档，改用默认质量。')
+        return (None, DEFAULT_CQ, None) if encoder_supports_cq(codec) \
+            else (DEFAULT_CRF, None, None)
+
+    # ── 方式 3：--qp（constqp 的恒定 QP）─────────────────────────────────
+    if qp is not None:
+        if codec in NVENC_CODECS:
+            return None, None, qp
+        if encoder_supports_crf(codec):
+            mapped_crf = max(1, cq_to_crf(qp, codec, _src))
+            _say(f'  提示：编码器 {codec} 不支持 -qp，'
+                 f'已将 --qp {qp}（{_src} QP 量纲）映射为 -crf {mapped_crf}（等效视觉质量）。')
+            return mapped_crf, None, None
+        _say(f'  警告：编码器 {codec} 既没有 -qp 也没有 -crf，--qp {qp} 无法换算，改用默认质量。')
+        return (None, DEFAULT_CQ, None) if encoder_supports_cq(codec) \
+            else (DEFAULT_CRF, None, None)
+
     # ── 方式 2：统一基准轴换算 ────────────────────────────────────────────
     if crf_ref is not None or cq_ref is not None:
         if crf_ref is not None:
@@ -3070,45 +3221,56 @@ def _resolve_quality_params(
             # librav1e 没有 -crf；其实测标定以 AV1(libaom) CRF 为输入，
             # 故先落到 AV1 CRF 轴，再由命令构建处套 crf_to_rav1e_qp()。
             _v = from_x264_crf('libaom-av1', ref_x264)
-            _out = int(round(_v)) if _v is not None else None
+            _out = max(1, int(round(_v))) if _v is not None else None
             if _out is not None:
-                print(f'  提示：{ref_desc} → {codec} 的 -qp {crf_to_rav1e_qp(_out)}。')
-            return _out, None
+                _say(f'  提示：{ref_desc} → {codec} 的 -qp {crf_to_rav1e_qp(_out)}。')
+            return _out, None, None
         _v2 = from_x264_crf(codec, ref_x264)
         if _v2 is None:
-            print(f'  警告：{codec} 不在等效换算表中，{ref_desc} 无法换算，改用默认质量。')
-            return (None, DEFAULT_CQ) if encoder_supports_cq(codec) \
-                else (DEFAULT_CRF, None)
-        _val = int(round(_v2))
-        print(f'  提示：{ref_desc} → {codec} 的 '
-              f'{"-cq" if encoder_supports_cq(codec) else "-crf"} {_val}。')
+            _say(f'  警告：{codec} 不在等效换算表中，{ref_desc} 无法换算，改用默认质量。')
+            return (None, DEFAULT_CQ, None) if encoder_supports_cq(codec) \
+                else (DEFAULT_CRF, None, None)
+        _val = max(1, int(round(_v2)))
         if encoder_supports_cq(codec):
-            return None, _val
-        return _val, None
+            if rc_mode == 'constqp':
+                _say(f'  提示：{ref_desc} → {codec} 的 -qp {_val}（rc-mode constqp）。')
+                return None, None, _val
+            _say(f'  提示：{ref_desc} → {codec} 的 -cq {_val}。')
+            return None, _val, None
+        _say(f'  提示：{ref_desc} → {codec} 的 -crf {_val}。')
+        return _val, None, None
 
     # ── 方式 1：字面量原样下发 ────────────────────────────────────────────
     if encoder_supports_cq(codec):
         if user_cq is not None:
-            return None, user_cq
+            return None, user_cq, None
         if user_crf is not None:
-            print(f'  提示：编码器 {codec} 不支持 -crf，使用默认 -cq {DEFAULT_CQ}（可通过 --cq 指定）。')
-        return None, DEFAULT_CQ
+            # --crf 落到只认 -cq/-qp 的编码器：按 libx264 CRF 口径换算过去，
+            # 不再"忽略 + 回落默认 CQ"（那会让用户给的质量值直接蒸发）。
+            mapped = max(1, crf_to_cq(user_crf, codec))
+            if rc_mode == 'constqp':
+                _say(f'  提示：编码器 {codec} 不支持 -crf，已将 --crf {user_crf}'
+                     f'（libx264 CRF 量纲）映射为 -qp {mapped}（rc-mode constqp）。')
+                return None, None, mapped
+            _say(f'  提示：编码器 {codec} 不支持 -crf，已将 --crf {user_crf}'
+                 f'（libx264 CRF 量纲）映射为 -cq {mapped}（等效视觉质量）。')
+            return None, mapped, None
+        if rc_mode == 'constqp':
+            # 无质量输入时的 constqp 默认（CLI 会先报错，这里只为直接调用方兜底）
+            return None, None, DEFAULT_CQ
+        return None, DEFAULT_CQ, None
 
     if encoder_supports_crf(codec):
         if user_crf is not None:
-            return user_crf, None
+            return user_crf, None, None
         if user_cq is not None:
-            # --cq 的量纲取决于用户原本请求的编码器；请求的就是 CPU 编码器时
-            # （没有可参照的 GPU 编码器）按默认 GPU 编码器 h264_nvenc 解释。
-            _src = src_codec if (src_codec and encoder_supports_cq(src_codec)) \
-                else 'h264_nvenc'
-            mapped_crf = cq_to_crf(user_cq, codec, _src)
-            print(f'  提示：编码器 {codec} 不支持 -cq，'
-                  f'已将 --cq {user_cq}（{_src} 量纲）映射为 -crf {mapped_crf}（等效视觉质量）。')
-            return mapped_crf, None
-        return DEFAULT_CRF, None
+            mapped_crf = max(1, cq_to_crf(user_cq, codec, _src))
+            _say(f'  提示：编码器 {codec} 不支持 -cq，'
+                 f'已将 --cq {user_cq}（{_src} 量纲）映射为 -crf {mapped_crf}（等效视觉质量）。')
+            return mapped_crf, None, None
+        return DEFAULT_CRF, None, None
 
-    return None, None
+    return None, None, None
 
 
 def apply_rc_control_args(codec: str,
@@ -3161,14 +3323,24 @@ def apply_rc_control_args(codec: str,
     _want_rc = rc_mode != 'auto' or qp is not None
     if _want_rc:
         if c in NVENC_CODECS:
-            if rc_mode != 'auto':
-                args += ['-rc', rc_mode]
-            if qp is not None:
-                args += ['-qp', str(qp)]
+            if qp == 0:
+                # 无损：必须**显式进 constqp**（否则 -qp 在 VBR 下毫无意义），
+                # 形状与 build_ffmpeg_cmd 里 `--cq 0` 的改写逐字一致。
+                args += ['-rc', 'constqp', '-qp', '0', '-b:v', '0']
+            else:
+                if rc_mode != 'auto':
+                    args += ['-rc', rc_mode]
+                if qp is not None:
+                    args += ['-qp', str(qp)]
+        elif rc_mode != 'auto':
+            # --qp 落到 CPU 编码器时已在 _resolve_quality_params 里换算成 -crf（值不再丢），
+            # 所以这里只剩"模式名本身不适用"要告知。
+            _ignore(f'--rc-mode {rc_mode}',
+                    f'-rc 是 NVENC 专属选项，编码器 {c} 没有这个开关')
         else:
-            _asked = ' 与 '.join(
-                n for n, on in (('--rc-mode', rc_mode != 'auto'), ('--qp', qp is not None)) if on)
-            _ignore(_asked, f'-rc / -qp 是 NVENC 专属选项，编码器 {c} 没有这个开关')
+            # 防御性兜底：正常不会走到（--qp 已被 _resolve_quality_params 换算掉）
+            _ignore(f'--qp {qp}',
+                    f'-qp 是 NVENC 专属选项，编码器 {c} 没有这个开关')
 
     if lookahead is not None:
         if c in NVENC_CODECS:
@@ -3615,6 +3787,7 @@ def build_ffmpeg_cmd(
     lookahead: Optional[int] = None,
     bitrate: Optional[str] = None,
     nvenc_aq: bool = False,
+    threads: int = 0,
 ) -> List[str]:
     """
     构建完整的 FFmpeg 命令列表。
@@ -3934,6 +4107,12 @@ def build_ffmpeg_cmd(
 
     cmd += pres['post']                  # 封面/字幕逐流 codec，需覆盖上面的 -c:v
 
+    # --threads：只对**软件编码器**下发（硬件编码器不吃 ffmpeg 的帧级线程，见 _HW_ENCODERS）。
+    # 位置固定在 pres['post'] 之后、-c:a 之前，与 vidcrop_cpu_v2.py 逐字对齐
+    # （两脚本同一条逻辑请求要生成逐字相同的命令，见 test/dump_cmd_full.sh）。
+    if threads > 0 and codec.lower() not in _HW_ENCODERS:
+        cmd += ['-threads', str(threads)]
+
     # 音频（WebM 容器不接受 AAC 等音轨，必要时自动改 Opus 重编码）
     audio_codec = resolve_audio_codec_for_container(
         audio_codec, output_file.suffix, meta, _warn)
@@ -4244,6 +4423,7 @@ def process_file(
     bitrate: Optional[str] = None,
     nvenc_aq: bool = False,
     chroma_check: bool = True,
+    threads: int = 0,
     queue_rest: Optional[float] = None,
     queue_cur: Optional[float] = None,
 ) -> Dict[str, object]:
@@ -4435,9 +4615,9 @@ def process_file(
             print(f'  ✘ 失败：滤镜构建 — {exc}', file=sys.stderr)
             return _result('failed')
 
-        current_crf, current_cq = _resolve_quality_params(
+        current_crf, current_cq, current_qp = _resolve_quality_params(
             strategy['codec'], crf, cq, src_codec=codec,
-            crf_ref=crf_ref, cq_ref=cq_ref,
+            crf_ref=crf_ref, cq_ref=cq_ref, qp=qp, rc_mode=rc_mode,
         )
         norm_preset = strategy_preset(preset, codec, str(strategy['codec']))
         cmd = build_ffmpeg_cmd(
@@ -4460,10 +4640,11 @@ def process_file(
             bit_depth=bit_depth,
             hdr=hdr,
             rc_mode=rc_mode,
-            qp=qp,
+            qp=current_qp,
             lookahead=lookahead,
             bitrate=bitrate,
             nvenc_aq=nvenc_aq,
+            threads=threads,
             policy=policy,
         )
         print('  ' + _label('输出文件') + str(output_file))
@@ -4496,9 +4677,9 @@ def process_file(
             print(f'  ✘ 失败：滤镜构建 — {exc}', file=sys.stderr)
             return _result('failed')
 
-        current_crf, current_cq = _resolve_quality_params(
+        current_crf, current_cq, current_qp = _resolve_quality_params(
             current_codec, crf, cq, src_codec=codec,
-            crf_ref=crf_ref, cq_ref=cq_ref)
+            crf_ref=crf_ref, cq_ref=cq_ref, qp=qp, rc_mode=rc_mode)
         # preset 为 None 表示用户没指定，此时按"请求的编码器"的默认档位换算到本策略
         # 的编码器（见 strategy_preset），保证降级前后档位等效。
         norm_preset = strategy_preset(preset, codec, current_codec)
@@ -4561,10 +4742,11 @@ def process_file(
                     bit_depth=bit_depth,
                     hdr=hdr,
                     rc_mode=rc_mode,
-                    qp=qp,
+                    qp=current_qp,
                     lookahead=lookahead,
                     bitrate=bitrate,
                     nvenc_aq=nvenc_aq,
+                    threads=threads,
                     policy=policy,
                 )
 
@@ -4747,7 +4929,7 @@ class _RejectRenamedSuffixFlag(argparse.Action):
             '  --output 指定了完整文件名时不生效。\n')
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description='批量裁剪视频，支持 NVIDIA CUDA 硬件加速及智能降级。',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -4785,7 +4967,10 @@ def parse_args() -> argparse.Namespace:
 质量参数：
   --crf  CPU 编码器（libx264/265 等），默认 21，0-51 越小越好
   --cq   GPU 编码器（NVENC/AMF 等），默认 23，0-51 越小越好
-  降级时 --cq 自动映射为对应 CRF（hevc_nvenc→libx265 时 +4，h264_nvenc→libx264 时 +1）
+  --crf-ref / --cq-ref  统一质量基准（libx264 CRF / h264_nvenc CQ），按等效表换算到目标编码器
+  换算走 convert_crf.py 的等效表（经 libx264 CRF 中轴）；落到不支持该量纲的编码器时自动换算
+  （--cq 落到 CPU 软编、--qp 落到 CPU 编码器、--crf 落到只认 -cq/-qp 的硬件编码器），不静默丢弃
+  任一质量参数取 0 = 无损请求，直接按目标编码器的无损档下发（不参与换算表）
 
 编码器别名（自动归一化）：
   h265_nvenc → hevc_nvenc,  x264 → libx264,  x265 → libx265
@@ -4852,10 +5037,11 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                              'VP9：libvpx-vp9（NVENC 无 VP9 编码器，走硬解+CPU 编码）')
     parser.add_argument('--crf', type=int, default=None,
                         help='CRF 质量值（CPU 编码器，0-51，不指定时默认 21）；'
-                             '字面量原样下发给目标编码器，不做换算')
+                             '字面量原样下发给目标编码器；落到只认 -cq/-qp 的编码器'
+                             '（NVENC/AMF/QSV）时按 libx264 CRF 口径换算过去。0 = 无损')
     parser.add_argument('--cq',  type=int, default=None,
                         help='CQ 质量值（GPU 编码器，0-51，不指定时默认 23）；'
-                             '字面量原样下发给目标编码器，不做换算')
+                             '字面量原样下发；落到 CPU 软编时按等效表换算为 -crf。0 = 无损')
     parser.add_argument('--crf-ref', type=int, default=None, metavar='N',
                         help='以 libx264 CRF 为统一基准给出质量值，按等效表换算到目标编码器。'
                              '例：--codec libvpx-vp9 --crf-ref 21 → -crf 27。'
@@ -4874,9 +5060,10 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                              '（它们用 -crf / -b:v / -qp 的组合表达），届时告警忽略'
                              '（--fallback-policy strict 下报错）')
     parser.add_argument('--qp', type=int, default=None, metavar='N',
-                        help='NVENC 恒定 QP 值（0-51）：只在 --rc-mode constqp 下生效，'
-                             '与该模式外的 --cq / --crf / --crf-ref / --cq-ref 互斥'
-                             '（constqp 用 --qp 表达质量，其它量纲混用无法判定意图）')
+                        help='NVENC 恒定 QP 值（0-51）：只在 --rc-mode constqp 下生效；'
+                             'constqp 下它与 --crf-ref / --cq-ref 三选一，'
+                             '与字面量 --crf / --cq 互斥（量纲不同，混用无法判定意图）。'
+                             '--qp 0 = 无损。落到 CPU 编码器时按等效表换算成 -crf（不丢弃质量值）')
     parser.add_argument('--lookahead', type=int, default=None, metavar='N',
                         help='前向预测帧数（0-250）；不指定=沿用各编码器默认。'
                              '按编码器分别下发：libx264 与 *_nvenc 用 -rc-lookahead，'
@@ -4898,6 +5085,11 @@ preset 映射（NVENC ↔ libx264 自动转换）：
     parser.add_argument('--preset', default=None,
                         help='编码器预设。默认：CPU 编码器 medium，GPU 编码器 p5；'
                              'NVENC（p1~p7）与 libx264 风格（ultrafast~veryslow）自动双向映射')
+    parser.add_argument('--threads', type=int, default=0, metavar='N',
+                        help='FFmpeg 编码线程数。0=自动：本脚本**串行**处理文件，'
+                             '自动值＝按 cgroup 配额算出的逻辑核数（不是裸 os.cpu_count()）。'
+                             '只对软件编码器下发 -threads —— 硬件编码器（NVENC / QSV / AMF 等）'
+                             '不吃 ffmpeg 的帧级线程，显式给出也会跳过')
     parser.add_argument('--suffix', default=None, metavar='SUFFIX',
                         help='输出文件名后缀标记，用于替代默认的 _cropped / _covered / '
                              '_cropcovered。'
@@ -5006,13 +5198,18 @@ preset 映射（NVENC ↔ libx264 自动转换）：
     parser.add_argument('--extra-args', nargs=argparse.REMAINDER,
                         help='追加到 FFmpeg 输出参数末尾的自定义参数（必须放在命令最后）')
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> int:
     install_signal_handlers()
 
-    args = parse_args()
+    # `--extra-args` 的取值自己切（Python 3.12 的 argparse 不吃开头的 `--`，
+    # 见 _split_extra_args 的注释）；没写该参数时不动 argparse 给的默认值。
+    _argv, _extra_tail = _split_extra_args(sys.argv[1:])
+    args = parse_args(_argv)
+    if _extra_tail is not None:
+        args.extra_args = _extra_tail
 
     # 设置日志记录
     if args.log:
@@ -5108,6 +5305,24 @@ def main() -> int:
               f'{crop_ratio_num}:{crop_ratio_den} 补全为 '
               f'{args.output_width}x{args.output_height}。')
 
+    # 偶数尺寸校验（2026-09-24 补齐）：此前本脚本的 validate_output_dimensions()
+    # 是**死代码**（零调用点）⇒ 奇数尺寸会一路带到 ffmpeg、在编码器初始化时才报错，
+    # 而 cpu_v2 早就有这道校验（两处）。这里补上与 cpu_v2 的 CLI 级校验等价的一处。
+    # 约束值取"用户显式给的 --pix-fmt"，否则按编码器的隐含默认：auto 模式下实际会落到
+    # 4:2:0 系（含 10bit 的 yuv420p10le / p010le），都以 yuv420p 作代表判"宽高都要偶数"
+    # ——两者在奇偶约束上完全同类，判定结论一致。
+    # ⚠ --crop-ratio 推导出来的尺寸天然是偶数（derive_even_dimension），
+    #   所以只需在补全之后查这一次。
+    if args.output_width is not None and args.output_height is not None:
+        _pf_arg = (args.pix_fmt or 'auto').strip().lower()
+        _pf_constraint = 'yuv420p' if _pf_arg in ('auto', 'none') else args.pix_fmt
+        try:
+            validate_output_dimensions(args.output_width, args.output_height,
+                                       _pf_constraint)
+        except ValueError as exc:
+            print(f'[ERROR] {exc}', file=sys.stderr)
+            return 2
+
     # --scale-algo：解析成 (backend, sw_algo, cuda_algo)。位置固定在
     # 「尺寸/crop-ratio 那一组校验之后、质量参数之前」——两脚本必须同顺序。
     try:
@@ -5185,13 +5400,24 @@ def main() -> int:
         print(f'[ERROR] {exc}', file=sys.stderr)
         return 2
 
-    _quality_given = [n for n, v in (('--crf', args.crf), ('--cq', args.cq),
-                                     ('--crf-ref', args.crf_ref),
-                                     ('--cq-ref', args.cq_ref)) if v is not None]
+    _literal = [n for n, v in (('--crf', args.crf), ('--cq', args.cq)) if v is not None]
+    _refs_given = [n for n, v in (('--crf-ref', args.crf_ref),
+                                  ('--cq-ref', args.cq_ref)) if v is not None]
+    _quality_given = _literal + _refs_given
     if args.rc_mode == 'constqp':
-        if args.qp is None:
-            print('[ERROR] --rc-mode constqp 需要 --qp 指定恒定 QP（0-51）。\n'
-                  '  例：--rc-mode constqp --qp 23', file=sys.stderr)
+        # constqp 的质量由 -qp 表达；--crf-ref / --cq-ref 是"统一基准轴"，
+        # 换算到 NVENC 就是 QP，故允许（二者与 --qp 三选一）。
+        if args.qp is None and not _refs_given:
+            print('[ERROR] --rc-mode constqp 需要 --qp、--crf-ref 或 --cq-ref '
+                  '三者之一来指定恒定质量（QP 0-51）。\n'
+                  '  例：--rc-mode constqp --qp 23 或 --rc-mode constqp --crf-ref 21',
+                  file=sys.stderr)
+            return 2
+        if args.qp is not None and _refs_given:
+            print('[ERROR] --rc-mode constqp 下 --qp 与 ' + ' / '.join(_refs_given)
+                  + ' 不能同时使用：两者都表达恒定质量，但 --qp 是 NVENC QP 量纲，'
+                  '而 ' + ' / '.join(_refs_given) + ' 是统一基准轴，'
+                  '混用无法确定以哪个为准。', file=sys.stderr)
             return 2
         if args.bitrate:
             print('[ERROR] --rc-mode constqp 与 --bitrate 不能同时使用：\n'
@@ -5199,11 +5425,13 @@ def main() -> int:
                   '  要限定码率请改用 --rc-mode vbr / vbr_hq / cbr*（或去掉 --rc-mode）。',
                   file=sys.stderr)
             return 2
-        if _quality_given:
-            print('[ERROR] --rc-mode constqp 与 ' + ' / '.join(_quality_given)
+        if _literal:
+            print('[ERROR] --rc-mode constqp 与 ' + ' / '.join(_literal)
                   + ' 不能同时使用：constqp 用 --qp 表达质量，而 '
-                  + ' / '.join(_quality_given)
-                  + ' 属于 VBR 家族的量纲，混用无法确定以哪个为准。', file=sys.stderr)
+                  + ' / '.join(_literal)
+                  + ' 是字面量、量纲不同，混用无法确定以哪个为准。\n'
+                  '  恒定质量请用 --qp（或 --crf-ref / --cq-ref 换算过去）。',
+                  file=sys.stderr)
             return 2
     else:
         if args.qp is not None:
@@ -5236,6 +5464,14 @@ def main() -> int:
     if args.cq_ref is not None and not (0 <= args.cq_ref <= 51):
         print('[ERROR] --cq-ref 范围为 0-51（h264_nvenc CQ 量程）。', file=sys.stderr)
         return 2
+
+    # --threads：0 = 自动。hwaccel 是**串行**处理（一次一个文件、逐条策略尝试），
+    # 没有 cpu_v2 那种"文件级并发"，所以自动值就是全部逻辑核数（按 cgroup 配额算，
+    # 与 cpu_v2 的同名函数逐字一致 —— 两脚本的 -threads 自动值必须相同）。
+    if args.threads < 0:
+        print('[ERROR] --threads 不能为负数', file=sys.stderr)
+        return 2
+    args.threads_resolved = args.threads if args.threads > 0 else _detect_cpu()[0]
 
     # 归一化编码器名称
     args.codec = normalize_codec_name(args.codec)
@@ -5399,13 +5635,26 @@ def main() -> int:
     # quiet：换算提示留给逐策略那次打印，概览块只展示结果值。
     _shown_preset = strategy_preset(args.preset, args.codec, _effective_codec,
                                     quiet=True)
+    # 质量的展示分两层：① 用户**字面量**（他敲了什么）；② **实际生效值**
+    # （按首条策略实算）。两者不同时才补一句「实际生效」，避免常见的自相矛盾显示
+    # ——例如 constqp 降级到 CPU 时同屏印 QP 18 与 CRF 21，而命令里其实是 -crf 14。
+    _e_crf, _e_cq, _e_qp = _resolve_quality_params(
+        _effective_codec, args.crf, args.cq, src_codec=args.codec,
+        crf_ref=args.crf_ref, cq_ref=args.cq_ref, qp=args.qp,
+        rc_mode=args.rc_mode, quiet=True)
+    _eff_txt = (f'QP: {_e_qp}' if _e_qp is not None else
+                f'CQ: {_e_cq}' if _e_cq is not None else
+                f'CRF: {_e_crf}' if _e_crf is not None else '')
     if not quality_parts:
         # 默认质量参数同样按实际生效的编码器取：libsvtav1 只认 -crf，
         # 若还按请求的 av1_nvenc 显示 "CQ: 23" 就与本行编码器自相矛盾。
-        if encoder_supports_cq(_effective_codec):
-            quality_parts.append(f'CQ: {DEFAULT_CQ}')
-        elif encoder_supports_crf(_effective_codec):
-            quality_parts.append(f'CRF: {DEFAULT_CRF}')
+        if _eff_txt:
+            quality_parts.append(_eff_txt)
+    else:
+        _lit_txt = (f'CRF: {args.crf}' if args.crf is not None else
+                    f'CQ: {args.cq}' if args.cq is not None else '')
+        if _eff_txt and _eff_txt != _lit_txt:
+            quality_parts.append(f'实际生效 {_eff_txt}')
     # 没有 -preset 选项的编码器（libvpx-vp9 / libaom-av1 / librav1e）不展示 preset：
     # build_ffmpeg_cmd 里 encoder_supports_preset() 为假时根本不下发，展示了就是假信息。
     _preset_field = (f'preset: {_shown_preset}   '
@@ -5417,8 +5666,6 @@ def main() -> int:
     _rc_bits = []
     if args.rc_mode != 'auto':
         _rc_bits.append(f'rc-mode: {args.rc_mode}')
-    if args.qp is not None:
-        _rc_bits.append(f'QP: {args.qp}')
     if args.bitrate:
         _rc_bits.append(f'码率: {args.bitrate}')
     if args.lookahead is not None:
@@ -5563,6 +5810,7 @@ def main() -> int:
                 bitrate=args.bitrate,
                 nvenc_aq=args.nvenc_aq,
                 chroma_check=args.chroma_check,
+                threads=args.threads_resolved,
                 queue_rest=q_rest,
                 queue_cur=q_cur,
             )

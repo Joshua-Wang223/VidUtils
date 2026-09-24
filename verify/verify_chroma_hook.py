@@ -106,7 +106,7 @@ else:
                 decode='auto', hw_caps=caps, crf_ref=None, cq_ref=None,
                 ffmpeg_bin='ffmpeg', mode='crop', audio_codec='copy',
                 audio_bitrate='128k', extra_args=None, no_skip_same_size=False,
-                dry_run=False, file_index=1, file_total=1, flag=None,
+                dry_run=False, file_index=1, file_total=1, suffix=None,
                 color_range=None, crop_ratio=None, scale_backend='auto', policy='auto',
             )
     finally:

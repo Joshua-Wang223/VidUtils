@@ -53,7 +53,15 @@
   （先裁剪再缩放覆盖；无 `--crop-ratio` 必须给全宽高、有则只给一个按比例推导；
   后缀 `_cropcovered`；比例与源不同时即使同尺寸也不能跳过）；
   同日又逐字对齐了 17 条校验文案与校验顺序（cpu_v2 的「crop-ratio + 显式尺寸」由
-  「忽略+提示」改为**报错**、量程检查提到 `_resolve_quality_params` 之前）
+  「忽略+提示」改为**报错**、量程检查提到 `_resolve_quality_params` 之前）；
+  **2026-09-23**：`--crop-ratio` + **只给一个** `--output-*` 维度从"静默丢弃该维度"
+  改为**三个模式统一按比例补全**（比例定形状、尺寸定分辨率）—— 真机踩坑是
+  `--mode cover --crop-ratio 16:9 --output-height 1080` 打在本身 16:9 的源上会算成
+  源尺寸 → **同尺寸跳过**（1080p 请求变 no-op）；两个都给仍报错，
+  判据 `verify/verify_ratio_single_dim.py`；
+  同轮还按"以 hwaccel 为权威"对齐了两处既有分叉（**crop 模式目标大于源：v2 由「失败」
+  改「跳过」、rc 1→0**；删掉 v2 在 crop-cover 下多打的一条提示）+ 同尺寸跳过的措辞；
+  唯一保留：跳过行的外层格式（v2 带文件名）两边仍不同
 - [cover 的 CUDA 缩放：实测数据、两条硬约束与质量门](project_cuda_scale_cover.md)
   — 2026-09-20 给 `vidcrop_hwaccel.py` 的 cover 加了「`scale_cuda` + 显式 `hwdownload` + CPU crop」
   策略：真实 4K→1440x1080 实测 **26.65s → 12.82s（快 51.9%）**，CPU 侧 `scale(lanczos)` 占 28.4%
@@ -121,6 +129,22 @@
   改为按 V0 三分（V0 不绿 → 判「本轮没有复现故障」，不再冤指脚本选项组）；
   判据 `verify/verify_color_tagging.py`、`verify/verify_chroma_hook.py`、
   `test/test_green_chroma_regression.sh`（含"删掉 setparams 必须复现"的红灯自检）
+- [按主题拆分同一文件里的两条改动线（test/split_diff_by_theme.py）](project_commit_split_tool.md)
+  — 规则驱动（整块覆盖 → 逐行规则 → 关键词 → 沿用上一段），**只出 A 侧补丁**；
+  `--verify` 在临时索引上证明「A + 剩余 == 工作区」，`--selftest` 在临时仓库自证；
+  ⭐ 自证当场抓到 4 个真 bug（Hunk 段落建太早 / 两条线相邻时 git 只给一个变更组、
+  无关键词的续行要沿用上一行 / 无关键词的替换组必须标 `?` 待复核 /
+  `@@` 头重算丢换行与计数少算 —— 后两个被 `git apply --recount` 掩盖，
+  只有与 `git diff` 逐字节对比才暴露）
+- [码率控制轴：`--rc-mode` / `--qp` / `--lookahead` / `--bitrate`](project_rate_control_params.md)
+  — 四个参数默认值全部 = **不下发**（不传时命令逐字不变；第三道回归门
+  `test/dump_enc_options.sh` + `baseline/enc_before.txt` 钉住）；`-rc` / `-qp` 是
+  **NVENC 专属**（非 NVENC 告警忽略、hwaccel `strict` 下报错）；`--lookahead` 按编码器映射
+  （x264/NVENC 用 `-rc-lookahead`、x265 走 `-x265-params`、vp9/aom 用 `-lag-in-frames`、
+  svtav1 不下发），且**默认值三边不同**（NVENC 0（关闭）/ x265 20 / x264 自定）；
+  ⭐ 实测 `-x265-params A -x265-params B` 是**后者整条覆盖前者** → lookahead 必须与
+  HDR 元数据合并成同一条（已修，否则静默抹掉 HDR）；`constqp` × `--bitrate`/质量参数报错、
+  `vbr*`/`cbr*` 下与质量参数并存（= 受码率约束的恒定质量）；判据 `verify/verify_rc_lookahead.py`
 
 ---
 

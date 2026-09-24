@@ -1,0 +1,7 @@
+默认(cover 1440x1080)            <无 -hwaccel>             <无 hof>
+默认(crop 640x360)               <无 -hwaccel>             <无 hof>
+默认(crop-cover 16:9)            <无 -hwaccel>             <无 hof>
+--decode cpu                       <无 -hwaccel>             <无 hof>
+--decode cuda                      <无 -hwaccel>             <无 hof>
+--decode vaapi                     <无 -hwaccel>             <无 hof>
+--decode opencl                    <无 -hwaccel>             <无 hof>

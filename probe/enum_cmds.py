@@ -6,14 +6,20 @@
 在本地复现远程的命令。
 
 用法：
-    python enum_cmds.py                 # 全矩阵
-    python enum_cmds.py --only-default  # 只打印默认（crop + auto）那一条
+    python3 probe/enum_cmds.py                 # 全矩阵
+    python3 probe/enum_cmds.py --only-default  # 只打印默认（crop + auto）那一条
+
+素材：需要 `probe/src8.mp4`（8bit）与 `probe/src10.mp4`（10bit）各一份（不入库）。
+缺素材会直接 exit 2，而不是静默跑出一片空白。
 """
 import shlex
 import sys
 from pathlib import Path
 
-ROOT = Path(r'D:\Workspace_Python\VidUtils')
+# 仓库根 = 本脚本所在 probe/ 的父目录。别写死绝对路径：这份工装要在 Linux/T4 上跑，
+# 旧版硬写 `D:\Workspace_Python\VidUtils`，且 `python probe/enum_cmds.py` 时 sys.path[0]
+# 是 probe/ 而非仓库根 → `import vidcrop_hwaccel` 直接 ModuleNotFoundError（2026-09-23 实测）。
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import vidcrop_hwaccel as V  # noqa: E402
@@ -68,11 +74,13 @@ def enum(src: Path, mode='crop', decode='auto', codec='hevc_nvenc',
 
 def main() -> int:
     only_default = '--only-default' in sys.argv
+    found = False
     for src_name in ('src8.mp4', 'src10.mp4'):
         src = HERE / src_name
         if not src.exists():
             print(f'!! 缺素材 {src}', file=sys.stderr)
             continue
+        found = True
         for mode in ('crop', 'cover'):
             for decode in ('auto', 'cpu', 'cuda'):
                 if only_default and not (mode == 'crop' and decode == 'auto'):
@@ -92,6 +100,12 @@ def main() -> int:
                           f'  [{" / ".join(flag) or "无显式下载"}]')
                     print(f'     vf : {r["vf"]}')
                     print(f'     cmd: {r["cmd"]}')
+    if not found:
+        # fail-fast：没有素材就什么都枚举不出来。原来只是逐条 warn 然后 exit 0，
+        # 看起来像"跑成功了但没输出"（本机 2026-09-23 实测踩到）。
+        print(f'!! 没找到任何素材：本工具需要 {HERE}/src8.mp4（8bit）与 src10.mp4（10bit）'
+              f'各一份，靠它们的真实元数据（尺寸/位深）来 mock 远程命令。', file=sys.stderr)
+        return 2
     return 0
 
 

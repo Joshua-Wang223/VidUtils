@@ -67,7 +67,9 @@
   `-pix_fmt`（8bit auto 两边都不发，原先 v2 恒发 `yuv420p` → **静默降 4:2:2/4:4:4 色度**）、
   `-threads`（hwaccel 新增 `--threads`；两边都只对软编下发）、选项物理顺序；
   cpu_v2 的 `pix_fmt` 还拆成"约束值 / 下发值"（合并会让偶数校验静默失效）；
-  ⚠ 有意保留：NVENC 轴（hwaccel 真降级 vs v2 原样透传）与 10bit `-pix_fmt` 不在门内；
+  ⚠ 有意保留：NVENC 轴（hwaccel 真降级 vs v2 原样透传）不在门内 —— 10bit 源的
+  `-pix_fmt` 差异也是这一轴的**一部分**（CPU 轴上两边都是 yuv420p10le，已进第四道门；
+  「10bit 两边不同」的旧说法方向反了、成因也记错了，2026-09-24 实测更正）；
   **约定 6（2026-09-24 补）**：`--extra-args -- X`（文档教的写法）在 **Python 3.12** 上
   曾报 `unrecognized arguments`（argparse 的 REMAINDER 不再容忍开头的 `--`）→ 改成预切 argv
   `_split_extra_args()`；hwaccel 的 `validate_output_dimensions()` 是死代码 → 补上 CLI 级

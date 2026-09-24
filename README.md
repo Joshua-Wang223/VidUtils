@@ -1619,7 +1619,7 @@ vidutils/
 │   ├── dump_filter_chains.sh            # 裁剪脚本：滤镜链回归（16 行基线）
 │   ├── dump_cmd_default.sh              # 裁剪脚本：命令级回归（7 用例基线）
 │   ├── dump_enc_options.sh              # 裁剪脚本：编码/质量/码率控制 token 回归（enc_before.txt）
-│   ├── dump_cmd_full.sh                 # 裁剪脚本：两脚本**完整命令**逐字相等门禁（自带断言；17 用例；SELFTEST=1 自检）
+│   ├── dump_cmd_full.sh                 # 裁剪脚本：两脚本**完整命令**逐字相等门禁（自带断言；20 用例；SELFTEST=1 自检）
 │   ├── test_green_chroma_regression.sh  # 裁剪脚本：色度归零端到端回归（含删 setparams 的红灯自检）
 │   ├── split_diff_by_theme.py           # 分提交工装：按主题拆分同一文件里的两条改动线
 │   ├── check_readme_refs.sh             # 收尾核对：README 必须引用每个工具文件名
@@ -1654,7 +1654,7 @@ diff test/baseline/cmd_before.txt /tmp/after2.txt       # 7 个命令级用例
 bash test/dump_enc_options.sh > /tmp/after3.txt
 diff test/baseline/enc_before.txt /tmp/after3.txt       # 12 行（6 用例 × 2 脚本）编码/质量/码率控制 token
 bash test/dump_cmd_full.sh > /tmp/after4.txt            # 第四道门：两脚本完整命令逐字相等（自带断言，exit 1 = 有分叉）
-diff test/baseline/cmd_full.txt /tmp/after4.txt         # 34 行（17 用例 × 2 脚本）完整 ffmpeg 命令
+diff test/baseline/cmd_full.txt /tmp/after4.txt         # 40 行（20 用例 × 2 脚本）完整 ffmpeg 命令；含 3 格 10bit 源
 
 # 2) 验证套件
 python verify/verify_cuda_scale.py        # CUDA 缩放链 + 策略生成
@@ -1683,7 +1683,9 @@ bash   verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
 > 预期。它**自带断言**（不是只导出文本）：任一格两边命令不同、任一格命令为空、
 > 或一格都没比到，都会 exit 1 并打出逐 token 差异。它把 hwaccel 钉在「三轴全 CPU」
 > 上规避 GPU 专属项；**NVENC 轴不在门内**——同一份 CLI 下 hwaccel 会真降级到 CPU 编码器、
-> cpu_v2 是原样透传 NVENC，两者本就该不同（能力差异，不是分叉）。
+> cpu_v2 是原样透传 NVENC，两者本就该不同（能力差异，不是分叉）。⚠ 10bit 源的 `-pix_fmt`
+> 差异**就是这一轴的一部分**（CPU 轴上两边都是 `yuv420p10le`，门里已有 3 格 10bit 用例）；
+> 此前"10bit 两边不同、排除在门外"的说法方向反了、成因也记错了，已更正。
 > 装置自检：`SELFTEST=1 bash test/dump_cmd_full.sh`（正/负/空三格判词）；
 > 负向对照：`SABOTAGE=1 bash test/dump_cmd_full.sh`（期望 exit 1）。
 
@@ -1826,7 +1828,7 @@ SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（五格，不�
   `crop_cuda` 上游不存在；顺带修掉 `_src_download_fmt` 的 p010/p012 非法 pix_fmt 名；
   探针的 awk **跨行三元**在 T4 的 mawk 上炸过（gawk 兼容 ≠ mawk 兼容）；
   软解 + hwupload 链比软解 + CPU 缩放快 2.9~3.2%、画质逐位相同，但绝对值 44~46s vs
-  硬解零拷贝 12.8s → 定位仍是「NVDEC 用不了时的出路」；10bit p010le 路径仍空白
+  硬解零拷贝 12.8s → 定位仍是「NVDEC 用不了时的出路」；10bit p010le 下载路径**已跑通**（2.058s）
 - [像素格式 / 位深 / HDR 三参数（`--pix-fmt` / `--bit-depth` / `--hdr`）](memory/project_color_depth_hdr_params.md)
   —— 零拷贝 CUDA 链**不能传 `-pix_fmt`**（设的是 `AVFrame.format` 而非 `sw_format`），
   改用 `scale_cuda=format=` + `-profile:v`；`tonemap_cuda` 上游不存在（HDR→SDR 只能走 CPU）；

@@ -15,9 +15,13 @@
 # 不覆盖什么（用 --decode cpu --scale-algo libswscale-lanczos 把 hwaccel 钉在三轴全
 # CPU 上规避）：
 #   · NVENC 轴：同一份 CLI 下 hwaccel 会**真降级**到 libx265、cpu_v2 是原样透传
-#     NVENC 编码器，两者本来就该不同（能力差异，不是分叉）；
-#   · GPU 专属选项 -hwaccel* / -profile:v / -spatial-aq；
-#   · 10bit 源的 -pix_fmt（hwaccel→p010le、cpu_v2→yuv420p10le，既有差异，另案）。
+#     NVENC 编码器，两者本来就该不同（能力差异，不是分叉）。
+#     ⚠ 10bit 源的 -pix_fmt 差异**就是这么来的**、不是独立的一处：CPU 轴上 10bit
+#     两边都是 yuv420p10le（下面的 10bit 用例格就在门内）；只有 `-c:v` 也不同的
+#     NVENC 轴才出现 hwaccel(libx265)+yuv420p10le vs cpu_v2(hevc_nvenc)+p010le。
+#     （2026-09-24 更正：此前本文写成"10bit → hwaccel p010le / cpu_v2 yuv420p10le"，
+#       方向反了、也把成因记错了。）
+#   · GPU 专属选项 -hwaccel* / -profile:v / -spatial-aq。
 #
 # 用法:
 #   bash test/dump_cmd_full.sh > out.txt      # 判词在 stderr；exit 1 = 有分叉
@@ -32,17 +36,22 @@ mkdir -p "$F"
 [ -f "$F/land.mp4" ] || ffmpeg -nostdin -y -hide_banner -loglevel error \
   -f lavfi -i testsrc2=size=1920x1080:rate=25:duration=1 \
   -c:v libx264 -preset ultrafast -pix_fmt yuv420p "$F/land.mp4" || exit 2
+# 10bit 源：用来钉「继承 10bit」与「--bit-depth 8/10」这条路（CPU 轴上两脚本必须一致）。
+[ -f "$F/land10.mp4" ] || ffmpeg -nostdin -y -hide_banner -loglevel error \
+  -f lavfi -i testsrc2=size=1920x1080:rate=25:duration=1 \
+  -c:v libx265 -preset ultrafast -crf 30 -pix_fmt yuv420p10le "$F/land10.mp4" || exit 2
 
 OUT="$F/o_full"     # dry-run 不写盘；两脚本共用同一路径才能逐字对比
+SRC="$F/land.mp4"   # 当前用例的源（emit10 会临时换成 10bit 那份）
 
 # 两个脚本的命令行标签不同（hwaccel「执行命令」/ cpu_v2「命令」），一并匹配
 cmd_of() { sed -n 's/.*命令[^:]*: \(ffmpeg .*\)$/\1/p' <<< "$1" | head -1; }
 # hwaccel 固定「三轴全 CPU」：否则默认路径会带 GPU 项、与 cpu_v2 不可比。
 # 两边都**不显式给 --threads**，这样连自动值（两脚本共用同一套 cgroup 感知探测）
 # 也一并钉在门里。
-hw() { python vidcrop_hwaccel.py --input "$F/land.mp4" --output "$OUT" \
+hw() { python vidcrop_hwaccel.py --input "$SRC" --output "$OUT" \
          --decode cpu --scale-algo libswscale-lanczos --dry-run "$@" 2>&1; }
-cv() { python vidcrop_cpu_v2.py --input "$F/land.mp4" --output "$OUT" \
+cv() { python vidcrop_cpu_v2.py --input "$SRC" --output "$OUT" \
          --dry-run "$@" 2>&1; }
 
 FAILS=0
@@ -83,6 +92,13 @@ emit() {   # emit <标签> <公共参数...>
   cmp_pair "$tag" "$h" "$c"
 }
 
+emit10() {   # 同 emit，但把源换成 10bit 那份（跑完自动换回）
+  local _saved="$SRC"
+  SRC="$F/land10.mp4"
+  emit "$@"
+  SRC="$_saved"
+}
+
 if [ "${SELFTEST:-0}" = "1" ]; then
   echo "── SELFTEST：判词装置的正/负/空三格 + 起始计数 ──" >&2
   _f0=$FAILS
@@ -117,6 +133,14 @@ emit "crop-cover + ratio"          --mode crop-cover --crop-ratio 16:9 --output-
 emit "--color-range pc"            --codec libx265 --color-range pc "${BASE[@]}"
 emit "--pix-fmt yuv422p（显式）"    --codec libx265 --pix-fmt yuv422p "${BASE[@]}"
 emit "--bit-depth 10（显式）"       --codec libx265 --bit-depth 10 "${BASE[@]}"
+
+echo "── 10bit 源（CPU 轴：两脚本也应逐字相同）──" >&2
+# 这三格就是"10bit 源的 -pix_fmt 两边不同"那句话的**反证**：CPU 轴上两边一致
+# （都是 -pix_fmt yuv420p10le / yuv420p）。差异只出现在 NVENC 轴上，而那是
+# `-c:v` 本身不同造成的（见文件头的说明）。
+emit10 "10bit · libx265 继承源位深"  --codec libx265 "${BASE[@]}"
+emit10 "10bit · --bit-depth 10"      --codec libx265 --bit-depth 10 "${BASE[@]}"
+emit10 "10bit · --bit-depth 8（降 8bit）" --codec libx265 --bit-depth 8 "${BASE[@]}"
 # ⚠ `--extra-args` 是 REMAINDER，**必须放在最后**（否则它会把后面的
 # --output-width 之类一起吞掉，两边都产不出命令 → 被门判成"空命令"）。
 # 这里刻意用**文档教的那个形式**（带 `--` 分隔符）：2026-09-24 之前它在

@@ -194,8 +194,19 @@ crop=640:480:...`）；而无 `--crop-ratio` 的同尺寸则正常跳过。两�
 
 ⚠ **有意保留的差异**：NVENC 轴上两边本就该不同 —— 同一份 `--codec hevc_nvenc`，
 hwaccel 会**真降级**到 libx265、cpu_v2 是原样透传 NVENC 编码器（能力差异，不是分叉）。
-所以第四道门把 hwaccel 钉在"三轴全 CPU"上、**不覆盖 NVENC 轴**；
-10bit 源的 `-pix_fmt` 两边仍不同（hwaccel→`p010le` / cpu_v2→`yuv420p10le`），同样排在门外。
+所以第四道门把 hwaccel 钉在"三轴全 CPU"上、**不覆盖 NVENC 轴**。
+
+⚠ **更正（2026-09-24 实测）**：曾经把"10bit 源的 `-pix_fmt` 两边不同"也列成一处独立差异，
+**那是错的**。实测：
+
+| 场景 | hwaccel | cpu_v2 | 一致？ |
+|---|---|---|---|
+| 10bit 源 + `--codec libx265`（CPU 轴） | `-pix_fmt yuv420p10le` | `-pix_fmt yuv420p10le` | ✅ |
+| 10bit 源 + `--bit-depth 10` | `-pix_fmt yuv420p10le` | `-pix_fmt yuv420p10le` | ✅ |
+| 10bit 源 + `--codec hevc_nvenc`（NVENC 轴） | `-c:v libx265 -pix_fmt yuv420p10le`（降级） | `-c:v hevc_nvenc -pix_fmt p010le`（透传） | ❌ **但 `-c:v` 也不同** |
+
+⇒ 它是 **NVENC 轴能力差异的一部分**，不是 `-pix_fmt` 的分叉；CPU 轴上完全一致。
+第四道门现在**收 10bit 用例**（CPU 轴两格），不再把它排除在外。
 
 **How to apply**：在这两个脚本里加任何**会落到 ffmpeg 命令上**的选项时，
 ① 两边一起加（同名同默认）；② 插槽放到同一个位置；③ 跑第四道门。

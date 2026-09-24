@@ -1232,6 +1232,29 @@ def normalize_extra_args(extra: Optional[List[str]]) -> List[str]:
     return args
 
 
+def _split_extra_args(argv: List[str]) -> Tuple[List[str], Optional[List[str]]]:
+    """把 `--extra-args` 之后的整段切出来（前导的 `--` 分隔符剥掉一个）。
+
+    ⚠ 为什么不交给 argparse 的 `nargs=argparse.REMAINDER`：**Python 3.12 起它不再容忍
+    开头的 `--`** —— 实测 `--extra-args -- -max_muxing_queue_size 4096` 直接报
+    `unrecognized arguments: -- -max_muxing_queue_size 4096`，而"跟一个 `--`"正是
+    README / docstring / `--help` 一直在教的写法（`normalize_extra_args()` 里剥 `--`
+    的那段因此长期是死代码）。自己切一刀最稳，也不影响 `--help` 里的选项说明。
+
+    Returns:
+        (交给 argparse 的头部 argv, extra 参数列表或 None)。
+        None 表示用户压根没写 `--extra-args`，此时调用方**不要**覆盖 argparse 的默认值。
+    """
+    key = '--extra-args'
+    if key not in argv:
+        return argv, None
+    i = argv.index(key)
+    head, tail = argv[:i + 1], list(argv[i + 1:])
+    if tail and tail[0] == '--':
+        tail = tail[1:]
+    return head, tail
+
+
 def get_extension_from_codec(codec: str) -> Optional[str]:
     """根据编码器返回推荐容器扩展名；copy 返回 None（沿用源扩展名）。"""
     if codec == 'copy':
@@ -4906,7 +4929,7 @@ class _RejectRenamedSuffixFlag(argparse.Action):
             '  --output 指定了完整文件名时不生效。\n')
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description='批量裁剪视频，支持 NVIDIA CUDA 硬件加速及智能降级。',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -5175,13 +5198,18 @@ preset 映射（NVENC ↔ libx264 自动转换）：
     parser.add_argument('--extra-args', nargs=argparse.REMAINDER,
                         help='追加到 FFmpeg 输出参数末尾的自定义参数（必须放在命令最后）')
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> int:
     install_signal_handlers()
 
-    args = parse_args()
+    # `--extra-args` 的取值自己切（Python 3.12 的 argparse 不吃开头的 `--`，
+    # 见 _split_extra_args 的注释）；没写该参数时不动 argparse 给的默认值。
+    _argv, _extra_tail = _split_extra_args(sys.argv[1:])
+    args = parse_args(_argv)
+    if _extra_tail is not None:
+        args.extra_args = _extra_tail
 
     # 设置日志记录
     if args.log:
@@ -5276,6 +5304,24 @@ def main() -> int:
         print(f'提示：--mode {args.mode} 仅给了一个维度，已按裁剪比例 '
               f'{crop_ratio_num}:{crop_ratio_den} 补全为 '
               f'{args.output_width}x{args.output_height}。')
+
+    # 偶数尺寸校验（2026-09-24 补齐）：此前本脚本的 validate_output_dimensions()
+    # 是**死代码**（零调用点）⇒ 奇数尺寸会一路带到 ffmpeg、在编码器初始化时才报错，
+    # 而 cpu_v2 早就有这道校验（两处）。这里补上与 cpu_v2 的 CLI 级校验等价的一处。
+    # 约束值取"用户显式给的 --pix-fmt"，否则按编码器的隐含默认：auto 模式下实际会落到
+    # 4:2:0 系（含 10bit 的 yuv420p10le / p010le），都以 yuv420p 作代表判"宽高都要偶数"
+    # ——两者在奇偶约束上完全同类，判定结论一致。
+    # ⚠ --crop-ratio 推导出来的尺寸天然是偶数（derive_even_dimension），
+    #   所以只需在补全之后查这一次。
+    if args.output_width is not None and args.output_height is not None:
+        _pf_arg = (args.pix_fmt or 'auto').strip().lower()
+        _pf_constraint = 'yuv420p' if _pf_arg in ('auto', 'none') else args.pix_fmt
+        try:
+            validate_output_dimensions(args.output_width, args.output_height,
+                                       _pf_constraint)
+        except ValueError as exc:
+            print(f'[ERROR] {exc}', file=sys.stderr)
+            return 2
 
     # --scale-algo：解析成 (backend, sw_algo, cuda_algo)。位置固定在
     # 「尺寸/crop-ratio 那一组校验之后、质量参数之前」——两脚本必须同顺序。

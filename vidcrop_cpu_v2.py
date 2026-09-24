@@ -620,6 +620,30 @@ def normalize_extra_args(extra: Optional[List[str]]) -> List[str]:
     return extra
 
 
+def _split_extra_args(argv: List[str]) -> Tuple[List[str], Optional[List[str]]]:
+    """把 `--extra-args` 之后的整段切出来（前导的 `--` 分隔符剥掉一个）。
+
+    ⚠ 为什么不交给 argparse 的 `nargs=argparse.REMAINDER`：**Python 3.12 起它不再容忍
+    开头的 `--`** —— 实测 `--extra-args -- -max_muxing_queue_size 4096` 直接报
+    `unrecognized arguments: -- -max_muxing_queue_size 4096`，而"跟一个 `--`"正是
+    README / docstring / `--help` 一直在教的写法（`normalize_extra_args()` 里剥 `--`
+    的那段因此长期是死代码）。自己切一刀最稳，也不影响 `--help` 里的选项说明。
+    与 vidcrop_hwaccel.py 的同名函数逐字对应（孪生约定）。
+
+    Returns:
+        (交给 argparse 的头部 argv, extra 参数列表或 None)。
+        None 表示用户压根没写 `--extra-args`，此时调用方**不要**覆盖 argparse 的默认值。
+    """
+    key = "--extra-args"
+    if key not in argv:
+        return argv, None
+    i = argv.index(key)
+    head, tail = argv[:i + 1], list(argv[i + 1:])
+    if tail and tail[0] == "--":
+        tail = tail[1:]
+    return head, tail
+
+
 def _pix_fmt_exists(pix_fmt: str) -> bool:
     """惰性校验像素格式名是否为 ffmpeg 认识的名字（ffmpeg -pix_fmts）。
 
@@ -3689,7 +3713,7 @@ class _RejectRenamedSuffixFlag(argparse.Action):
             '  --output 指定了完整文件名时不生效。\n')
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="批量视频裁剪 / 覆盖式缩放裁剪（CPU 多任务版）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -3924,7 +3948,7 @@ def parse_args() -> argparse.Namespace:
         help="追加到 FFmpeg 输出参数末尾的自定义参数；必须放在命令最后",
     )
 
-    return ap.parse_args()
+    return ap.parse_args(argv)
 
 
 def validate_and_finalize_args(args: argparse.Namespace) -> None:
@@ -4221,7 +4245,12 @@ def main() -> int:
     install_signal_handlers()
 
     try:
-        args = parse_args()
+        # `--extra-args` 的取值自己切（Python 3.12 的 argparse 不吃开头的 `--`，
+        # 见 _split_extra_args 的注释）；没写该参数时不动 argparse 给的默认值。
+        _argv, _extra_tail = _split_extra_args(sys.argv[1:])
+        args = parse_args(_argv)
+        if _extra_tail is not None:
+            args.extra_args = _extra_tail
         validate_and_finalize_args(args)
     except ValueError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)

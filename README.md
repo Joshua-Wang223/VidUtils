@@ -1527,6 +1527,8 @@ CRF/CQ 管"画质档"，这一组管**码率控制模式**与**前向预测**。
 | `--crf 0` / `--cq 0` 的真无损 | `libx265` 的 `-crf 0` **不是**无损（只是近无损），需 `lossless=1`；NVENC 的 `-cq 0` 也不是无损。过去直接下发会有"以为无损、实为有损"的落差 | 现在自动改写：x265 → `lossless=1`；NVENC（hwaccel、`rc auto`）→ `-rc constqp -qp 0 -b:v 0`；改不了时（显式 rc 模式 / cpu_v2 的透传路径）告警并指路 |
 | **质量参数的 `0` = 无损（2026-09-24 统一）** | 各编码器的 `0` 都是无损档，而线性换算表把 `0` 当普通下界 → 后果有三：`cq 0~5` 全部算成同一个值；`--cq 4 --codec libx264` **意外得到 `-crf 0`**（真无损、文件巨大）；`--qp 0` / `--cq 0` 降级到 libx265 只得到 `-crf 3`（**不是无损**） | 现在 5 路 0 值输入（`--crf` / `--cq` / `--qp` / `--crf-ref` / `--cq-ref`）**统一投影成目标编码器的无损档**（`-crf 0 [+ -x265-params lossless=1]` / `-rc constqp -qp 0 -b:v 0` / `-qp 0`(rav1e)），且**非无损换算结果一律钳到 ≥1**。⚠ 低端取值（如 `--cq 1~5` 落到 libx264 / libvpx-vp9）在等效表里分辨不出来（被钳到同一个最小值）——这是线性表的固有低端饱和，不是 bug。判据 `verify/verify_quality_mapping.py` |
 | **两脚本的 `-threads` / `-pix_fmt` 已统一（2026-09-24）** | 此前 cpu_v2 恒发 `-threads`（含硬件编码器）且恒发 `-pix_fmt yuv420p`——后者在 8bit 源上把 4:2:2 / 4:4:4 **静默降色度**（实测 yuv444p 源：hwaccel 出 yuv444p、cpu_v2 出 yuv420p）；hwaccel 则两个都不发 | 现在一致：`-threads` 只对**软件编码器**下发（`0`=自动，按 cgroup 配额算核数，不超订）；`--pix-fmt auto` + 8bit 源两边都**不下发** `-pix_fmt`。同一条逻辑请求下两脚本的完整命令已逐字可比（第四道门 `test/dump_cmd_full.sh`，17 用例）。⚠ **NVENC 轴仍不同**：hwaccel 会真降级到 CPU 编码器、cpu_v2 是原样透传 NVENC——能力差异，不是分叉 |
+| **奇数输出尺寸现在两脚本都拒绝**（2026-09-24 补齐） | hwaccel 的 `validate_output_dimensions()` 此前**零调用点**（死代码）⇒ `--output-width 641` 会一路带到 ffmpeg、直到编码器初始化才报错；cpu_v2 早就有这道校验 | 现在两脚本的退出码与报错首行一致（`[ERROR] 像素格式 yuv420p 要求输出宽高均为偶数；当前为 641x360`）。⚠ `--crop-ratio` 推导出的尺寸天然是偶数（`derive_even_dimension`），不受影响。判据 `verify/verify_cli_parsing.py` |
+| **`--extra-args -- <参数>`（文档教的写法）曾报 `unrecognized`**（2026-09-24 已修） | argparse 的 `nargs=REMAINDER` **从 Python 3.12 起不再容忍开头的 `--`** ⇒ `--extra-args -- -max_muxing_queue_size 4096` 直接报错，`normalize_extra_args()` 里剥 `--` 的那段因此长期是死代码 | 现在自己预切 argv（`_split_extra_args`）：带 `--` 与不带两种写法都能用，且 `--help` 里的选项说明不受影响。判据 `verify/verify_cli_parsing.py`；第四道门里那一格用的就是文档写法 |
 | `--rc-mode constqp` 下 `--lookahead` 不生效 | constqp 模式下 NVENC **静默禁用** lookahead | 现在会告警并**不下发** `-rc-lookahead`（`--fallback-policy strict` 下报错）；要用 lookahead 就换 `vbr*` / `cbr*` |
 | cpu_v2：`--workers` 与 `--threads` 的乘积可能超订 | 原算法只在 workers 自动推导时用 CPU 核数约束并发；显式 `--workers` 时不再回头压每任务线程数（8 核 + CODEC_PROFILE 默认 4 线程 + `--workers 4` = 16 线程抢 8 核） | 现在显式 `--workers` 且**未显式给 `--threads`** 时，自动把每任务线程钳到 `cpu // workers`（≥1）；显式给了 `--threads` 则尊重用户意图，不覆盖 |
 | `cbr*` 模式没给码率 → 会落到 ffmpeg 默认 200kbps | `--rc-mode cbr` / `cbr_hq` / `cbr_ld_hq` 是恒定码率模式，码率由 `-b:v` 决定；不给就是 ffmpeg 的默认值（200kbps，画质会很难看） | 脚本会告警提示补 `--bitrate 8M` 之类；要恒定质量请用 `vbr*` 或默认的 `auto` |
@@ -1659,6 +1661,7 @@ python verify/verify_cuda_scale.py        # CUDA 缩放链 + 策略生成
 python verify/verify_scale_algo.py        # --scale-algo 解析
 python verify/verify_pixfmt_bitdepth.py   # --pix-fmt × --bit-depth 的「能落地者赢」
 python verify/verify_quality_mapping.py   # 质量参数单点换算：--qp 降级 / -ref→constqp 的 qp / --crf→-cq / 0 值无损 / 下界钳 1
+python verify/verify_cli_parsing.py       # --extra-args 的两种写法（含文档里的 `--` 形式）+ 输出尺寸偶数校验的两脚本一致性
 python verify/verify_cuda_decode_codec.py # 按源编解码器的硬解确认（AV1）
 python verify/verify_hwupload_worth.py    # auto 缩放的 hwupload 门槛
 python verify/verify_color_tagging.py     # 色彩属性标到帧上（setparams），命令级

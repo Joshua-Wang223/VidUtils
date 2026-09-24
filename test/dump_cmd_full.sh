@@ -119,11 +119,11 @@ emit "--pix-fmt yuv422p（显式）"    --codec libx265 --pix-fmt yuv422p "${BAS
 emit "--bit-depth 10（显式）"       --codec libx265 --bit-depth 10 "${BASE[@]}"
 # ⚠ `--extra-args` 是 REMAINDER，**必须放在最后**（否则它会把后面的
 # --output-width 之类一起吞掉，两边都产不出命令 → 被门判成"空命令"）。
-# 另外这里刻意**不写**文档里的 `--extra-args -- X` 形式：Python 3.12 的
-# argparse 在 nargs=REMAINDER 下不再容忍开头的 `--`，两个脚本都会报
-# "unrecognized arguments: -- …"（既有 bug，另案）。
-emit "--extra-args（必须最后）"      --codec libx265 --mode crop --output-width 640 \
-                                     --output-height 360 --extra-args -max_muxing_queue_size 4096
+# 这里刻意用**文档教的那个形式**（带 `--` 分隔符）：2026-09-24 之前它在
+# Python 3.12 上会报 `unrecognized arguments`（argparse 的 REMAINDER 不再容忍
+# 开头的 `--`），已改成自己预切 argv（见 `_split_extra_args`）—— 这一格就是它的门。
+emit "--extra-args（文档写法，必须最后）" --codec libx265 --mode crop --output-width 640 \
+                                     --output-height 360 --extra-args -- -max_muxing_queue_size 4096
 
 echo >&2
 if [ "$PAIRS" -eq 0 ]; then

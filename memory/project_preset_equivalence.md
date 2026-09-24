@@ -200,3 +200,17 @@ hwaccel 会**真降级**到 libx265、cpu_v2 是原样透传 NVENC 编码器（�
 **How to apply**：在这两个脚本里加任何**会落到 ffmpeg 命令上**的选项时，
 ① 两边一起加（同名同默认）；② 插槽放到同一个位置；③ 跑第四道门。
 不改命令的开关（如 `--workers`、探针类）不受这条约束。
+
+## 约定 6（2026-09-24 补）：CLI 解析与尺寸校验的两处补齐
+
+| 事项 | 事实 | 处置 |
+|---|---|---|
+| `--extra-args -- <参数>` | **argparse 的 `nargs=REMAINDER` 从 Python 3.12 起不再容忍开头的 `--`**（本机 3.12.9 实测：`unrecognized arguments: -- -max_muxing_queue_size 4096`）。而"跟一个 `--`"正是 README / docstring / `--help` 一直在教的写法 ⇒ `normalize_extra_args()` 里剥 `--` 的那段长期是**死代码**（写法根本进不来） | 两脚本各加一个逐字对应的 `_split_extra_args()`，在 `main()` 里预切 argv（`parse_args(argv=None)`），`--` 与不带 `--` 两种写法都能用。⚠ 这是**环境相关**的坑：同样的代码在 3.11 上是好的 ⇒ 引用"这个写法能用/不能用"前先看 Python 版本 |
+| 输出尺寸的偶数校验 | hwaccel 的 `validate_output_dimensions()` 此前**零调用点**（死代码）⇒ `--output-width 641` 一路带到 ffmpeg 才报错；cpu_v2 早就有 | hwaccel 补上等价的 CLI 级校验，两脚本退出码与报错首行逐字一致。**没有**照搬 cpu_v2 的"每文件奇数降级"分支——`--crop-ratio` 推出来的尺寸天然是偶数，显式奇数尺寸在 CLI 级就被拦下，那一支实际不可达（搬过来只是死代码） |
+
+判据：`verify/verify_cli_parsing.py`（两组 11 项），另在第四道门里用**文档写法**
+（`--extra-args -- X`）钉住那一格。
+
+**How to apply**：报"某 CLI 写法能不能用"之前，先确认 **Python 版本**（argparse 在
+3.12 动过 REMAINDER 的语义）；给一个脚本补校验时，先看另一个脚本**有没有**，
+但**别照抄不可达的分支** —— 先确认那条分支在真实输入下能不能被满足。

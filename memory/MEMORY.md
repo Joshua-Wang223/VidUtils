@@ -67,7 +67,11 @@
   `-pix_fmt`（8bit auto 两边都不发，原先 v2 恒发 `yuv420p` → **静默降 4:2:2/4:4:4 色度**）、
   `-threads`（hwaccel 新增 `--threads`；两边都只对软编下发）、选项物理顺序；
   cpu_v2 的 `pix_fmt` 还拆成"约束值 / 下发值"（合并会让偶数校验静默失效）；
-  ⚠ 有意保留：NVENC 轴（hwaccel 真降级 vs v2 原样透传）与 10bit `-pix_fmt` 不在门内
+  ⚠ 有意保留：NVENC 轴（hwaccel 真降级 vs v2 原样透传）与 10bit `-pix_fmt` 不在门内；
+  **约定 6（2026-09-24 补）**：`--extra-args -- X`（文档教的写法）在 **Python 3.12** 上
+  曾报 `unrecognized arguments`（argparse 的 REMAINDER 不再容忍开头的 `--`）→ 改成预切 argv
+  `_split_extra_args()`；hwaccel 的 `validate_output_dimensions()` 是死代码 → 补上 CLI 级
+  偶数尺寸校验（两脚本报错首行一致；**没搬** cpu_v2 那个不可达的"每文件奇数降级"分支）
 - [cover 的 CUDA 缩放：实测数据、两条硬约束与质量门](project_cuda_scale_cover.md)
   — 2026-09-20 给 `vidcrop_hwaccel.py` 的 cover 加了「`scale_cuda` + 显式 `hwdownload` + CPU crop」
   策略：真实 4K→1440x1080 实测 **26.65s → 12.82s（快 51.9%）**，CPU 侧 `scale(lanczos)` 占 28.4%

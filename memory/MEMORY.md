@@ -61,7 +61,13 @@
   判据 `verify/verify_ratio_single_dim.py`；
   同轮还按"以 hwaccel 为权威"对齐了两处既有分叉（**crop 模式目标大于源：v2 由「失败」
   改「跳过」、rc 1→0**；删掉 v2 在 crop-cover 下多打的一条提示）+ 同尺寸跳过的措辞；
-  唯一保留：跳过行的外层格式（v2 带文件名）两边仍不同
+  唯一保留：跳过行的外层格式（v2 带文件名）两边仍不同；
+  **2026-09-24 追加「约定 5：完整 ffmpeg 命令逐字相同」**：新增**第四道门**
+  `test/dump_cmd_full.sh`（17 用例，自带断言 + `SELFTEST`/`SABOTAGE`），为此统一了
+  `-pix_fmt`（8bit auto 两边都不发，原先 v2 恒发 `yuv420p` → **静默降 4:2:2/4:4:4 色度**）、
+  `-threads`（hwaccel 新增 `--threads`；两边都只对软编下发）、选项物理顺序；
+  cpu_v2 的 `pix_fmt` 还拆成"约束值 / 下发值"（合并会让偶数校验静默失效）；
+  ⚠ 有意保留：NVENC 轴（hwaccel 真降级 vs v2 原样透传）与 10bit `-pix_fmt` 不在门内
 - [cover 的 CUDA 缩放：实测数据、两条硬约束与质量门](project_cuda_scale_cover.md)
   — 2026-09-20 给 `vidcrop_hwaccel.py` 的 cover 加了「`scale_cuda` + 显式 `hwdownload` + CPU crop」
   策略：真实 4K→1440x1080 实测 **26.65s → 12.82s（快 51.9%）**，CPU 侧 `scale(lanczos)` 占 28.4%
@@ -144,7 +150,14 @@
   svtav1 不下发），且**默认值三边不同**（NVENC 0（关闭）/ x265 20 / x264 自定）；
   ⭐ 实测 `-x265-params A -x265-params B` 是**后者整条覆盖前者** → lookahead 必须与
   HDR 元数据合并成同一条（已修，否则静默抹掉 HDR）；`constqp` × `--bitrate`/质量参数报错、
-  `vbr*`/`cbr*` 下与质量参数并存（= 受码率约束的恒定质量）；判据 `verify/verify_rc_lookahead.py`
+  `vbr*`/`cbr*` 下与质量参数并存（= 受码率约束的恒定质量）；判据 `verify/verify_rc_lookahead.py`；
+  **2026-09-24 追加**：把「质量意图 → 目标编码器原生参数」收敛到 `_resolve_quality_params`
+  一个点（返回 `(crf, cq, qp)`）。实测修掉四个缺口：`--qp` 降级到 CPU 被**静默丢弃**
+  （现换算成 `-crf`）、`--cq 0`/`--qp 0` 降到 libx265 只得 `-crf 3`（现 `-crf 0`+`lossless=1`）、
+  **cq 0~5 曾全部算成 `-crf 0` = 真无损**（现非无损换算一律钳到 ≥1）、字面量 `--crf` 落到 NVENC
+  被回落默认（现换算成 `-cq`）；**`0` 是无损哨兵**，5 路 0 值输入不走换算表，直接给目标无损档；
+  `--rc-mode constqp` 下 `--qp` / `--crf-ref` / `--cq-ref` 三选一（同给报错）；
+  判据 `verify/verify_quality_mapping.py`
 
 ---
 

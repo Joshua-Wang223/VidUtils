@@ -175,3 +175,28 @@ crop=640:480:...`）；而无 `--crop-ratio` 的同尺寸则正常跳过。两�
 但**共享参数**的取值表 / 别名表 / 默认值 / 报错首行必须逐字一致（`--scale-algo` 是当前
 唯一的共享新参数，已按此对齐；唯一有意的差异是 v2 可省 `libswscale-` 前缀、且拒绝 `cuda-*`）。
 三轴模型本身见 `project_three_axis_model.md`。
+
+## 约定 5（2026-09-24）：同一条逻辑请求 → 两个脚本的**完整 ffmpeg 命令逐字相同**
+
+此前只有"取值表 / 别名表 / 默认值 / 报错首行"必须一致，没人管**整条命令**。用户对这两个
+脚本的预期是"CLI 与 v2 逐字对齐"，于是补了**第四道门** `test/dump_cmd_full.sh`（17 用例，
+自带断言：任一格两边命令不同、任一格为空、或一格都没比到 → exit 1 并打逐 token 差异；
+`SELFTEST=1` 自检判词装置、`SABOTAGE=1` 做负向对照）。
+
+为此统一了三处**物理差异**：
+
+| 差异 | 改前 | 改后 |
+|---|---|---|
+| `-pix_fmt` | cpu_v2 在 `--pix-fmt auto` + 8bit 源上恒发 `-pix_fmt yuv420p` | 两边都**不下发**（交给编码器协商）。实测 yuv444p 源：原先 hwaccel 出 `yuv444p`、cpu_v2 出 `yuv420p` —— **静默降色度** |
+| `-threads` | 只有 cpu_v2 发（对硬件编码器也发） | hwaccel 新增 `--threads`（默认 0=自动，按 **cgroup 配额**算核数）；两边都**只对软件编码器**下发（`_HW_ENCODERS` 15 项，两脚本逐字相同） |
+| 选项顺序 | 两脚本 rc 轴 / `-preset` / `-x265-params` 的位置不同 | 以 hwaccel 为准重排 cpu_v2：质量 → `-b:v` → rc 轴 → `-cpu-used` → `-preset` → `-pix_fmt` → 逐流 codec → `-threads` → 音频 → `-x265-params` → 容器收尾 |
+| `-pix_fmt` 的**校验**用途 | cpu_v2 把"约束值"与"下发值"合成一个变量 | 拆成 `pix_fmt_check`（含编码器隐含默认格式，只喂偶数尺寸校验）与 `pix_fmt_emit`。**合并会让偶数校验静默失效、或强制 4:2:0（就是要修的 bug）** |
+
+⚠ **有意保留的差异**：NVENC 轴上两边本就该不同 —— 同一份 `--codec hevc_nvenc`，
+hwaccel 会**真降级**到 libx265、cpu_v2 是原样透传 NVENC 编码器（能力差异，不是分叉）。
+所以第四道门把 hwaccel 钉在"三轴全 CPU"上、**不覆盖 NVENC 轴**；
+10bit 源的 `-pix_fmt` 两边仍不同（hwaccel→`p010le` / cpu_v2→`yuv420p10le`），同样排在门外。
+
+**How to apply**：在这两个脚本里加任何**会落到 ffmpeg 命令上**的选项时，
+① 两边一起加（同名同默认）；② 插槽放到同一个位置；③ 跑第四道门。
+不改命令的开关（如 `--workers`、探针类）不受这条约束。

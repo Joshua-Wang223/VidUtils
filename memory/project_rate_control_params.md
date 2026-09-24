@@ -111,3 +111,29 @@ type: project
 - ⚠ 上机（T4）仍需核一次 `ffmpeg -h encoder=hevc_nvenc` 的选项表：本机 ffmpeg 只验到
   "`-rc <name>` 的**名字**合法"（解析通过后死在 `Cannot load nvcuda.dll`），
   运行期语义以 `project_t4_gpu_capabilities.md` 的记录为准。
+
+## 追加（2026-09-24）：`--qp` 的降级映射 + `0` 是无损哨兵 + `-ref` 能落到 constqp
+
+这一轮把「质量意图 → 目标编码器原生参数」收敛到 `_resolve_quality_params` **一个点**
+（返回值由 `(crf, cq)` 扩成 `(crf, cq, qp)`，两脚本同步）。四个缺口都是**实测复现**的：
+
+| 缺口 | 改前（实测） | 改后 |
+|---|---|---|
+| `--rc-mode constqp --qp 18` 在 NVENC 不可用降级到 CPU 时 | QP **静默丢弃**、质量落到默认 `-crf 21` | 换算成 `-crf 14`（hevc_nvenc 量纲） |
+| `--cq 0` / `--qp 0`（无损）降级到 libx265 | 只得 `-crf 3`（**不是无损**） | `-crf 0` + `-x265-params lossless=1` |
+| `h264_nvenc` 的 cq **0~5** → libx264 / libvpx-vp9 | **全部** → `-crf 0` = 真无损（`--cq 4 --codec libx264` 静默产出巨大文件） | 非无损换算结果统一**钳到 ≥1** |
+| 字面量 `--crf 21` 落到 `hevc_nvenc` | 忽略 + 回落默认 `-cq 23`（用户给的值蒸发） | 按 libx264 CRF 口径换算 → `-cq 28` |
+
+**`0` = 无损哨兵，不参与线性换算**（各编码器的 0 都是无损档，而 `a×x+b` 会把 0 当普通下界）。
+5 路 0 值输入（`--crf` / `--cq` / `--qp` / `--crf-ref` / `--cq-ref`）统一投影成目标的
+无损档：`libx265` → `-crf 0` + `lossless=1`；`libvpx*` → `-crf 0 -b:v 0`；`librav1e` → `-qp 0`；
+NVENC → `-rc constqp -qp 0 -b:v 0`（显式 `--qp 0` 此前缺 `-b:v 0`，已统一）。
+⚠ **低端饱和是固有性质**：`--cq 1~5` 落到 libx264 / libvpx-vp9 会被钳到同一个最小值、
+在等效表里分辨不出来。
+
+**组合规则**（用户拍板）：`--rc-mode constqp` 下 `--qp` / `--crf-ref` / `--cq-ref` **三选一**
+（同给报错——量纲不同）；字面量 `--crf` / `--cq` 与 `--bitrate` 仍拒。
+
+**How to apply**：再遇到"某参数落到不支持它的编码器"时，默认动作是**换算 + 提示**，
+不是丢弃；只有"0 / 无损"这类**语义哨兵**才跳过换算。判据
+`verify/verify_quality_mapping.py`（八组，含"非无损换算永不落到 0"的小值扫描）。

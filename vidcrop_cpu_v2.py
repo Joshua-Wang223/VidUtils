@@ -56,11 +56,13 @@ vidcrop_cpu_v2.py – 批量视频裁剪/覆盖缩放工具（CPU 多任务并�
 --codec                视频编码器（默认 libx264，支持别名自动归一化；auto 等同 libx264）
 --crf                  CRF 质量值（默认 21，仅对支持 CRF 的编码器生效；字面量原样下发）
 --cq                   CQ 质量值（默认 23，仅对 NVENC/AMF/QSV 等 GPU 编码器生效，
-                       CPU 编码器下自动映射为等效 CRF）
+                       CPU 编码器下自动映射为等效 CRF）。任一质量参数取 0 = 无损请求
 --crf-ref              N 以 libx264 CRF 为统一基准，按等效表换算到目标编码器
-                       （例：--codec vp9 --crf-ref 21 → -crf 27）；与 --crf/--cq 互斥
+                       （例：--codec vp9 --crf-ref 21 → -crf 27）；与 --crf/--cq 互斥。
+                       与 --rc-mode constqp 并用时换算结果落到 -qp
 --cq-ref               N 以 h264_nvenc CQ 为统一基准，按等效表换算到目标编码器
-                       （例：--codec hevc_nvenc --cq-ref 26 → -cq 28）；与 --crf/--cq 互斥
+                       （例：--codec hevc_nvenc --cq-ref 26 → -cq 28）；与 --crf/--cq 互斥。
+                       与 --rc-mode constqp 并用时换算结果落到 -qp
 --preset               编码器预设（默认：CPU 编码器 medium / GPU 编码器 p5，支持 NVENC p1~p7 双向映射）
 --pix-fmt              输出像素格式（auto / none / 具体格式）
 --audio-codec          音频编码器（默认 copy，可选 aac / libopus 等）
@@ -70,7 +72,8 @@ vidcrop_cpu_v2.py – 批量视频裁剪/覆盖缩放工具（CPU 多任务并�
 -r, --recursive        递归扫描输入目录
 --no-skip-same-size    即使源尺寸等于目标尺寸也强制转码
 --workers              并行任务数（0=自动）
---threads              每任务 FFmpeg 线程数（0=自动）
+--threads              每任务 FFmpeg 编码线程数（0=自动，按逻辑核数/并发任务数推算）；
+                       只对软件编码器下发 -threads（硬件编码器不吃帧级线程）
 --mem-per-job          单任务估计内存占用 GB（0=根据编码器画像）
 --sequential           强制顺序执行，显示单文件进度条
 --dry-run              仅生成并显示 FFmpeg 命令，不执行转码
@@ -3769,7 +3772,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="CRF 质量值 (CPU 编码器)；默认 21，范围 0-51 越小质量越好。"
-             "字面量原样下发给目标编码器，不做换算",
+             "字面量原样下发给目标编码器；落到只认 -cq/-qp 的编码器时按 libx264 CRF 口径换算。"
+             "0 = 无损",
     )
     ap.add_argument(
         "--cq",
@@ -3810,9 +3814,10 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         metavar="N",
-        help="NVENC 恒定 QP 值（0-51）：只在 --rc-mode constqp 下生效，与该模式外的 "
-             "--cq / --crf / --crf-ref / --cq-ref 互斥（constqp 用 --qp 表达质量，"
-             "其它量纲混用无法判定意图）",
+        help="NVENC 恒定 QP 值（0-51）：只在 --rc-mode constqp 下生效；"
+             "constqp 下它与 --crf-ref / --cq-ref 三选一，与字面量 --crf / --cq 互斥"
+             "（量纲不同，混用无法判定意图）。--qp 0 = 无损。"
+             "本脚本是纯 CPU 路径，故该值会按等效表换算成 -crf（不丢弃质量值）",
     )
     ap.add_argument(
         "--lookahead",

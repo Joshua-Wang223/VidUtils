@@ -3108,6 +3108,7 @@ def _resolve_quality_params(
     cq_ref: Optional[int] = None,
     qp: Optional[int] = None,
     rc_mode: str = 'auto',
+    quiet: bool = False,
 ) -> Tuple[Optional[int], Optional[int], Optional[int]]:
     """
     根据编码器类型确定最终 **(crf, cq, qp)** 三元组，处理参数不匹配、降级映射与边界。
@@ -3139,10 +3140,18 @@ def _resolve_quality_params(
         crf_ref: --crf-ref，以 libx264 CRF 为基准
         cq_ref: --cq-ref，以 h264_nvenc CQ 为基准
         rc_mode: 当前的 -rc 模式（'constqp' 时质量由 -qp 表达）
+        quiet: True 时不打换算提示（供任务概览块这类"只取值"的调用方用，
+               否则同一条提示会在概览与逐文件两处各打一遍）
     """
     # --cq / --qp 的量纲取决于用户原本请求的编码器；请求的就是 CPU 编码器时
     # （没有可参照的 GPU 编码器）按默认 GPU 编码器 h264_nvenc 解释。
     _src = src_codec if (src_codec and encoder_supports_cq(src_codec)) else 'h264_nvenc'
+
+    # quiet=True 供"只取值、不改命令"的调用方（任务概览块）使用：
+    # 否则同一条换算提示会在概览与逐文件两处各打一遍。
+    def _say(msg: str) -> None:
+        if not quiet:
+            print(msg)
 
     # ── [LOSSLESS] 0 = 无损：跳过换算，直接给目标编码器的无损档 ──────────────
     _zero = next((_n for _n, _v in (('--crf', user_crf), ('--cq', user_cq),
@@ -3156,9 +3165,9 @@ def _resolve_quality_params(
             # （它发 -rc constqp -qp 0 -b:v 0，与 --cq 0 走同一条路）
             return None, 0, None
         if encoder_supports_crf(codec):
-            print(f'  提示：{_zero}=0 是无损请求，已按编码器 {codec} 的无损档下发。')
+            _say(f'  提示：{_zero}=0 是无损请求，已按编码器 {codec} 的无损档下发。')
             return 0, None, None
-        print(f'  警告：{_zero}=0 是无损请求，但编码器 {codec} 没有无损档，改用默认质量。')
+        _say(f'  警告：{_zero}=0 是无损请求，但编码器 {codec} 没有无损档，改用默认质量。')
         return (None, DEFAULT_CQ, None) if encoder_supports_cq(codec) \
             else (DEFAULT_CRF, None, None)
 
@@ -3168,10 +3177,10 @@ def _resolve_quality_params(
             return None, None, qp
         if encoder_supports_crf(codec):
             mapped_crf = max(1, cq_to_crf(qp, codec, _src))
-            print(f'  提示：编码器 {codec} 不支持 -qp，'
-                  f'已将 --qp {qp}（{_src} QP 量纲）映射为 -crf {mapped_crf}（等效视觉质量）。')
+            _say(f'  提示：编码器 {codec} 不支持 -qp，'
+                 f'已将 --qp {qp}（{_src} QP 量纲）映射为 -crf {mapped_crf}（等效视觉质量）。')
             return mapped_crf, None, None
-        print(f'  警告：编码器 {codec} 既没有 -qp 也没有 -crf，--qp {qp} 无法换算，改用默认质量。')
+        _say(f'  警告：编码器 {codec} 既没有 -qp 也没有 -crf，--qp {qp} 无法换算，改用默认质量。')
         return (None, DEFAULT_CQ, None) if encoder_supports_cq(codec) \
             else (DEFAULT_CRF, None, None)
 
@@ -3191,21 +3200,21 @@ def _resolve_quality_params(
             _v = from_x264_crf('libaom-av1', ref_x264)
             _out = max(1, int(round(_v))) if _v is not None else None
             if _out is not None:
-                print(f'  提示：{ref_desc} → {codec} 的 -qp {crf_to_rav1e_qp(_out)}。')
+                _say(f'  提示：{ref_desc} → {codec} 的 -qp {crf_to_rav1e_qp(_out)}。')
             return _out, None, None
         _v2 = from_x264_crf(codec, ref_x264)
         if _v2 is None:
-            print(f'  警告：{codec} 不在等效换算表中，{ref_desc} 无法换算，改用默认质量。')
+            _say(f'  警告：{codec} 不在等效换算表中，{ref_desc} 无法换算，改用默认质量。')
             return (None, DEFAULT_CQ, None) if encoder_supports_cq(codec) \
                 else (DEFAULT_CRF, None, None)
         _val = max(1, int(round(_v2)))
         if encoder_supports_cq(codec):
             if rc_mode == 'constqp':
-                print(f'  提示：{ref_desc} → {codec} 的 -qp {_val}（rc-mode constqp）。')
+                _say(f'  提示：{ref_desc} → {codec} 的 -qp {_val}（rc-mode constqp）。')
                 return None, None, _val
-            print(f'  提示：{ref_desc} → {codec} 的 -cq {_val}。')
+            _say(f'  提示：{ref_desc} → {codec} 的 -cq {_val}。')
             return None, _val, None
-        print(f'  提示：{ref_desc} → {codec} 的 -crf {_val}。')
+        _say(f'  提示：{ref_desc} → {codec} 的 -crf {_val}。')
         return _val, None, None
 
     # ── 方式 1：字面量原样下发 ────────────────────────────────────────────
@@ -3217,11 +3226,11 @@ def _resolve_quality_params(
             # 不再"忽略 + 回落默认 CQ"（那会让用户给的质量值直接蒸发）。
             mapped = max(1, crf_to_cq(user_crf, codec))
             if rc_mode == 'constqp':
-                print(f'  提示：编码器 {codec} 不支持 -crf，已将 --crf {user_crf}'
-                      f'（libx264 CRF 量纲）映射为 -qp {mapped}（rc-mode constqp）。')
+                _say(f'  提示：编码器 {codec} 不支持 -crf，已将 --crf {user_crf}'
+                     f'（libx264 CRF 量纲）映射为 -qp {mapped}（rc-mode constqp）。')
                 return None, None, mapped
-            print(f'  提示：编码器 {codec} 不支持 -crf，已将 --crf {user_crf}'
-                  f'（libx264 CRF 量纲）映射为 -cq {mapped}（等效视觉质量）。')
+            _say(f'  提示：编码器 {codec} 不支持 -crf，已将 --crf {user_crf}'
+                 f'（libx264 CRF 量纲）映射为 -cq {mapped}（等效视觉质量）。')
             return None, mapped, None
         if rc_mode == 'constqp':
             # 无质量输入时的 constqp 默认（CLI 会先报错，这里只为直接调用方兜底）
@@ -3233,8 +3242,8 @@ def _resolve_quality_params(
             return user_crf, None, None
         if user_cq is not None:
             mapped_crf = max(1, cq_to_crf(user_cq, codec, _src))
-            print(f'  提示：编码器 {codec} 不支持 -cq，'
-                  f'已将 --cq {user_cq}（{_src} 量纲）映射为 -crf {mapped_crf}（等效视觉质量）。')
+            _say(f'  提示：编码器 {codec} 不支持 -cq，'
+                 f'已将 --cq {user_cq}（{_src} 量纲）映射为 -crf {mapped_crf}（等效视觉质量）。')
             return mapped_crf, None, None
         return DEFAULT_CRF, None, None
 
@@ -5575,13 +5584,26 @@ def main() -> int:
     # quiet：换算提示留给逐策略那次打印，概览块只展示结果值。
     _shown_preset = strategy_preset(args.preset, args.codec, _effective_codec,
                                     quiet=True)
+    # 质量的展示分两层：① 用户**字面量**（他敲了什么）；② **实际生效值**
+    # （按首条策略实算）。两者不同时才补一句「实际生效」，避免常见的自相矛盾显示
+    # ——例如 constqp 降级到 CPU 时同屏印 QP 18 与 CRF 21，而命令里其实是 -crf 14。
+    _e_crf, _e_cq, _e_qp = _resolve_quality_params(
+        _effective_codec, args.crf, args.cq, src_codec=args.codec,
+        crf_ref=args.crf_ref, cq_ref=args.cq_ref, qp=args.qp,
+        rc_mode=args.rc_mode, quiet=True)
+    _eff_txt = (f'QP: {_e_qp}' if _e_qp is not None else
+                f'CQ: {_e_cq}' if _e_cq is not None else
+                f'CRF: {_e_crf}' if _e_crf is not None else '')
     if not quality_parts:
         # 默认质量参数同样按实际生效的编码器取：libsvtav1 只认 -crf，
         # 若还按请求的 av1_nvenc 显示 "CQ: 23" 就与本行编码器自相矛盾。
-        if encoder_supports_cq(_effective_codec):
-            quality_parts.append(f'CQ: {DEFAULT_CQ}')
-        elif encoder_supports_crf(_effective_codec):
-            quality_parts.append(f'CRF: {DEFAULT_CRF}')
+        if _eff_txt:
+            quality_parts.append(_eff_txt)
+    else:
+        _lit_txt = (f'CRF: {args.crf}' if args.crf is not None else
+                    f'CQ: {args.cq}' if args.cq is not None else '')
+        if _eff_txt and _eff_txt != _lit_txt:
+            quality_parts.append(f'实际生效 {_eff_txt}')
     # 没有 -preset 选项的编码器（libvpx-vp9 / libaom-av1 / librav1e）不展示 preset：
     # build_ffmpeg_cmd 里 encoder_supports_preset() 为假时根本不下发，展示了就是假信息。
     _preset_field = (f'preset: {_shown_preset}   '
@@ -5593,8 +5615,6 @@ def main() -> int:
     _rc_bits = []
     if args.rc_mode != 'auto':
         _rc_bits.append(f'rc-mode: {args.rc_mode}')
-    if args.qp is not None:
-        _rc_bits.append(f'QP: {args.qp}')
     if args.bitrate:
         _rc_bits.append(f'码率: {args.bitrate}')
     if args.lookahead is not None:

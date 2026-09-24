@@ -1364,12 +1364,16 @@ def build_encoder_options_v2(
     codec: str,
     crf: Optional[int],
     cq: Optional[int],
-    preset: str,
-    pix_fmt: Optional[str],
     warn: Callable[[str], None],
     bitrate: Optional[str] = None,
 ) -> List[str]:
-    """V2 版本：支持 crf 和 cq 双参数
+    """编码器 + **质量参数**（`-c:v` 开头，到 `-cq`/`-crf`/`-b:v 0` 为止）。
+
+    ⚠ 本函数**只管到质量为止**：`-cpu-used` / `-preset` / `-pix_fmt` 由
+    build_encoder_tail_options() 在 **rc 轴之后**下发 —— 这样整条命令的顺序才与
+    vidcrop_hwaccel.py 逐字一致（那边的顺序是 质量 → `-b:v` → rc 轴 →
+    `-cpu-used` → `-preset` → `-pix_fmt`）。两脚本同一条逻辑请求必须生成逐字相同的
+    命令，见 test/dump_cmd_full.sh。
 
     bitrate（--bitrate）只在这里参与判定 VP9 的 `-b:v 0`：用户给了码率时**不补这个 0**
     （同一个 -b:v 发两次会互相打架，且此时要的正是"受码率约束"的语义）；真正的
@@ -1403,6 +1407,25 @@ def build_encoder_options_v2(
         warn(f"编码器 {codec} 不支持 -crf，已忽略 --crf {crf}")
     elif cq is not None:
         warn(f"编码器 {codec} 不支持 -cq，已忽略 --cq {cq}")
+
+    return opts
+
+
+def build_encoder_tail_options(
+    codec: str,
+    preset: str,
+    pix_fmt: Optional[str],
+    warn: Callable[[str], None],
+) -> List[str]:
+    """编码器的**速度档与像素格式**（`-cpu-used` / `-preset` / `-pix_fmt`）。
+
+    与 build_encoder_options_v2() 分开、并在 rc 轴之后调用，是为了让命令顺序与
+    vidcrop_hwaccel.py 逐字一致（见前者的 docstring）。
+    """
+    c = codec.lower()
+    opts: List[str] = []
+    if c == "copy":
+        return opts
 
     # libaom-av1 的速度档位：ffmpeg 默认 -cpu-used=1 慢到不可用（实测 320x240 仅 1fps，
     # libsvtav1 同期 35fps），按资源自动取值。--extra-args 追加在编码器选项之后，
@@ -2835,15 +2858,12 @@ def build_ffmpeg_cmd(
     # 所有输出视频流，与封面的 -c:v:N copy 冲突（filtering and streamcopy 互斥）。
     cmd += ["-filter:v:0" if keep_metadata and meta is not None else "-vf", vf]
 
-    # 编码器选项 (支持 crf 和 cq)
-    cmd += build_encoder_options_v2(codec, crf, cq, preset, pix_fmt, warn,
-                                    bitrate=bitrate)
-    cmd += pres["post"]                  # 封面/字幕逐流 codec，需覆盖上面的 -c:v
-    # --threads：只对**软件编码器**下发（硬件编码器不吃 ffmpeg 的帧级线程，见 _HW_ENCODERS）。
-    # 位置固定在 pres['post'] 之后、-c:a 之前，与 vidcrop_hwaccel.py 逐字对齐
-    # （两脚本同一条逻辑请求要生成逐字相同的命令，见 test/dump_cmd_full.sh）。
-    if codec.lower() not in _HW_ENCODERS:
-        cmd += ["-threads", str(max(1, threads))]
+    # 编码器与质量参数（-c:v / -cq / -crf / -b:v 0）。整条命令的顺序与
+    # vidcrop_hwaccel.py **逐字对齐**：质量 → -b:v 码率 → rc 轴 →
+    # 速度档(-cpu-used/-preset) → -pix_fmt → 逐流 codec(pres.post) → -threads
+    # → 音频 → -x265-params → 容器收尾（两脚本同一条逻辑请求要生成逐字相同的
+    # 命令，见 test/dump_cmd_full.sh）。
+    cmd += build_encoder_options_v2(codec, crf, cq, warn, bitrate=bitrate)
 
     # 码率控制轴（--rc-mode / --qp / --lookahead）：-rc / -qp 只有 NVENC 认，
     # lookahead 按编码器分别下发；libx265 那条必须与 HDR 元数据**合并成同一条**
@@ -2852,6 +2872,17 @@ def build_ffmpeg_cmd(
     if bitrate:
         cmd += ["-b:v", bitrate]
     cmd += rc_args
+
+    # 速度档与像素格式：必须在 rc 轴**之后**（与 hwaccel 同序，
+    # 见 build_encoder_options_v2 的 docstring）
+    cmd += build_encoder_tail_options(codec, preset, pix_fmt, warn)
+
+    cmd += pres["post"]                  # 封面/字幕逐流 codec，需覆盖上面的 -c:v
+    # --threads：只对**软件编码器**下发（硬件编码器不吃 ffmpeg 的帧级线程，见 _HW_ENCODERS）。
+    # 位置固定在 pres['post'] 之后、-c:a 之前，与 vidcrop_hwaccel.py 逐字对齐
+    # （两脚本同一条逻辑请求要生成逐字相同的命令，见 test/dump_cmd_full.sh）。
+    if codec.lower() not in _HW_ENCODERS:
+        cmd += ["-threads", str(max(1, threads))]
 
     # [LOSSLESS] crf/cq == 0 的真无损改写（对照 Video_Enhancement 的 ffmpeg_io.py）：
     #   · libx264 的 -crf 0 本身就是无损，无需改写；
@@ -2874,12 +2905,6 @@ def build_ffmpeg_cmd(
             warn("--cq 0 在 NVENC 下不是真无损：如需无损请用 "
                  "--rc-mode constqp --qp 0（勿与 --bitrate 同给）")
 
-    # [META-KEEP] HDR10 静态元数据（libx265 走 -x265-params，其余尽力而为）。
-    # 一律调用（meta 可能为 None）：rc_x265 里的 lookahead / lossless 也必须落地，
-    # 过去用 `if meta is not None` 包住会让探测失败时把它们连同 HDR 一起静默丢弃。
-    cmd += build_hdr_args(meta, codec, warn, hdr_mode=_hdr_mode,
-                          extra_x265_params=rc_x265)
-
     # WebM 容器不接受 AAC 等音轨，必要时自动改 Opus 重编码
     audio_codec = resolve_audio_codec_for_container(audio_codec, dst.suffix, meta, warn)
     if audio_codec.lower() == "copy":
@@ -2888,6 +2913,13 @@ def build_ffmpeg_cmd(
         cmd += ["-c:a", audio_codec]
         if audio_bitrate:
             cmd += ["-b:a", audio_bitrate]
+
+    # [META-KEEP] HDR10 静态元数据（libx265 走 -x265-params，其余尽力而为）。
+    # 一律调用（meta 可能为 None）：rc_x265 里的 lookahead / lossless 也必须落地，
+    # 过去用 `if meta is not None` 包住会让探测失败时把它们连同 HDR 一起静默丢弃。
+    # 位置在**音频之后**（与 vidcrop_hwaccel.py 逐字同序）。
+    cmd += build_hdr_args(meta, codec, warn, hdr_mode=_hdr_mode,
+                          extra_x265_params=rc_x265)
 
     if dst.suffix.lower() in {".mp4", ".m4v", ".mov"}:
         cmd += ["-movflags", "+faststart"]

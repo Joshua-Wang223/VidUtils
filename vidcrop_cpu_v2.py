@@ -3388,27 +3388,39 @@ def prepare_job_command(
 
     # [META-KEEP] 位深继承：10bit 源不再被降为 8bit。
     # 必须在 validate_output_dimensions 之前决策——yuv420p10le/p010le 要求宽高偶数。
+    #
+    # ⚠ 这里刻意把**约束值**（pix_fmt_check）与**下发值**（pix_fmt_emit）分开：
+    #   · pix_fmt_check 含"编码器隐含默认格式"（yuv420p / ProRes 的 yuv422p10le），
+    #     只用来做偶数尺寸校验 —— 直接拿它下发会强制 4:2:0，把 4:2:2 / 4:4:4 的
+    #     8bit 源静默降色度（实测 yuv444p 源：hwaccel 出 yuv444p、cpu_v2 出 yuv420p）。
+    #   · pix_fmt_emit 在 --pix-fmt auto 且未给 --bit-depth 时**不下发**，
+    #     让编码器自己协商源格式 —— 与 vidcrop_hwaccel.py 的行为一致。
+    #   两者若合并成一个变量，要么偶数校验静默失效（返回 None 早退），要么色度被强制降级。
     src_bits = int(info.get("src_bits", 8) or 8)
     is_auto_fmt = (args.pix_fmt or "auto").lower() == "auto"
     if is_auto_fmt:
         if args.bit_depth is not None:
-            # 显式 --bit-depth 优先于"继承源位深"：只有 --pix-fmt 保持 auto 时走到这里
-            pix_fmt = (resolve_pix_fmt_for_depth(args.codec, args.bit_depth, warn=warn)
-                       or _DEFAULT_PIXFMT_BY_DEPTH[args.bit_depth])
+            # 显式 --bit-depth 优先于"继承源位深"：只有 --pix-fmt 保持 auto 时走到这里。
+            # 这是用户点名的格式，必须真的下发。
+            pix_fmt_check = (resolve_pix_fmt_for_depth(args.codec, args.bit_depth, warn=warn)
+                             or _DEFAULT_PIXFMT_BY_DEPTH[args.bit_depth])
+            pix_fmt_emit = pix_fmt_check
         else:
-            pix_fmt = resolve_pix_fmt_for_source(args.codec, src_bits, warn=warn) \
-                or PIX_FMT_DEFAULT_BY_CODEC.get(args.codec.lower(), "yuv420p")
+            # 约束值 = 编码器的隐含默认格式（8bit 源）；下发值 = 源为 10bit+ 时的继承格式，
+            # 8bit 源返回 None（不发 -pix_fmt，同 hwaccel）。
+            pix_fmt_check = PIX_FMT_DEFAULT_BY_CODEC.get(args.codec.lower(), "yuv420p")
+            pix_fmt_emit = resolve_pix_fmt_for_source(args.codec, src_bits, warn=warn)
     else:
-        pix_fmt = args.pix_fmt_resolved
+        pix_fmt_check = pix_fmt_emit = args.pix_fmt_resolved
 
     try:
-        validate_output_dimensions(dst_w, dst_h, pix_fmt)
+        validate_output_dimensions(dst_w, dst_h, pix_fmt_check)
     except ValueError as exc:
         # auto 模式下自动继承来的高位深与奇数尺寸冲突 → 降级 8bit 而非失败；
         # 用户显式指定 --pix-fmt 时尊重用户，保持失败。
-        if is_auto_fmt and (dst_w % 2 or dst_h % 2) and pix_fmt in PIX_FMT_REQUIRE_EVEN_BOTH:
+        if is_auto_fmt and (dst_w % 2 or dst_h % 2) and pix_fmt_check in PIX_FMT_REQUIRE_EVEN_BOTH:
             warn(f"{exc}；已自动降级为 yuv420p")
-            pix_fmt = "yuv420p"
+            pix_fmt_check = pix_fmt_emit = "yuv420p"
         else:
             job.status = "failed"
             job.error = str(exc)
@@ -3427,7 +3439,7 @@ def prepare_job_command(
             crf=args.crf,
             cq=args.cq,
             preset=args.preset,
-            pix_fmt=pix_fmt,
+            pix_fmt=pix_fmt_emit,
             threads=threads,
             overwrite=args.overwrite,
             audio_codec=args.audio_codec,
@@ -4118,7 +4130,22 @@ def validate_and_finalize_args(args: argparse.Namespace) -> None:
 
     args.container_normalized = normalize_container(args.container)
     args.extra_args_normalized = normalize_extra_args(args.extra_args)
+    # ⚠ 这是**约束值**（含编码器隐含默认格式），只用于偶数尺寸校验；
+    # 实际下发与否由 prepare_job_command 的 pix_fmt_emit 决定（auto + 8bit 源不下发）。
     args.pix_fmt_resolved = resolve_pix_fmt(args.codec, args.pix_fmt)
+
+    # 概览块显示"实际会下发什么"，别显示约束值 —— 否则 auto + 8bit 源会印出
+    # `pix_fmt: yuv420p` 而命令里根本没有 -pix_fmt（显示层误报）。
+    _pf_arg = (args.pix_fmt or "auto").strip().lower()
+    if _pf_arg == "none":
+        args.pix_fmt_display = "不指定"
+    elif _pf_arg == "auto" and args.bit_depth is None:
+        args.pix_fmt_display = "自动（8bit 源不下发，10bit+ 按源位深继承）"
+    elif _pf_arg == "auto":
+        args.pix_fmt_display = (resolve_pix_fmt_for_depth(args.codec, args.bit_depth)
+                                or args.pix_fmt_resolved or "不指定")
+    else:
+        args.pix_fmt_display = args.pix_fmt_resolved or "不指定"
 
     # 输出尺寸齐全时才校验像素格式的奇偶约束（crop-cover + --crop-ratio 已在上面
     # 补全了缺失的维度，所以这里能覆盖到该模式）
@@ -4257,7 +4284,7 @@ def main() -> int:
         _label("编码器")
         + f"{args.codec}   {_preset_field}"
         + "   ".join(quality_parts)
-        + f"   pix_fmt: {args.pix_fmt_resolved or '不指定'}"
+        + f"   pix_fmt: {args.pix_fmt_display}"
         + f"   color_range: {args.color_range}"
     )
     # 码率控制轴：只在用户真的点了相关参数时才出现这一行（默认全空 → 概览块与引入

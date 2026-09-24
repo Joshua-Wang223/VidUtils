@@ -12,6 +12,13 @@
 #   例外（2026-09-23，有意变更）：NVENC 的 `-cq` 现在默认配 `-b:v 0`（纯恒定质量，
 #   对照 Video_Enhancement 的 `-cq:v N -b:v 0`），故 `hevc_nvenc 显式 --cq` 一行比旧
 #   基线多一个 `-b:v 0`；基线已按新行为更新。行为判据见 verify/verify_rc_lookahead.py 第 ⑩ 组。
+#   例外（2026-09-24，有意变更，两条一起）：
+#     · `-threads` 纳入本门的 token 集（--threads 是 2026-09-24 新增的轴，两脚本
+#       现在都对**软件编码器**下发它）→ 每一行都会多一个 `-threads <N>`；
+#     · cpu_v2 在 `--pix-fmt auto` + 8bit 源上**不再下发** `-pix_fmt yuv420p`
+#       （对齐 hwaccel：强制 4:2:0 会把 4:2:2 / 4:4:4 的 8bit 源静默降色度）→
+#       全部 cpu_v2 行少一个 `-pix_fmt yuv420p`。基线已按新行为更新。
+#       行为判据见 verify/verify_quality_mapping.py。
 # 用法: bash test/dump_enc_options.sh > out.txt
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
@@ -25,7 +32,7 @@ mkdir -p "$F"
 # 两个脚本的标签不同（hwaccel 是「执行命令」，cpu_v2 是「命令」），故一并匹配。
 tokens() {
   sed -n 's/.*命令[^:]*: \(ffmpeg .*\)$/\1/p' <<< "$1" \
-    | grep -oE '\-(c:v|cq|crf|qp|b:v|rc|rc-lookahead|lag-in-frames|preset|pix_fmt|profile:v|x264-params|x265-params) [^ ]+' \
+    | grep -oE '\-(c:v|cq|crf|qp|b:v|rc|rc-lookahead|lag-in-frames|preset|threads|pix_fmt|profile:v|x264-params|x265-params) [^ ]+' \
     | tr '\n' ' '
 }
 hw() { python vidcrop_hwaccel.py --input "$F/land.mp4" --output "$F/o" --dry-run "$@" 2>&1; }

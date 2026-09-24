@@ -1,4 +1,4 @@
-# verify/verify_quality_mapping.py — 质量参数「单点换算」与「0 值无损边界」的行为判据
+# verify/verify_quality_mapping.py — 质量参数「单点换算」与「0 值边界」的行为判据
 #
 # 覆盖 2026-09-24 那一轮改动的每一条决策（D1..D7，见方案）：
 #   D1  --qp 在 NVENC 策略降级到 CPU 编码器时换算成 -crf（此前静默丢弃、回落默认 CRF 21）
@@ -6,7 +6,10 @@
 #   D3  --pix-fmt auto + 8bit 源两脚本都不下发 -pix_fmt（保住 4:2:2 / 4:4:4）
 #   D4  字面量 --crf 落到只认 -cq/-qp 的编码器时按等效表换算（此前静默回落默认 CQ 23）
 #   D5  -threads 只对软件编码器下发，两脚本一致；_HW_ENCODERS / _detect_cpu 相等
-#   D7  0 = 无损哨兵（不走线性换算，直接投影目标的 0）；非无损换算结果钳到 ≥1
+#   D7  0 = 特殊档哨兵（不走线性换算，直接投影目标的 0 档）；非 0 换算结果钳到 ≥1
+#       ⚠ 本组钉的是**下发形状**，不是「是不是逐位无损」——0 档是否逐位无损取决于编码器：
+#         本机 libx265/libx264 `-crf 0` 实测是（framemd5 0/50），T4 实测 NVENC `-qp 0` 不是
+#         （43417/43448，只是最高质量档）。见 probe/probe_lossless_qp0.sh。
 #
 # 本套件是**纯 CPU** 的：本机没有 GPU ⇒ `--codec *_nvenc` 会真的走降级链，
 # 正好是 D1 要验的那条路径（见 memory/project_dual_env.md）。
@@ -145,7 +148,7 @@ chk("[3] h264_nvenc + --crf 21 → -cq 26",
     qq(H, 'h264_nvenc', crf=21, src='h264_nvenc'), (None, 26, None))
 chk("[3] 不再静默回落默认 CQ 23", qq(H, 'hevc_nvenc', crf=21, src='hevc_nvenc')[1] != C.DEFAULT_CQ, True)
 
-print('── ④ D7：0 是无损哨兵（不参与线性换算）──')
+print('── ④ D7：0 是特殊档哨兵（不参与线性换算；实测是否逐位无损见文件头注释）──')
 for label, args, want in (
         ('libx265 --cq 0', dict(cq=0, src='h264_nvenc'), (0, None, None)),
         ('libx265 --crf 0', dict(crf=0), (0, None, None)),
@@ -154,8 +157,8 @@ for label, args, want in (
         ('libsvtav1 --crf 0', dict(crf=0), (0, None, None)),
         ('librav1e --crf 0', dict(crf=0), (0, None, None)),
 ):
-    chk(f"[4] {label} → 目标无损档", qq(H, label.split()[0], **args), want)
-chk("[4] h264_nvenc --cq 0 → 交给 build 层的真无损改写",
+    chk(f"[4] {label} → 目标的 0 档", qq(H, label.split()[0], **args), want)
+chk("[4] h264_nvenc --cq 0 → 交给 build 层的 0 档改写（实测非逐位无损）",
     qq(H, 'h264_nvenc', cq=0, src='h264_nvenc'), (None, 0, None))
 chk("[4] hevc_nvenc constqp --qp 0 → -qp 0",
     qq(H, 'hevc_nvenc', qp=0, src='hevc_nvenc', rc='constqp'), (None, None, 0))
@@ -167,10 +170,10 @@ _b6_rc, _b6_out = run('vidcrop_cpu_v2.py',
                       ['--input', str(SRC), '--output', str(WORK / 'o4'), '--dry-run',
                        '--codec', 'libx265', '--crf', '0', '--bitrate', '8M',
                        '--output-width', '640', '--output-height', '360'])
-chk("[4] 无损 + --bitrate：不报错（rc=0）", _b6_rc, 0)
-chk_in("[4] 无损 + --bitrate：提示'受码率约束'的语义冲突", '受码率约束', _b6_out)
+chk("[4] 0 档 + --bitrate：不报错（rc=0）", _b6_rc, 0)
+chk_in("[4] 0 档 + --bitrate：提示'受码率约束'的语义冲突", '受码率约束', _b6_out)
 
-print('── ⑤ D7/B3：非无损换算的结果**永不落到 0**（低端不得意外命中无损）──')
+print('── ⑤ D7/B3：非 0 换算的结果**永不落到 0**（低端不得意外命中 0 档）──')
 _z = 0
 for src in ('h264_nvenc', 'hevc_nvenc'):
     for dst in ('libx264', 'libx265', 'libvpx-vp9', 'libsvtav1', 'libaom-av1'):
@@ -179,7 +182,7 @@ for src in ('h264_nvenc', 'hevc_nvenc'):
             val = got[0] if got[0] is not None else got[1]
             if val == 0:
                 _z += 1
-                fails.append(f'[5] {src} cq {v} → {dst} 落到 0（=无损），应为 ≥1：{got}')
+                fails.append(f'[5] {src} cq {v} → {dst} 落到 0（=0 档），应为 ≥1：{got}')
 chk("[5] 小值扫描里没有任何一格落到 0", _z, 0)
 chk("[5] libx264 --cq 4 → -crf 1（此前是 -crf 0 = 真无损）",
     qq(H, 'libx264', cq=4, src='h264_nvenc'), (1, None, None))

@@ -983,7 +983,8 @@ def crf_to_cq(crf: int, target_codec: str, src_codec: str = "libx264") -> int:
     用途：`--crf N` 落在只认 `-cq`/`-qp` 的编码器（NVENC / AMF / QSV）上时。
     此前这种组合会被"忽略 + 回落默认 CQ"，用户给的值直接蒸发；现在按等效表换算过去。
 
-    ⚠ 调用方负责把结果钳到 ≥1：目标编码器的 0 是**无损档**，不是"最高质量"，
+    ⚠ 调用方负责把结果钳到 ≥1：目标编码器的 0 是**特殊档**（CPU 编码器上实测
+    是逐位无损、NVENC 上只是最高质量档），不是"最高质量"，
     线性表在低端会把小值算成 0 而意外命中无损（见 `_resolve_quality_params` 的 [LOSSLESS] 段）。
     与 vidcrop_hwaccel.py 的同名函数逐字对应（孪生约定）。
     """
@@ -1028,17 +1029,20 @@ def _resolve_quality_params(
       3. --qp（只在 `--rc-mode constqp` 下有效）：目标支持 -qp 就透传，
          落到 CPU 编码器时换算为等效 `-crf`（此前是"静默丢弃、回落默认 CRF 21"）。
 
-    ⚠ **0 是无损哨兵，不参与线性换算**：各编码器的 0 都是"无损"档（libx265 还要配
-    `lossless=1`、VP9 要配 `-b:v 0` 才是真无损），而线性表会把 0 当普通下界 ——
-    后果是 cq 0~5 被算成同一个"接近无损"值，甚至**意外命中目标编码器的 0（无损）**。
-    故任一质量输入为 0 时直接投影成目标的无损档（见下方 [LOSSLESS]）。
-    非无损换算的结果**统一钳到 ≥1**：`--cq 4 --codec libx264` 以前会算出 `-crf 0`
+    ⚠ **0 是特殊档哨兵，不参与线性换算**：各编码器的 0 都是"极值档"（libx265 还要配
+    `lossless=1`、VP9 要配 `-b:v 0`），而线性表会把 0 当普通下界 —— 后果是 cq 0~5
+    被算成同一个"接近无损"值，甚至**意外命中目标编码器的 0**。
+    故任一质量输入为 0 时直接投影成目标的 0 档（见下方 [LOSSLESS]）。
+    ⚠ **但别把它一律叫"真无损"**：本机实测 **libx265 的 `-crf 0`（+lossless=1）与
+    libx264 的 `-crf 0` 是逐位无损**（framemd5 0/50 帧不同）；而 T4 实测
+    **NVENC 的 `-rc constqp -qp 0` 不是**（43417/43448 帧不同）。
+    非 0 换算的结果**统一钳到 ≥1**：`--cq 4 --codec libx264` 以前会算出 `-crf 0`
     （真无损、文件巨大），现在得到 `-crf 1`。
     """
     # 本脚本没有"用户原本请求的硬件编码器"这一层，量纲一律按 h264_nvenc 解释。
     _src = "h264_nvenc"
 
-    # ── [LOSSLESS] 0 = 无损：跳过换算，直接给目标编码器的无损档 ──────────────
+    # ── [LOSSLESS] 0 档：跳过换算，直接给目标编码器的 0 档 ──────────────
     _zero = next((_n for _n, _v in (("--crf", user_crf), ("--cq", user_cq),
                                     ("--qp", qp), ("--crf-ref", crf_ref),
                                     ("--cq-ref", cq_ref)) if _v == 0), None)
@@ -1051,9 +1055,9 @@ def _resolve_quality_params(
             # 由 build_ffmpeg_cmd 负责告知"cq 0 不是真无损"。
             return None, 0, None
         if encoder_supports_crf(codec):
-            print(f"  提示：{_zero}=0 是无损请求，已按编码器 {codec} 的无损档下发。")
+            print(f"  提示：{_zero}=0 是无损请求，已按编码器 {codec} 的 0 档下发。")
             return 0, None, None
-        print(f"  警告：{_zero}=0 是无损请求，但编码器 {codec} 没有无损档，改用默认质量。")
+        print(f"  警告：{_zero}=0 是无损请求，但编码器 {codec} 没有对应的 0 档，改用默认质量。")
         return (None, DEFAULT_CQ, None) if encoder_supports_cq(codec) \
             else (DEFAULT_CRF, None, None)
 
@@ -2914,12 +2918,13 @@ def build_ffmpeg_cmd(
     if codec.lower() not in _HW_ENCODERS:
         cmd += ["-threads", str(max(1, threads))]
 
-    # [LOSSLESS] crf/cq == 0 的真无损改写（对照 Video_Enhancement 的 ffmpeg_io.py）：
+    # [LOSSLESS] crf/cq == 0 的 0 档改写（对照 Video_Enhancement 的 ffmpeg_io.py）：
     #   · libx264 的 -crf 0 本身就是无损，无需改写；
     #   · libx265 的 -crf 0 只是"近无损"，必须写 lossless=1（并入 -x265-params）；
     #   · *_nvenc 的 -cq 0 不是无损 —— 本脚本 NVENC 是原样透传（无硬件探测、不等同
-    #     于 hwaccel 的逐策略路径），故**不擅自改写模式**，只提示走 constqp。
-    #     这正是与 vidcrop_hwaccel.py 的差异化处理：那边 rc_mode=auto 会直接改写。
+    #     于 hwaccel 的逐策略路径），故**不擅自改写模式**，只提示。
+    #     ⚠ 提示别指向 `--rc-mode constqp --qp 0`：T4 实测 `-qp 0` **不是**逐位无损
+    #     （43417/43448 帧不同），要真无损只能换 CPU 编码器的 `-crf 0`。
     _cl = codec.lower()
     _quality_is_zero = (
         (crf is not None and encoder_supports_crf(codec) and crf == 0)
@@ -2932,8 +2937,9 @@ def build_ffmpeg_cmd(
             # 不用 print（会绕开并发面板）。
             warn("--crf 0 → libx265 真无损改写（lossless=1）")
         elif _cl in NVENC_CODECS:
-            warn("--cq 0 在 NVENC 下不是真无损：如需无损请用 "
-                 "--rc-mode constqp --qp 0（勿与 --bitrate 同给）")
+            warn("--cq 0 在 NVENC 下不是真无损；--rc-mode constqp --qp 0 也只是"
+                 "最高质量档（T4 实测非逐位无损）—— 要真无损请改用 "
+                 "libx265 / libx264 的 -crf 0")
 
     # WebM 容器不接受 AAC 等音轨，必要时自动改 Opus 重编码
     audio_codec = resolve_audio_codec_for_container(audio_codec, dst.suffix, meta, warn)

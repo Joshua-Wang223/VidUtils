@@ -2,13 +2,13 @@
 #
 # 这批改动的主题（对照 Video_Enhancement 的 ffmpeg 路径与 NVENC SDK 取值规则）：
 #   [A] NVENC 的 -cq 默认配 `-b:v 0`（纯恒定质量）；给了 --bitrate 时不补。
-#   [C] `crf/cq == 0` 的真无损改写：libx265 → `lossless=1`；libx264 本已无损不改写；
+#   [C] `crf/cq == 0` 的 0 档改写：libx265 → `lossless=1`（实测逐位无损）；libx264 本已无损不改写；
 #       NVENC 的 `-cq 0` → hwaccel 在 rc auto 下改写 `-rc constqp -qp 0`、否则只告警；
 #       cpu_v2 的 NVENC 是原样透传 → 一律只告警（两脚本的**差异化处理**）。
 #   [B] `--rc-mode constqp` 下不下发无效的 `-rc-lookahead`（该模式 NVENC 静默禁用）。
 #   [E] hwaccel 的 `--nvenc-aq`（`-spatial-aq`/`-temporal-aq`）；cpu_v2 无此开关。
 #   [借鉴2] rcParams 取值策略的 ffmpeg 等价表达 —— 上述 A/B/C/E，外加
-#          **lookahead ↔ 真无损耦合**：cq 0 改写为 constqp 时同给的 lookahead 一并失效。
+#          **lookahead ↔ 0 档耦合**：cq 0 改写为 constqp 时同给的 lookahead 一并失效。
 #   [借鉴1] NVENC 策略失败先按 preset 降档（`_NVENC_PRESET_RETRY`）；`_result` 带
 #          实际生效的 strategy/fallback，批汇总据此打印「实际档位」行。
 #   [更名] `--flag` → `--suffix`（硬更名：旧名报错退出 2 并给出等价写法）。
@@ -111,14 +111,14 @@ chk('② 非 constqp（vbr_hq）仍下发 -rc-lookahead',
     tokens(hw('hevc_nvenc', rc_mode='vbr_hq', cq=20, lookahead=40)[0]),
     '-cq 20 -b:v 0 -rc vbr_hq -rc-lookahead 40')
 
-print('── ③ [C] crf/cq == 0 的真无损改写 ──')
+print('── ③ [C] crf/cq == 0 的 0 档改写（NVENC 那格只是最高质量档，实测非逐位无损）──')
 chk('③ hwaccel libx265 crf0 → lossless=1',
     tokens(hw('libx265', crf=0)[0]), '-crf 0 -x265-params lossless=1')
 chk('③ cpu_v2  libx265 crf0 → lossless=1',
     tokens(cv('libx265', crf=0)[0]), '-crf 0 -x265-params lossless=1')
 chk('③ libx264 crf0 保持 -crf 0（本已无损，不改写）',
     tokens(hw('libx264', crf=0)[0]), '-crf 0')
-chk('③ NVENC cq0（hwaccel, rc=auto）→ constqp 真无损',
+chk('③ NVENC cq0（hwaccel, rc=auto）→ constqp 最高质量档',
     tokens(hw('hevc_nvenc', cq=0)[0]), '-rc constqp -qp 0 -b:v 0')
 chk('③ NVENC cq0 + 显式 rc_mode：只告警不改写（hwaccel）',
     tokens(hw('hevc_nvenc', cq=0, rc_mode='vbr_hq')[0]), '-cq 0 -b:v 0 -rc vbr_hq')
@@ -129,10 +129,10 @@ chk('③ lossless 与 lookahead 合并进同一条 -x265-params',
      set(_cmd[_cmd.index('-x265-params') + 1].split(':'))),
     (1, {'lossless=1', 'rc-lookahead=40'}))
 
-print('── ④ [借鉴2] lookahead ↔ 真无损耦合（cq0 改写后 LA 一并失效）──')
+print('── ④ [借鉴2] lookahead ↔ 0 档耦合（cq0 改写后 LA 一并失效）──')
 _cmd, _w = hw('hevc_nvenc', cq=0, lookahead=40)
 chk('④ cq0 + lookahead 后不再下发 -rc-lookahead', '-rc-lookahead' in _cmd, False)
-chk('④ cq0 仍改写为 constqp 真无损', tokens(_cmd), '-rc constqp -qp 0 -b:v 0')
+chk('④ cq0 仍改写为 constqp（最高质量档）', tokens(_cmd), '-rc constqp -qp 0 -b:v 0')
 chk_in('④ cq0 + lookahead 有告知', '未生效', _w)
 
 print('── ⑤ [E] --nvenc-aq（hwaccel 有、cpu_v2 无）──')

@@ -305,8 +305,8 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--crop-ratio` | 无 | 目标宽高比（`16:9` / `4:3` / 浮点 `1.777`），单独用时自动算最大化裁剪尺寸；与 `--output-width/height` 并用时**前者定画面比例、后者定分辨率**（`crop-cover` 下后者是裁剪后缩放覆盖的目标尺寸） |
 | `--mode` | `crop` | `crop` / `cover` / `crop-cover`（`crop-cover`=先按 `--crop-ratio`（未给出时即目标宽高比）最大化裁剪，再缩放覆盖到最终尺寸） |
 | `--codec` | `libx264` | 视频编码器；支持别名（`vp9`→`libvpx-vp9`、`av1`→`libaom-av1`、`svtav1`→`libsvtav1`、`rav1e`→`librav1e` …）；`auto` 等同 `libx264`（本脚本为纯 CPU 路径，与硬件版的 `auto` 在无 NVENC 时解析结果一致） |
-| `--crf` | `21` | CPU 编码器质量（0–51）；**字面量原样下发**，但落到只认 `-cq`/`-qp` 的编码器时会按 libx264 CRF 口径换算过去。**`0` 是无损请求** |
-| `--cq` | `23` | GPU 编码器质量（0–51）；落到 CPU 软编时按等效表换算为 CRF。**`0` 是无损请求** |
+| `--crf` | `21` | CPU 编码器质量（0–51）；**字面量原样下发**，但落到只认 `-cq`/`-qp` 的编码器时会按 libx264 CRF 口径换算过去。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档） |
+| `--cq` | `23` | GPU 编码器质量（0–51）；落到 CPU 软编时按等效表换算为 CRF。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档） |
 | `--crf-ref` | 无 | 以 **libx264 CRF** 为基准给出质量，按等效表换算到目标编码器；与 `--crf`/`--cq` 互斥。与 `--rc-mode constqp` 并用时结果落到 `-qp` |
 | `--cq-ref` | 无 | 以 **h264_nvenc CQ** 为基准给出质量，按等效表换算；与 `--crf`/`--cq` 互斥。与 `--rc-mode constqp` 并用时结果落到 `-qp` |
 | `--rc-mode` | `auto` | NVENC 码率控制模式（**只对 NVENC 编码器生效**）：`auto`=不下发 `-rc`（由 preset 决定，与不写等价）/ `constqp`（恒定 QP，需 `--qp`）/ `vbr` `vbr_hq`（可变码率）/ `cbr` `cbr_hq` `cbr_ld_hq`（恒定码率，需 `--bitrate`）。写法 `<mode>` 或 `nvenc-<mode>`（本轴只有一个后端，裸名不歧义）。⚠ 本脚本默认 `libx264` 且不做硬件探测（`--codec hevc_nvenc` 是原样透传给 ffmpeg），所以要用它得先显式 `--codec hevc_nvenc`；其它编码器下告警忽略 |
@@ -361,8 +361,8 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--scale-algo` | 裸 `lanczos` | 缩放算法，写法 `<backend>-<algo>` 或裸 `<algo>`（后端自动）。`libswscale-*`：同 v2 的那 10 个；`cuda-*`：`nearest` `bilinear` `bicubic` `lanczos`（**仅 cover 模式**，走显存内缩放，需自建 FFmpeg）。前缀用于**强制**后端；裸名字要求两表都认（只在一个后端有的必须带前缀，如 `libswscale-spline`）。降级与冲突处理见[硬件加速说明](#硬件加速说明) |
 | `--original-width/height` | 自动检测 | 手动指定源尺寸，跳过 ffprobe |
 | `--codec` | **`h264_nvenc`** | 支持 `auto`；无 NVENC 时自动降级为 **`libx264`** |
-| `--cq` | **`23`** | GPU 编码器质量（0–51）；字面量原样下发。**`0` 是无损请求**（不是普通取值，见[质量参数的换算](#质量参数的两种取值方式)） |
-| `--crf` | **`21`** | CPU 编码器质量（0–51）；字面量原样下发。**`0` 是无损请求**；落到只认 `-cq`/`-qp` 的编码器（NVENC/AMF/QSV）时**按 libx264 CRF 口径换算过去**（不再静默回落默认 CQ） |
+| `--cq` | **`23`** | GPU 编码器质量（0–51）；字面量原样下发。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档）（不是普通取值，见[质量参数的换算](#质量参数的两种取值方式)） |
+| `--crf` | **`21`** | CPU 编码器质量（0–51）；字面量原样下发。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档）；落到只认 `-cq`/`-qp` 的编码器（NVENC/AMF/QSV）时**按 libx264 CRF 口径换算过去**（不再静默回落默认 CQ） |
 | `--crf-ref` / `--cq-ref` | 无 | 统一质量基准（同上），与 `--crf`/`--cq` **互斥，混用直接报错退出**。⚠ 与 `--rc-mode constqp` **可以并用**：换算结果落到 `-qp`（qp 与 cq 同量纲），此时它与 `--qp` 属**三选一** |
 | `--rc-mode` | `auto` | NVENC 码率控制模式（**只对 NVENC 编码器生效**）：`auto`=不下发 `-rc`（由 preset 决定，与不写等价）/ `constqp`（恒定 QP，需 `--qp`）/ `vbr` `vbr_hq`（可变码率）/ `cbr` `cbr_hq` `cbr_ld_hq`（恒定码率，需 `--bitrate`）。写法 `<mode>` 或 `nvenc-<mode>`。⚠ 实际编码器是**逐策略**定的：`--codec auto` 或 NVENC 不可用而降级到 CPU 编码器时，本参数会被**告警忽略**（`--fallback-policy strict` 下改为报错退出 2） |
 | `--qp` | 无 | NVENC 恒定 QP（0–51）：只在 `--rc-mode constqp` 下生效。constqp 下与 `--crf-ref` / `--cq-ref` **三选一**（同给报错退出 2），与字面量 `--crf` / `--cq` 互斥；非 constqp 模式给了它 → 告警忽略。**落到 CPU 编码器时换算成等效 `-crf`**（不再静默丢弃、回落默认 CRF 21），`--qp 0` 是无损 |
@@ -1363,7 +1363,7 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 |---|---|---|
 | `--crf N` / `--cq N` | **字面量原样下发**给目标编码器；只有**落到不支持该量纲的编码器**时才按等效表换算（`--cq` → CPU 软编、`--crf` → 只认 `-cq`/`-qp` 的 NVENC / AMF / QSV） | 你明确知道该编码器的量纲 |
 | `--crf-ref N` / `--cq-ref N` | **统一基准轴**：`--crf-ref` 按 libx264 CRF 理解，`--cq-ref` 按 h264_nvenc CQ 理解，再按等效表换算到目标编码器；`--rc-mode constqp` 下换算结果落到 `-qp` | 跨编码器批量、希望质量一致 |
-| 任一质量参数取 **`0`** | **无损请求**：不参与线性换算，直接投影成目标编码器的无损档（见下） | 要真无损 |
+| 任一质量参数取 **`0`** | **0 档请求**：不参与线性换算，直接投影成目标编码器的 0 档（见下） | 要无损（**只有 CPU 编码器**能做到；NVENC 只是最高质量档） |
 
 ```bash
 --codec libvpx-vp9 --crf-ref 21   # → -crf 27
@@ -1374,18 +1374,25 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 
 > `-ref` 与 `--crf` / `--cq` 混用（或同时给 `--crf-ref` 与 `--cq-ref`）会**直接拒绝执行**并返回退出码 2，不会静默取其一。
 
-**`0` 是「无损」哨兵，不走线性换算。** 各编码器的 0 都是无损档（libx265 还要配 `lossless=1`、
-VP9 要配 `-b:v 0` 才是真无损），而 `a × x + b` 那套算术会把 0 当普通下界 —— 于是 `cq 0~5`
-被算成同一个"接近无损"值、甚至**意外命中目标编码器的 0（真无损）**。所以 5 路 0 值输入
-（`--crf` / `--cq` / `--qp` / `--crf-ref` / `--cq-ref`）都直接投影成目标的无损档：
+**`0` 是不走线性换算的「极值档」哨兵。** 各编码器的 0 都是极值档（libx265 还要配
+`lossless=1`、VP9 要配 `-b:v 0`），而 `a × x + b` 那套算术会把 0 当普通下界 —— 于是 `cq 0~5`
+被算成同一个"接近无损"值、甚至**意外命中目标编码器的 0**。所以 5 路 0 值输入
+（`--crf` / `--cq` / `--qp` / `--crf-ref` / `--cq-ref`）都直接投影成目标的 0 档：
 
-| 你给的（任一为 0） | 实际下发 |
-|---|---|
-| → `libx264` | `-crf 0` |
-| → `libx265` | `-crf 0` + `-x265-params lossless=1` |
-| → `libvpx-vp9` / `libvpx` | `-crf 0 -b:v 0` |
-| → `librav1e` | `-qp 0` |
-| → NVENC（任意 rc 模式） | `-rc constqp -qp 0 -b:v 0` |
+| 你给的（任一为 0） | 实际下发 | 是否**逐位**无损 |
+|---|---|---|
+| → `libx264` | `-crf 0` | ✅ 是（本机 framemd5 逐帧相同） |
+| → `libx265` | `-crf 0` + `-x265-params lossless=1` | ✅ 是（同上） |
+| → `libvpx-vp9` / `libvpx` | `-crf 0 -b:v 0` | 未实测 |
+| → `librav1e` | `-qp 0` | 未实测 |
+| → NVENC（任意 rc 模式） | `-rc constqp -qp 0 -b:v 0` | ❌ **不是**（T4 实测 43417/43448 帧不同）→ 只是**最高质量档** |
+
+> ⚠ **「0 = 真无损」只对 CPU 编码器成立。** NVENC 的 `-rc constqp -qp 0` 经 T4 实测
+> （恒等裁剪 + 逐帧 `framemd5` 哈希）**不是**逐位无损：**43417/43448 帧不同**；
+> 同一轮负向对照 `-qp 18` 是 43443/43448（装置有分辨力），而同一装置在本机的
+> libx265 / libx264 `-crf 0` 上是 **0/50**（⇒ 那个"≠0"是真测量，不是装置恒假）。
+> **要真无损请改用 `--codec libx265`（或 libx264）的 `-crf 0`。**
+> 探针 `probe/probe_lossless_qp0.sh`（含负向对照）、验收 `probe/t4_acceptance.py` C 组。
 
 反过来，**非无损换算的结果一律钳到 ≥1**：线性表在低端会把小值算成 0 从而**意外命中"无损"**
 （`--cq 4 --codec libx264` 曾得到 `-crf 0` = 真无损、文件巨大；现在是 `-crf 1`）。
@@ -1466,11 +1473,15 @@ CRF/CQ 管"画质档"，这一组管**码率控制模式**与**前向预测**。
   "受码率约束的恒定质量"而非纯恒定质量（对照 Video_Enhancement 的 `-cq:v N -b:v 0`）。
   显式给了 `--bitrate` 时**不补**这个 0——此时用户要的正是受限质量。只影响 NVENC 的 `-cq`，
   其它编码器/模式逐字不变。
-- **`--crf 0` / `--cq 0` 的真无损改写**：`libx264` 的 `-crf 0` 本已无损，不改写；`libx265`
+- **`--crf 0` / `--cq 0` 的 0 档改写**：`libx264` 的 `-crf 0` 本已无损，不改写；`libx265`
   的 `-crf 0` 只是近无损 → 追加 `lossless=1`（并入同一条 `-x265-params`）；NVENC 的 `-cq 0`
   不是无损 → hwaccel 在 `--rc-mode auto`（默认）时改写为 `-rc constqp -qp 0 -b:v 0` 并提示，
   用户显式给了别的 rc 模式时只告警；**cpu_v2 的 NVENC 是原样透传（无逐策略硬件判定），一律
   只告警、不改写**——这是两脚本的差异化处理。
+  ⚠ 那个改写得到的是**最高质量档**、**不是**逐位无损（T4 实测 43417/43448 帧不同，见
+  [质量参数的两种取值方式](#质量参数的两种取值方式)）；两条告警文案也据此把
+  "如需无损请用 `--rc-mode constqp --qp 0`"改成了"要真无损请改用 libx265 / libx264 的
+  `-crf 0`"（**原建议是错的**：`-qp 0` 同样不无损）。
 - **`--nvenc-aq`**（仅 hwaccel）：给 NVENC 策略加 `-spatial-aq 1 -temporal-aq 1`，默认关闭。
 
 ```bash
@@ -1504,7 +1515,7 @@ CRF/CQ 管"画质档"，这一组管**码率控制模式**与**前向预测**。
 | `--decode cpu` 不再等于纯 CPU | 旧 `--hwaccel none` 会把整块 GPU 一起关掉；现在 `--decode cpu` 只关解码，`--scale-algo auto` 仍会优先尝试显存内缩放（软解时走 `hwupload_cuda`），`--codec` 默认仍是 `h264_nvenc` | 要纯 CPU 用三轴写法 `--decode cpu --scale-algo libswscale-lanczos --codec libx264`（会跳过全部 GPU 探测） |
 | 旧名 `--hwaccel` 与三个旧 `--fallback-policy` 值已删除 | `--hwaccel` 硬更名成 `--decode`；`strict-cuda` / `nvenc-only` / `cpu-only` 不是"策略"而是"三轴预设"，已移除 | 用旧名/旧值都会报错退出 2，并在提示里给出可直接抄的等价写法 |
 | 旧名 `--flag` 已更名为 `--suffix` | 只是名字换了，取值与语义完全不变（输出名后缀标记）。两脚本同批更名 | 把 `--flag X` 原样换成 `--suffix X` 即可；用旧名会被硬拒绝（退出 2，`[ERROR] --flag 已更名为 --suffix …`），不做静默兼容 |
-| NVENC `--cq 0` 与 `--lookahead` 同给时 lookahead 会被丢弃 | `--cq 0`（hwaccel、`rc auto`）会被改写成真无损的 `-rc constqp`，而 **constqp 下 NVENC 静默禁用 lookahead**（对照 Video_Enhancement：crf=0 强制 constqp 且 LA=0）。若不处理，`-rc-lookahead` 会是一条不生效的选项 | 脚本**主动摘掉**该 `-rc-lookahead` 并告警说明原因（`--lookahead N 未生效…已忽略`）；要保留 lookahead 就别用 `--cq 0`（真无损与 lookahead 天然互斥） |
+| NVENC `--cq 0` 与 `--lookahead` 同给时 lookahead 会被丢弃 | `--cq 0`（hwaccel、`rc auto`）会被改写成 `-rc constqp`（**最高质量档**，非逐位无损），而 **constqp 下 NVENC 静默禁用 lookahead**（对照 Video_Enhancement：crf=0 强制 constqp 且 LA=0）。若不处理，`-rc-lookahead` 会是一条不生效的选项 | 脚本**主动摘掉**该 `-rc-lookahead` 并告警说明原因（`--lookahead N 未生效…已忽略`）；要保留 lookahead 就别用 `--cq 0`（真无损与 lookahead 天然互斥） |
 | 硬件解码能力**分编解码器**，不是"有 / 没有" | 能力探测里的 `has_decoder` 是拿 **H.264 微流**探出来的**机器级**标志；而 NVDEC 实际是分编解码器的——T4（Turing）能解 H.264 / HEVC / VP9 / MPEG-2/4 / VC-1，但**解不了 AV1**（要 Ampere 起的第 5 代）。拿机器级标志推断"这个源能硬解"会误判，代价不只是多一次无用尝试：`--decode auto` 会让每个 AV1 文件都白跑一次必然失败的链；`--fallback-policy strict` 下更是直接退出 2，而这条素材走软解其实完全可行（实测 `[av1 @ ...] Failed setup for format cuda: hwaccel initialisation returned error`） | 现在按**源编解码器**用**真实输入**试解 1 帧（`-frames:v 1 -f null`，几十毫秒），结果按 codec 名缓存、一批文件只探一次；解不了就按软解处理并提示，显式 `--decode cuda` + `strict` 则提前报错（不会白跑一次转码才发现）。正常素材（H.264 / HEVC）只多这一次 1 帧解码，命令逐字不变 |
 | **软解 + `hwupload_cuda` 只在高位深且真缩放时划算** | 上载 / 回下载开销固定，而 p010le 的 CPU 缩放比 8bit 贵得多。T4 两批共 12 组素材实测：**源 ≥10bit 且真在缩放 → +14~25%**；8bit 真缩放 → **+0.4% ~ −14%**；**恒等缩放（无论位深）→ −1.6% ~ −34.7%**（注意 10bit 恒等也是 −22%）。绝对值上软解链路整体 44~46s，而硬解零拷贝只要 12.8s | 有硬解时永远该走硬解。`--scale-algo auto` 只在显式 `--decode cpu` 下才自动走它，且要过两道关：**功能探针**（链真能跑通）+ **值不值**（≥10bit 且非恒等）；不满足时会打印具体理由。要强制使用请显式写 `--scale-algo cuda-lanczos` |
 | 显式 `cuda-*` 执行失败要等到运行期才发现 | `--scale-algo cuda-*` **不跑功能探针**（按设计直接执行） | `--fallback-policy auto`（默认）会自动降级到 `libswscale-<同档>`；要"不可用就报错"用 `strict` |
@@ -1524,8 +1535,8 @@ CRF/CQ 管"画质档"，这一组管**码率控制模式**与**前向预测**。
 | **QVBR（质量定义可变码率）在 ffmpeg CLI 上拿不到，且与 ffmpeg 版本无关** | QVBR 是 **NVENC SDK 的能力**（`NV_ENC_PARAMS_RC_QVBR`），只有直编 SDK 才能设——Video_Enhancement 的 SDK 路径能设（`nvenc_sdk.py` 里 `rc_ptr[1] = 64`），它的 ffmpeg 路径也把 `qvbr` 映射回 `vbr_hq`。而 **ffmpeg 的 nvenc 没有把 `qvbr` 注册进 `-rc` 取值**：本机 `N-122480`（2026-01，晚于 7.1）实测 `-rc qvbr` 直接 `Unable to parse "rc" option value "qvbr"`（`-h encoder=h264_nvenc` 的 `-rc` 枚举只有 `constqp / vbr / cbr / vbr_hq / cbr_hq / cbr_ld_hq`），master 的 `libavcodec/nvenc.h` 里也没有 `qvbr`/`QVBR` 字样。⚠ **不是"老版本不支持、升到 7.1+ 就行"**——别照这个前提去改 | 本工具是**纯 ffmpeg CLI**，故**不提供 `qvbr`**。要"质量优先、码率随内容浮动"就用 `--rc-mode vbr_hq --cq N`（ffmpeg 侧即 `-rc:v vbr_hq -cq:v N -b:v 0`，VBR + 质量目标，与 QVBR 语义最接近；`-b:v 0` 由脚本自动补）。真要 QVBR 只能走 NVENC SDK 直编，那不是本工具的形态 |
 | `--lookahead` 的默认值三边不同 | NVENC 的 `-rc-lookahead` 默认 **0（关闭）**、x265 默认 **20**、x264 由自身决定（ffmpeg 侧默认 -1 = 交给 x264）。两个脚本默认编码器不同（hwaccel `h264_nvenc` / v2 `libx264`），所以"都不写"时同一批素材的前向预测深度本来就不一样 | 要一致就显式给 `--lookahead N`。本参数默认**不下发**，不改变现有行为 |
 | NVENC 的 `-cq` 现在默认配 `-b:v 0` | 过去只发 `-cq`，ffmpeg 会用默认码率上限约束 CQ（语义是受限质量）；现在补齐 `-b:v 0` 得到纯恒定质量。**这是相对旧版的行为变化**（NVENC + `--cq` 的命令多了一个 `-b:v 0`） | 想要旧的"受码率约束"语义就显式 `--bitrate 8M`；三个 dump 基线已按新行为更新（`test/baseline/enc_before.txt`） |
-| `--crf 0` / `--cq 0` 的真无损 | `libx265` 的 `-crf 0` **不是**无损（只是近无损），需 `lossless=1`；NVENC 的 `-cq 0` 也不是无损。过去直接下发会有"以为无损、实为有损"的落差 | 现在自动改写：x265 → `lossless=1`；NVENC（hwaccel、`rc auto`）→ `-rc constqp -qp 0 -b:v 0`；改不了时（显式 rc 模式 / cpu_v2 的透传路径）告警并指路 |
-| **质量参数的 `0` = 无损（2026-09-24 统一）** | 各编码器的 `0` 都是无损档，而线性换算表把 `0` 当普通下界 → 后果有三：`cq 0~5` 全部算成同一个值；`--cq 4 --codec libx264` **意外得到 `-crf 0`**（真无损、文件巨大）；`--qp 0` / `--cq 0` 降级到 libx265 只得到 `-crf 3`（**不是无损**） | 现在 5 路 0 值输入（`--crf` / `--cq` / `--qp` / `--crf-ref` / `--cq-ref`）**统一投影成目标编码器的无损档**（`-crf 0 [+ -x265-params lossless=1]` / `-rc constqp -qp 0 -b:v 0` / `-qp 0`(rav1e)），且**非无损换算结果一律钳到 ≥1**。⚠ 低端取值（如 `--cq 1~5` 落到 libx264 / libvpx-vp9）在等效表里分辨不出来（被钳到同一个最小值）——这是线性表的固有低端饱和，不是 bug。判据 `verify/verify_quality_mapping.py` |
+| `--crf 0` / `--cq 0` 的「0 档」 | `libx265` 的 `-crf 0` **不是**逐位无损（只是近无损），需 `lossless=1`；NVENC 的 `-cq 0` / `-qp 0` **也不是**（T4 实测 43417/43448 帧不同）。过去直接下发会有"以为无损、实为有损"的落差 | 现在自动改写：x265 → `lossless=1`（本机实测**逐位无损**）；NVENC（hwaccel、`rc auto`）→ `-rc constqp -qp 0 -b:v 0`（**最高质量档**，非逐位无损）；改不了时告警并指路。⚠ **要真无损只能用 CPU 编码器的 `-crf 0`**（libx265 / libx264，本机 framemd5 已证）。探针 `probe/probe_lossless_qp0.sh` |
+| **质量参数的 `0` = 0 档（2026-09-24 统一）** | 各编码器的 `0` 都是「极值档」（**CPU 编码器上实测逐位无损；NVENC 只是最高质量档**），而线性换算表把 `0` 当普通下界 → 后果有三：`cq 0~5` 全部算成同一个值；`--cq 4 --codec libx264` **意外得到 `-crf 0`**（真无损、文件巨大）；`--qp 0` / `--cq 0` 降级到 libx265 只得到 `-crf 3`（**不是无损**） | 现在 5 路 0 值输入（`--crf` / `--cq` / `--qp` / `--crf-ref` / `--cq-ref`）**统一投影成目标编码器的无损档**（`-crf 0 [+ -x265-params lossless=1]` / `-rc constqp -qp 0 -b:v 0` / `-qp 0`(rav1e)），且**非无损换算结果一律钳到 ≥1**。⚠ 低端取值（如 `--cq 1~5` 落到 libx264 / libvpx-vp9）在等效表里分辨不出来（被钳到同一个最小值）——这是线性表的固有低端饱和，不是 bug。判据 `verify/verify_quality_mapping.py` |
 | **两脚本的 `-threads` / `-pix_fmt` 已统一（2026-09-24）** | 此前 cpu_v2 恒发 `-threads`（含硬件编码器）且恒发 `-pix_fmt yuv420p`——后者在 8bit 源上把 4:2:2 / 4:4:4 **静默降色度**（实测 yuv444p 源：hwaccel 出 yuv444p、cpu_v2 出 yuv420p）；hwaccel 则两个都不发 | 现在一致：`-threads` 只对**软件编码器**下发（`0`=自动，按 cgroup 配额算核数，不超订）；`--pix-fmt auto` + 8bit 源两边都**不下发** `-pix_fmt`。同一条逻辑请求下两脚本的完整命令已逐字可比（第四道门 `test/dump_cmd_full.sh`，17 用例）。⚠ **NVENC 轴仍不同**：hwaccel 会真降级到 CPU 编码器、cpu_v2 是原样透传 NVENC——能力差异，不是分叉 |
 | **奇数输出尺寸现在两脚本都拒绝**（2026-09-24 补齐） | hwaccel 的 `validate_output_dimensions()` 此前**零调用点**（死代码）⇒ `--output-width 641` 会一路带到 ffmpeg、直到编码器初始化才报错；cpu_v2 早就有这道校验 | 现在两脚本的退出码与报错首行一致（`[ERROR] 像素格式 yuv420p 要求输出宽高均为偶数；当前为 641x360`）。⚠ `--crop-ratio` 推导出的尺寸天然是偶数（`derive_even_dimension`），不受影响。判据 `verify/verify_cli_parsing.py` |
 | **`--extra-args -- <参数>`（文档教的写法）曾报 `unrecognized`**（2026-09-24 已修） | argparse 的 `nargs=REMAINDER` **从 Python 3.12 起不再容忍开头的 `--`** ⇒ `--extra-args -- -max_muxing_queue_size 4096` 直接报错，`normalize_extra_args()` 里剥 `--` 的那段因此长期是死代码 | 现在自己预切 argv（`_split_extra_args`）：带 `--` 与不带两种写法都能用，且 `--help` 里的选项说明不受影响。判据 `verify/verify_cli_parsing.py`；第四道门里那一格用的就是文档写法 |

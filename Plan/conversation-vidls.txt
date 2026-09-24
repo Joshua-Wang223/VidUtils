@@ -1,0 +1,704 @@
+
+> 编写一个脚本，代替 ls/ll 
+  命令的功能，并且增加对视频属性信息的探测显示，如分辨率/帧率/比特率/帧数/编码器/容器等信息。借鉴项目中其他脚本的系统资源自动探测和自动最大化并行能力，可以GPU加速硬解 
+  或自动降级CPU软解，当CPU软解时自动降级为只从属性包中获取需要的信息，如从 stream=nb_read_frames 自动降级为 stream=nb_read_packets 等（只是启发不是仅限于） 
+
+ Let me start by exploring the project to understand its structure and conventions.
+
+● I'll explore the project structure first to understand conventions and existing scripts.
+
+● Bash(ls -la /workspace/VidUtils)
+  ⎿ total 972
+    drwxr-xr-x 1 root root 518 Sep 16 04:57 .
+    drwxr-xr-x 1 root root 1782 Sep 16 05:10 ..
+    ...+16 line (ctrl+o to expand)
+
+● Read(../../root/.codebuddy/projects/workspace-VidUtils/memory/MEMORY.md)
+  ⎿ Read 6 lines (ctrl+o to expand)
+
+ Let me read the memory files and explore the project. Let me look at existing scripts for auto-detection patterns. The large files are vidcrop_hwaccel.py (162KB),
+ vidcrop_cpu_v2.py (132KB), interp_2x_safe.sh (87KB). Let me explore for patterns like GPU detection, resolve, parallelism.
+ Let me read the memory files and README relevant sections.
+
+● Read(../../root/.codebuddy/projects/workspace-VidUtils/memory/feedback_scope_env_changes.md)
+  ⎿ Read 16 lines (ctrl+o to expand)
+
+● Read(../../root/.codebuddy/projects/workspace-VidUtils/memory/feedback_update_project_memory.md)
+  ⎿ Read 21 lines (ctrl+o to expand)
+
+● Read(../../root/.codebuddy/projects/workspace-VidUtils/memory/project_concurrent_sessions.md)
+  ⎿ Read 20 lines (ctrl+o to expand)
+
+● Bash(ls -la /root/.codebuddy/projects/workspace-VidUtils/memory/; ls -la /workspace/VidUtils/memory/ 2>/dev/null | head -50)
+  ⎿ total 16
+    drwxr-xr-x 1 root root 202 Sep 16 04:44 .
+    drwxr-xr-x 1 root root 1284 Sep 16 05:48 ..
+    ...+14 line (ctrl+o to expand)
+
+ Let me read the project memory files (in repo memory/) to understand conventions, and explore the existing scripts. This is a big task. Let me use the Explore agent
+ to gather patterns about system resource detection and parallelism, while I read memory files.
+ Actually, let me be efficient. I'll launch an Explore agent to investigate the auto-detection/parallelism patterns in vidcrop_hwaccel.py, vidcrop_cpu_v2.py,
+ convert_crf.py, and interp_2x_safe.sh. Meanwhile I read the repo memory.
+ Let me do that.
+
+● Read(memory/MEMORY.md)
+  ⎿ Read 52 lines (ctrl+o to expand)
+
+> 提醒：脚本应能自动区分当前路径下的视频文件，非视频自动回归原有的 ls/ll 显示 
+
+ The user added a reminder: the script should automatically distinguish video files in the current path, and non-video files fall back to the original ls/ll display.
+ So essentially: a drop-in ls/ll replacement that, for video files, shows extra video properties; for non-video files, shows normal ls output.
+ Let me gather a bit more concrete info about the environment: what ffmpeg/ffprobe is available, python version, and check some existing code snippets. Also I need to
+ plan the implementation.
+ ... 7 more lines (press Ctrl+O to expand)
+
+● Bash(which ffmpeg ffprobe python3 ls; echo "---"; ffmpeg -version 2>&1 | head -3; ec…"; nvidia-smi -L 2>&1 | head -5; echo "---"; ffmpeg -hide_banner -hwaccels 2>&1)
+  ⎿ /usr/local/bin/ffmpeg
+    /usr/local/bin/ffprobe
+    /root/.pyenv/shims/python3
+    ...+19 line (ctrl+o to expand)
+
+● Bash(cd /workspace/VidUtils && git log --oneline -8 && echo "---" && git status --short && echo "--- branch" && git rev-parse --abbrev-ref HEAD)
+  ⎿ fc2cb4d (HEAD -> main, origin/main) fix(cpu_v2): --codec auto 解析为 libx264，与硬件版在无 NVENC 时一致
+    c4bc810 fix: 降级 preset 保持等效 + 概览只显示最终命令里真有的参数
+    a985e04 docs: 修正工程记忆里 orphan 套件的断言数（13 → 17）
+    ...+9 line (ctrl+o to expand)
+
+ Environment: ffmpeg 7.1 at /usr/local/bin, ffprobe present, python3 3.11.1, T4 GPU, hwaccels: cuda, drm. No vaapi/vulkan listed. nvidia-smi works here (unlike memory
+ note earlier).
+ Now let me look at key code sections I need to mirror precisely. Let me read:
+ - vidcrop_cpu_v2.py _detect_cpu/_detect_memory_gb/detect_system_resources/compute_parallelism/_label
+ ... 3 more lines (press Ctrl+O to expand)
+
+● Read(vidcrop_cpu_v2.py)
+  ⎿ Read 81 lines (ctrl+o to expand)
+
+● Read(vidcrop_cpu_v2.py)
+  ⎿ Read 211 lines (ctrl+o to expand)
+
+ Now let me look at the hwaccel probe functions and ffprobe helpers, plus _label and _ffmpeg_env.
+
+● Read(vidcrop_hwaccel.py)
+  ⎿ Read 181 lines (ctrl+o to expand)
+
+● Read(vidcrop_hwaccel.py)
+  ⎿ Read 141 lines (ctrl+o to expand)
+
+ Now let me look at the CUDA decoder probe and _ffmpeg_env, and the _label function.
+
+● Read(vidcrop_hwaccel.py)
+  ⎿ Read 131 lines (ctrl+o to expand)
+
+● Read(vidcrop_hwaccel.py)
+  ⎿ Read 101 lines (ctrl+o to expand)
+
+ Now I have enough on hwaccel patterns. Let me check `_ffmpeg_env` and `_label`, plus the README structure for the tool list and matrix. Also check `interp_2x_safe.sh`
+ for `have_filter` and the GPU detection summary line format.
+ Let me read _ffmpeg_env and _label.
+
+● Search(pattern: "def _ffmpeg_env|def _label|_SEP\s*=", path: "vidcrop_hwaccel.py")
+  ⎿ Found 56 lines (ctrl+o to expand)
+
+ Now let me check the README structure to know what to update. Let me read the tool list / matrix / memory sections.
+
+● Bash(cd /workspace/VidUtils && grep -n "^#\{1,4\} \|^### \`" README.md | head -120)
+  ⎿ 1:# VidUtils · 视频实用工具集
+    10:## 目录
+    41:## 项目简介
+    ...+65 line (ctrl+o to expand)
+
+ Let me read README sections: TOC (10-41), 功能矩阵 (54-103), 工具一览 intro (162-194), 安装 (142-162), 路线图 (1029-1064), 目录结构 (1064-1087), 工程记忆 (1087-1126).
+ Let me read the relevant ones.
+
+● Read(README.md)
+  ⎿ Read 201 lines (ctrl+o to expand)
+
+ Now let me read README 路线图, 目录结构, 工程记忆 sections.
+
+● Read(README.md)
+  ⎿ Read 131 lines (ctrl+o to expand)
+
+ Now I have enough understanding. Let me design the plan and enter plan mode to get user sign-off, since there are design decisions (name, alias integration, exact
+ columns).
+ Actually, the user gave a detailed brief including the reminder. I think the right move: enter plan mode, write plan, ask a few clarifying questions about name/output
+ style. Let me use AskUserQuestion for key decisions first, or just plan and present.
+ Key decisions:
+ ... 25 more lines (press Ctrl+O to expand)
+
+● I have enough context on the repo's conventions. Before writing the script, there are a few design decisions worth aligning on — let me plan this properly.
+
+● Entered plan mode
+  ⎿  CodeBuddy is now exploring and designing an implementation approach.
+
+ I've done Phase 1 exploration already (one Explore agent + reads). Now let me ask clarifying questions.
+ Key questions:
+ 1. Default output mode when no flags: mimic `ls` (multi-column names) or `ll` (long format with video props)?
+ ... 26 more lines (press Ctrl+O to expand)
+
+● User answered CodeBuddy's questions:
+  ⎿ · 不带参数时，脚本默认用哪种版式？（非视频文件始终走原生的 ls/ll 渲染） → 默认 ls 多列名
+    · 脚本命名？（仓库约定是 vid<动词>.py，路线图已占 vidscale/vidrepair/videnhance） → 能否用 vidls.sh 并加入 path, 方便随时调用
+    · 视频属性探测的默认深度策略？ → 选择1，但需要增加 --cpu 参数（默认false）便于对比测试。
+    ...+2 line (ctrl+o to expand)
+
+ User's answers:
+ 1. Default = ls multi-column names. So default behaves like `ls`. `-l`/ll → long format with video props.
+ 2. Name: they ask "能否用 vidls.sh 并加入 path, 方便随时调用" — they want a Bash script `vidls.sh` and to add it to PATH for easy invocation. Hmm. The repo's
+ Python-native convention, but user explicitly wants `vidls.sh`. Wait — "能否用 vidls.sh 并加入 path" =
+ "Can we use vidls.sh and add it to PATH, so it's convenient to call anytime".
+ ... 31 more lines (press Ctrl+O to expand)
+
+● Two things need pinning down before I write the plan.
+
+● User answered CodeBuddy's questions:
+  ⎿ · 默认“ls 多列名”模式下，六项视频属性往哪里放？ → 分组：普通文件多列 + 视频行带属性（推荐）
+    · “加入 PATH 方便随时调用”具体怎么做？（会改动工作区之外的系统/ rc 文件，所以先确认） → 只加 vidls 命令（推荐）
+    · vidls.sh 用纯 bash 实现，还是允许内部调用 python？ → 哪种方式并行性能更优其稳定？
+
+ The user asked a question back: "哪种方式并行性能更优其稳定？" (which approach has better parallel performance and stability?)
+ I should answer that. In bash, parallelism = background subshells + wait. In Python, ThreadPoolExecutor + subprocess — actually the bottleneck is ffprobe
+ subprocesses, so both are I/O-bound concurrent process spawning. Python's ThreadPoolExecutor is easier to bound, collect results deterministically, handle timeouts,
+ and avoid the repo's documented bash pitfalls (wait -n early return, tail<() hang, orphan processes — see project_bash_parallel_pitfalls.md). Also JSON parsing in
+ Python avoids fragile key=value parsing. Performance is essentially identical since both just spawn N ffprobe processes; the concurrency limit matters more than the
+ language.
+ So recommendation: Python core for the parallel probing + JSON parsing; but named vidls.sh? They asked for vidls.sh. Hmm — a .sh wrapper calling vidls.py is a bit odd
+ since repo is python-native. But user explicitly wanted `vidls.sh` + PATH entry.
+ ... 12 more lines (press Ctrl+O to expand)
+
+● Direct answer to your question: for parallel stability, Python wins; throughput is a tie.
+
+  - Both approaches just spawn N concurrent ffprobe processes, so wall-clock is the same — the bottleneck is the concurrency limit, not the language.
+  - But this repo already has a memory file (memory/project_bash_parallel_pitfalls.md) documenting four bash scheduling traps they hit: wait -n returning early, while 
+  read < <(tail) hanging forever, orphan processes from subshells, and fragile instance matching. Reproducing a correct bounded pool in bash means re-solving those.
+  - Python's ThreadPoolExecutor + subprocess.run(timeout=...) gives deterministic result collection, per-file timeouts, and json.loads instead of fragile key=value
+  scraping.
+
+  So: vidls.sh as a thin launcher + vidls.py as the engine. Let me delegate the riskiest design piece (faithfully reimplementing ls layout) while I nail down the rest.
+
+● Bash(cd /tmp && printf 'a\nb\nc\n' > /dev/null; echo "== col util =="; which column …ils | cat | head -3; echo "== ls -1 vs grid =="; ls /workspace/VidUtils | wc -l)
+  ⎿ == col util ==
+    /usr/bin/column
+    /usr/bin/jq
+    ...+14 line (ctrl+o to expand)
+
+ Note: jq IS available. But relying on jq adds a dependency. Python is fine.
+ Now I have a solid design. Let me write the plan file.
+ Let me settle the design details:
+ ... 109 more lines (press Ctrl+O to expand)
+
+● Design is settled. Writing the plan.
+
+● Updated plan
+  └ /plan to preview
+  ⎿ ../../root/.codebuddy/plans/swift-beacon-tesla-ZcVY6njD.md with 129 additions
+
+      1 +  # vidls — ls/ll 替代 + 视频属性探测
+      2 +  
+      3 +  ## 已确认的决策
+      4 +  
+      5 +  | 事项 | 决定 |
+      6 +  |---|---|
+      7 +  | 交付物命名 | `vidls.sh`（bash 启动器）+ `vidls.py`（内核） |
+      8 +  | PATH 接入 | `/usr/local/bin/vidls` → `vidls.sh` 软链（**只加这一个命令**，不动 `ls`/`ll`） |
+      9 +  | 默认版式 | `ls` 多列名，**分组**渲染：普通文件按多列网格；视频每条独占一行并带属性列 |
+     10 +  | `-l` 版式 | `ll` 长格式（权限/链接/属主/属组/大小/时间/名），视频名后追加属性列 |
+     11 +  | 探测深度 | 自动：CUDA 硬解可用 → `-count_frames` 精确数帧；否则降级属性包 |
+     12 +  | 强制 CPU | `--cpu`（默认 false），跳过 GPU 探测，直接走降级链，便于对比测试 |
+     13 +  | 恒显字段 | 分辨率 / 帧率 / 比特率 / 帧数 / 编码器 / 容器 / 时长（7 项） |
+     14 +  | 可选字段 | 像素格式+位深、音轨概览、字幕+HDR，用 `--show` / `--all` 控制 |
+     15 +  | 语言内核 | Python 3（纯标准库）。理由：并行下 `ThreadPoolExecutor` 比 bash 后台池稳（仓库 `memory/project_bash_parallel_pitfalls.md` 记了 bash 调度
+        + 的四个坑）；量级上两者都只是并起 ffprobe 子进程，吞吐打平 |
+     16 +  
+     17 +  ---
+     18 +  
+     19 +  ## 要新增的文件
+     20 +  
+     21 +  ### 1. `/workspace/VidUtils/vidls.py`（核心，纯标准库）
+     22 +  
+     23 +  **入口与参数**（沿用仓库 argparse 风格：中文 help、`RawDescriptionHelpFormatter`、`epilog` 放示例）
+     24 +  - `add_help=False` + 显式 `--help`，把 `-h` 让给 `--human-readable`（**ls 兼容，必须**；argparse 默认 `-h` 是 help，冲突）
+     25 +  - `-l/--long`（ll 长格式）、`-1`（每行一个）、`-a/--all`、`-A`、`-d`、`-t`、`-S`、`-r`、`-h/--human-readable`
+     26 +  - `--cpu`（强制 CPU 降级链）、`--fast`（永不解码）、`--deep`（强制精确数帧）
+     27 +  - `--show LIST`（`pixfmt,bits,audio,subs,hdr` 逗号列表）、`--all`（≡ 全部可选）
+     28 +  - `-j/--jobs N`（探测并发，0=自动）、`--ffmpeg-bin`、`-v/--verbose`
+     29 +  - 位置参数：路径列表，缺省 `.`
+     30 +  
+     31 +  **A. 条目收集与分类**
+     32 +  - `os.scandir` 收集 + `lstat`；`-a` 补 `.`/`..`，`-A` 只补隐藏项不含 `.`/`..`；`-d` 不展开目录
+     33 +  - 视频判定：扩展名白名单（以 `vidcrop_cpu_v2.py:144` 的 `VIDEO_EXTS` 为基线，补 `.m2ts/.mts/.vob/.ogv/.3gp/.mxf/.rmvb/.asf/.f4v/.y4m`）
+     34 +  - 排序：`locale.setlocale(LC_COLLATE, "")` + `locale.strxfrm` 作 key，失败回落 `str`（≈ `LC_ALL=C` 字节序）。**合并列表只排一次**，不把视频单独排
+     35 +  
+     36 +  **B. 系统资源探测**（镜像 `vidcrop_cpu_v2.py:341-533`）
+     37 +  - `_detect_cpu()`：cgroup v2 `cpu.max` → cgroup v1 quota → `sched_getaffinity` → `os.cpu_count`，返回 `(cores, 来源)`
+     38 +  - `_detect_memory_gb()`：cgroup v2（扣 `file`+`slab_reclaimable`）→ cgroup v1 → `/proc/meminfo` → Windows → 兜底
+     39 +  - `compute_probe_parallelism(n_videos, cpu, mem)`：`workers = min(cpu, 可用内存/每路预留, n_videos)`，常量沿用 `_MAX_USABLE_RATIO=0.80`、`_MIN_SYSTEM_
+        + RESERVE_GB=0.2`，每路预留 `0.1GB`（ffprobe 很轻）
+     40 +  - **深解档额外封顶** `HW_DECODE_MAX_JOBS = 4`（T4 上并发 NVDEC 会抢显存；可用 `-j` 覆盖）
+     41 +  - 资源行只在 `-v` 时打到 stderr —— 默认不能像裁剪脚本那样刷屏
+     42 +  
+     43 +  **C. GPU 探测与降级**（镜像 `vidcrop_hwaccel.py:308-330`、`:597-672`）
+     44 +  - `_ffmpeg_env()`：照抄 `LIBGCRYPT_FORCE_FIPS_MODE=0` + `NVIDIA_VISIBLE_DEVICES` / `NVIDIA_DRIVER_CAPABILITIES` / CUDA 库路径补全
+     45 +  - `_check_cuda_decoder_available()`：`testsrc2=yuv420p` 生成微型 H.264（**不能用 `testsrc`，默认 4:4:4 硬解必挂**）→ `-hwaccel cuda -hwaccel_device 0 
+        + -frames:v 1 -f null -`，命中 CUDA 错误关键字表即判不可用；全部子进程带 `-nostdin` 且 `stdin=DEVNULL`（`memory/project_ffmpeg_stdin_hang.md`）
+     46 +  - 结果进程内缓存一次；`--cpu` / `--fast` 直接跳过探测
+     47 +  - 降级：GPU 精确数帧失败 → 该文件回落到包数档，并置全局标志**不再重试 GPU**（对齐 `interp_2x_safe.sh` 的 `gpu_probe_adjust` 思路）
+     48 +  
+     49 +  **D. 帧数四级降级链**（每条结果带**来源标签**，展示时标注可信度）
+     50 +  
+     51 +  | 档 | 手段 | ffprobe 参数 | 成本 | 标签 |
+     52 +  |---|---|---|---|---|
+     53 +  | 1 | 容器头 | 主探测里的 `stream=nb_frames` | 免费 | `包头` |
+     54 +  | 2 | 硬解数帧 | `-hwaccel cuda -count_frames -show_entries stream=nb_read_frames` | 解码（GPU） | `硬解` |
+     55 +  | 3 | 只数包不解码 | `-count_packets -show_entries stream=nb_read_packets` | 仅解复用 | `包数` |
+     56 +  | 4 | 估算 | `duration × fps` | 免费 | `估算` |
+     57 +  
+     58 +  档 1 免费所以永远先试；档 2 仅 GPU 可用时走（用户要的 `--cpu` 就落到档 3）；档 3 是 CPU 侧的"降级为从属性包获取"；档 4 兜底。渲染成 `9 660 帧[包头]`。
+     59 +  
+     60 +  **E. 元数据主探测**（镜像 `probe_full_metadata`，`vidcrop_hwaccel.py:1460`）
+     61 +  - 一次 `ffprobe -v error -print_format json -show_format -show_streams -show_chapters`，`timeout=15`，按 `abspath|size|mtime` 进程内缓存
+     62 +  - 取出：容器名（`mov,mp4,m4a,...` → `mp4` 归一）、`duration`、`bit_rate`、视频流 codec / 宽高（含 displaymatrix 旋转后的实际显示尺寸）/ 帧率（`avg_fra
+        + me_rate` 优先，回落 `r_frame_rate`）/ `pix_fmt` / 位深 / HDR 色彩标记；音频流（编码/声道/采样率/语言）；字幕流（数量+编码）
+     63 +  - 比特率优先 `format.bit_rate` → `stream.bit_rate` → `文件大小×8/duration`
+     64 +  
+     65 +  **F. 版式渲染**
+     66 +  - **display width 感知**：`disp_width()` 按 `unicodedata.east_asian_width` 计宽（CJK 记 2），重实现 `_label` 的对齐逻辑（`vidcrop_hwaccel.py:2767`）
+     67 +  - 默认分组模式：按排好序的列表走一遍，把**连续的非视频项**攒成 run，每个 run 用 coreutils 的列算法铺网格；视频行就地整行输出
+     68 +    - coreutils 算法（`calculate_columns`，实测校验过）：**竖着填**（column-major）；`rows=ceil(N/cols)`；每列宽 = 该列显示宽最大值 **+2（最后一列不加）
+        + **，下限 `MIN_COLUMN_WIDTH=3`；`sum(colw) < 终端宽` **严格小于**才成立；从最大可能列数往下试
+     69 +    - 终端宽：`os.get_terminal_size(stdout)` → `$COLUMNS` → `80`
+     70 +    - **有意与 ls 不同**：ls 在非 TTY 时退化成每行一个；本工具默认仍用网格（宽 80），保证管道里也是紧凑的
+     71 +    - 视频属性列：先遍历一遍所有视频求出每列宽度，再统一对齐输出（不是每条自己对齐）
+     72 +  - `-l` 模式：`stat.filemode` + nlink + 属主/属组（`pwd.getpwuid`/`grp.getgrgid`，查不到回落数字）+ 大小 + mtime + 名，宽度按**全部条目**统一计算
+     73 +    - `-h` 人类可读：base 1024，后缀 `KMGTPEZY`，**向上取整**（coreutils 是 ceiling）；`<10` 保留 1 位小数，否则整数
+     74 +    - mtime：`six_months_ago = now - 31556952/2`；`>6个月` 或未来时间 → `%b %e  %Y`，否则 `%b %e %H:%M`
+     75 +    - 目录列表头打印 `总用量 N`（`sum(st_blocks)//2`）
+     76 +  - **不做 ANSI 配色**（仓库一致做法）；视频行本身带属性、`-l` 里目录有 `d`，不需要额外标记符，从而避开宽字符对齐的坑
+     77 +  
+     78 +  **G. 并行探测**
+     79 +  - 只对视频条目开 `ThreadPoolExecutor`（非视频只要 stat），`as_completed` 收集后按原索引回填，**输出顺序稳定**
+     80 +  - 每个任务独立 try：单个文件探测失败只让该行显示 `不可探测（原因）`，不中断整批
+     81 +  
+     82 +  **H. 退出码**（对齐仓库）
+     83 +  - `0` 正常；`1` 有条目 stat/探测失败；`2` 参数错误（如 `--show` 里出现未知字段名）
+     84 +  
+     85 +  ### 2. `/workspace/VidUtils/vidls.sh`（启动器，~15 行）
+     86 +  - `#!/usr/bin/env bash` + `set -euo pipefail`
+     87 +  - 解析**自身真实路径**（跟软链，用 `readlink -f` 兜底循环）→ `exec python3 "$DIR/vidls.py" "$@"`，保证任意 CWD 下都能找到同目录的 `vidls.py`
+     88 +  - 找不到 `python3` 时 `die` 提示
+     89 +  
+     90 +  ### 3. `/usr/local/bin/vidls` → `vidls.sh` 软链（环境侧，已确认）
+     91 +  - `ln -sf /workspace/VidUtils/vidls.sh /usr/local/bin/vidls`
+     92 +  - 注意：软链是绝对路径，**仓库目录搬家后需重建**（README 里写明）
+     93 +  - 不动 `ls` / `ll`，不写 `~/.zshrc`
+     94 +  
+     95 +  ---
+     96 +  
+     97 +  ## 测试方案（在 /tmp 造 fixture，不污染仓库）
+     98 +  
+     99 +  fixture：真实小 mp4（`testsrc2` 视频 + `sine` 音频）、mkv、带中文名的视频、截断的坏 mp4、0 字节 `.mp4`、普通 txt、隐藏文件、子目录。
+    100 +  
+    101 +  逐项验证：
+    102 +  1. **非视频兼容**：普通文件那一段的输出与 `ls` / `ls -l` 逐字节对比（宽度、列数、间距、`总用量`）
+    103 +  2. **属性正确性**：四项帧数来源互相对照（包头/硬解/包数/估算），记录偏差
+    104 +  3. **`--cpu` vs 默认**：同一文件两种档位结果对比，确认降级链与标签正确
+    105 +  4. **降级容错**：坏文件 / 0 字节 / 非视频扩展名的视频 —— 不崩、不挂（重点看 `-nostdin` 与 timeout 是否生效）
+    106 +  5. **版式**：中文名 + CJK 宽度对齐；管道（非 TTY）输出；`-1` / `-t` / `-S` / `-r` / `-a` / `-d`
+    107 +  6. **PATH**：任意目录下敲 `vidls` / `vidls -l`
+    108 +  
+    109 +  ---
+    110 +  
+    111 +  ## 收尾交付（仓库 memory 是交付物的一部分）
+    112 +  
+    113 +  1. **新增** `memory/project_ls_probe_pitfalls.md` —— 只写事实与踩坑：
+    114 +     - `-count_frames` 会把整片解码一遍，`-count_packets` 只解复用（CPU 侧降级依据）
+    115 +     - GPU 硬解数帧（ffprobe 接受 `-hwaccel cuda`）vs 包数 vs 包头 vs 估算的实测偏差与适用性
+    116 +     - `nb_frames` 在 webm/mkv 常常缺失 → 必须能降级
+    117 +     - coreutils 列算法细节（竖填、列宽 maxw+2、严格 `<`、MIN=3）与"非 TTY 会退化成每行一个"的差异
+    118 +     - `-h` 与 argparse 默认 help 冲突 → `add_help=False`
+    119 +     - `testsrc` 是 4:4:4、硬解探针必须用 `testsrc2`+`yuv420p`
+    120 +  2. 更新 `memory/MEMORY.md` 索引一行
+    121 +  3. 更新 `README.md`：目录 / 功能矩阵 / 安装（`chmod +x` 与自检）/ 工具一览新增 `vidls.sh` 小节 / 快速上手示例 / 已知限制（`-R` 与 `--color` 不支持并指
+        + 向真 `ls`、帧数来源含义、`-h` 语义、软链需重建）/ 路线图加 ✅ 已发布 / 目录结构 / 工程记忆清单
+    122 +  4. 附一条 agent memory：用户偏好"便捷工具用 `.sh` 作入口并接入 PATH"
+    123 +  
+    124 +  ## 不做（明确排除，避免范围失控）
+    125 +  
+    126 +  - 不实现 `-R` / `--color`（直接提示用真 `ls`）
+    127 +  - 不做跨进程磁盘缓存（只在进程内缓存；避免 mtime 判断失准）
+    128 +  - 不实现 `-F -i -s -o -g -n --time-style -w -T -m -v -U` 等冷门开关
+    129 +  - 不改 `ls`/`ll` 别名，不装/升任何依赖
+
+● Plan ready
+  ⎿ User rejected CodeBuddy's plan
+    vidls — ls/ll 替代 + 视频属性探测
+
+    已确认的决策
+
+    ┌────────────┬─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+    │    事项    │                                                                        决定                                                                         │
+    ├────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+    │ 交付物命名 │ vidls.sh（bash 启动器）+ vidls.py（内核）                                                                                                           │
+    ├────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+    │ PATH 接入  │ /usr/local/bin/vidls → vidls.sh 软链（只加这一个命令，不动 ls/ll）                                                                                  │
+    ├────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+    │ 默认版式   │ ls 多列名，分组渲染：普通文件按多列网格；视频每条独占一行并带属性列                                                                                 │
+    ├────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+    │ -l 版式    │ ll 长格式（权限/链接/属主/属组/大小/时间/名），视频名后追加属性列                                                                                   │
+    ├────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+    │ 探测深度   │ 自动：CUDA 硬解可用 → -count_frames 精确数帧；否则降级属性包                                                                                        │
+    ├────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+    │ 强制 CPU   │ --cpu（默认 false），跳过 GPU 探测，直接走降级链，便于对比测试                                                                                      │
+    ├────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+    │ 恒显字段   │ 分辨率 / 帧率 / 比特率 / 帧数 / 编码器 / 容器 / 时长（7 项）                                                                                        │
+    ├────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+    │ 可选字段   │ 像素格式+位深、音轨概览、字幕+HDR，用 --show / --all 控制                                                                                           │
+    ├────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+    │ 语言内核   │ Python 3（纯标准库）。理由：并行下 ThreadPoolExecutor 比 bash 后台池稳（仓库 memory/project_bash_parallel_pitfalls.md 记了 bash                     │
+    │            │ 调度的四个坑）；量级上两者都只是并起 ffprobe 子进程，吞吐打平                                                                                       │
+    └────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+    ---
+    要新增的文件
+
+    1. /workspace/VidUtils/vidls.py（核心，纯标准库）
+
+    入口与参数（沿用仓库 argparse 风格：中文 help、RawDescriptionHelpFormatter、epilog 放示例）
+    - add_help=False + 显式 --help，把 -h 让给 --human-readable（ls 兼容，必须；argparse 默认 -h 是 help，冲突）
+    - -l/--long（ll 长格式）、-1（每行一个）、-a/--all、-A、-d、-t、-S、-r、-h/--human-readable
+    - --cpu（强制 CPU 降级链）、--fast（永不解码）、--deep（强制精确数帧）
+    - --show LIST（pixfmt,bits,audio,subs,hdr 逗号列表）、--all（≡ 全部可选）
+    - -j/--jobs N（探测并发，0=自动）、--ffmpeg-bin、-v/--verbose
+    - 位置参数：路径列表，缺省 .
+
+    A. 条目收集与分类
+    - os.scandir 收集 + lstat；-a 补 ./..，-A 只补隐藏项不含 ./..；-d 不展开目录
+    - 视频判定：扩展名白名单（以 vidcrop_cpu_v2.py:144 的 VIDEO_EXTS 为基线，补 .m2ts/.mts/.vob/.ogv/.3gp/.mxf/.rmvb/.asf/.f4v/.y4m）
+    - 排序：locale.setlocale(LC_COLLATE, "") + locale.strxfrm 作 key，失败回落 str（≈ LC_ALL=C 字节序）。合并列表只排一次，不把视频单独排
+
+    B. 系统资源探测（镜像 vidcrop_cpu_v2.py:341-533）
+    - _detect_cpu()：cgroup v2 cpu.max → cgroup v1 quota → sched_getaffinity → os.cpu_count，返回 (cores, 来源)
+    - _detect_memory_gb()：cgroup v2（扣 file+slab_reclaimable）→ cgroup v1 → /proc/meminfo → Windows → 兜底
+    - compute_probe_parallelism(n_videos, cpu, mem)：workers = min(cpu, 可用内存/每路预留, n_videos)，常量沿用
+    _MAX_USABLE_RATIO=0.80、_MIN_SYSTEM_RESERVE_GB=0.2，每路预留 0.1GB（ffprobe 很轻）
+    - 深解档额外封顶 HW_DECODE_MAX_JOBS = 4（T4 上并发 NVDEC 会抢显存；可用 -j 覆盖）
+    - 资源行只在 -v 时打到 stderr —— 默认不能像裁剪脚本那样刷屏
+
+    C. GPU 探测与降级（镜像 vidcrop_hwaccel.py:308-330、:597-672）
+    - _ffmpeg_env()：照抄 LIBGCRYPT_FORCE_FIPS_MODE=0 + NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES / CUDA 库路径补全
+    - _check_cuda_decoder_available()：testsrc2=yuv420p 生成微型 H.264（不能用 testsrc，默认 4:4:4 硬解必挂）→ -hwaccel cuda -hwaccel_device 0 -frames:v 1 -f null 
+    -，命中 CUDA 错误关键字表即判不可用；全部子进程带 -nostdin 且 stdin=DEVNULL（memory/project_ffmpeg_stdin_hang.md）
+    - 结果进程内缓存一次；--cpu / --fast 直接跳过探测
+    - 降级：GPU 精确数帧失败 → 该文件回落到包数档，并置全局标志不再重试 GPU（对齐 interp_2x_safe.sh 的 gpu_probe_adjust 思路）
+
+    D. 帧数四级降级链（每条结果带来源标签，展示时标注可信度）
+
+    ┌─────┬──────────────┬─────────────────────────────────────────────────────────────────┬─────────────┬──────┐
+    │ 档  │     手段     │                          ffprobe 参数                           │    成本     │ 标签 │
+    ├─────┼──────────────┼─────────────────────────────────────────────────────────────────┼─────────────┼──────┤
+    │ 1   │ 容器头       │ 主探测里的 stream=nb_frames                                     │ 免费        │ 包头 │
+    ├─────┼──────────────┼─────────────────────────────────────────────────────────────────┼─────────────┼──────┤
+    │ 2   │ 硬解数帧     │ -hwaccel cuda -count_frames -show_entries stream=nb_read_frames │ 解码（GPU） │ 硬解 │
+    ├─────┼──────────────┼─────────────────────────────────────────────────────────────────┼─────────────┼──────┤
+    │ 3   │ 只数包不解码 │ -count_packets -show_entries stream=nb_read_packets             │ 仅解复用    │ 包数 │
+    ├─────┼──────────────┼─────────────────────────────────────────────────────────────────┼─────────────┼──────┤
+    │ 4   │ 估算         │ duration × fps                                                  │ 免费        │ 估算 │
+    └─────┴──────────────┴─────────────────────────────────────────────────────────────────┴─────────────┴──────┘
+
+    档 1 免费所以永远先试；档 2 仅 GPU 可用时走（用户要的 --cpu 就落到档 3）；档 3 是 CPU 侧的"降级为从属性包获取"；档 4 兜底。渲染成 9 660 帧[包头]。
+
+    E. 元数据主探测（镜像 probe_full_metadata，vidcrop_hwaccel.py:1460）
+    - 一次 ffprobe -v error -print_format json -show_format -show_streams -show_chapters，timeout=15，按 abspath|size|mtime 进程内缓存
+    - 取出：容器名（mov,mp4,m4a,... → mp4 归一）、duration、bit_rate、视频流 codec / 宽高（含 displaymatrix 旋转后的实际显示尺寸）/ 帧率（avg_frame_rate 优先，回落 
+    r_frame_rate）/ pix_fmt / 位深 / HDR 色彩标记；音频流（编码/声道/采样率/语言）；字幕流（数量+编码）
+    - 比特率优先 format.bit_rate → stream.bit_rate → 文件大小×8/duration
+
+    F. 版式渲染
+    - display width 感知：disp_width() 按 unicodedata.east_asian_width 计宽（CJK 记 2），重实现 _label 的对齐逻辑（vidcrop_hwaccel.py:2767）
+    - 默认分组模式：按排好序的列表走一遍，把连续的非视频项攒成 run，每个 run 用 coreutils 的列算法铺网格；视频行就地整行输出
+      - coreutils 算法（calculate_columns，实测校验过）：竖着填（column-major）；rows=ceil(N/cols)；每列宽 = 该列显示宽最大值 +2（最后一列不加），下限
+    MIN_COLUMN_WIDTH=3；sum(colw) < 终端宽 严格小于才成立；从最大可能列数往下试
+      - 终端宽：os.get_terminal_size(stdout) → $COLUMNS → 80
+      - 有意与 ls 不同：ls 在非 TTY 时退化成每行一个；本工具默认仍用网格（宽 80），保证管道里也是紧凑的
+      - 视频属性列：先遍历一遍所有视频求出每列宽度，再统一对齐输出（不是每条自己对齐）
+    - -l 模式：stat.filemode + nlink + 属主/属组（pwd.getpwuid/grp.getgrgid，查不到回落数字）+ 大小 + mtime + 名，宽度按全部条目统一计算
+      - -h 人类可读：base 1024，后缀 KMGTPEZY，向上取整（coreutils 是 ceiling）；<10 保留 1 位小数，否则整数
+      - mtime：six_months_ago = now - 31556952/2；>6个月 或未来时间 → %b %e  %Y，否则 %b %e %H:%M
+      - 目录列表头打印 总用量 N（sum(st_blocks)//2）
+    - 不做 ANSI 配色（仓库一致做法）；视频行本身带属性、-l 里目录有 d，不需要额外标记符，从而避开宽字符对齐的坑
+
+    G. 并行探测
+    - 只对视频条目开 ThreadPoolExecutor（非视频只要 stat），as_completed 收集后按原索引回填，输出顺序稳定
+    - 每个任务独立 try：单个文件探测失败只让该行显示 不可探测（原因），不中断整批
+
+    H. 退出码（对齐仓库）
+    - 0 正常；1 有条目 stat/探测失败；2 参数错误（如 --show 里出现未知字段名）
+
+    2. /workspace/VidUtils/vidls.sh（启动器，~15 行）
+
+    - #!/usr/bin/env bash + set -euo pipefail
+    - 解析自身真实路径（跟软链，用 readlink -f 兜底循环）→ exec python3 ile:///workspace/VidUtils/$DIR/vidls.py"$DIR/vidls.py" "$@"，保证任意 CWD 下都能找到同目录的 
+    vidls.py
+    - 找不到 python3 时 die 提示
+
+    3. /usr/local/bin/vidls → vidls.sh 软链（环境侧，已确认）
+
+    - ln -sf /workspace/VidUtils/vidls.sh /usr/local/bin/vidls
+    - 注意：软链是绝对路径，仓库目录搬家后需重建（README 里写明）
+    - 不动 ls / ll，不写 ~/.zshrc
+
+    ---
+    测试方案（在 /tmp 造 fixture，不污染仓库）
+
+    fixture：真实小 mp4（testsrc2 视频 + sine 音频）、mkv、带中文名的视频、截断的坏 mp4、0 字节 .mp4、普通 txt、隐藏文件、子目录。
+
+    逐项验证：
+    1. 非视频兼容：普通文件那一段的输出与 ls / ls -l 逐字节对比（宽度、列数、间距、总用量）
+    2. 属性正确性：四项帧数来源互相对照（包头/硬解/包数/估算），记录偏差
+    3. --cpu vs 默认：同一文件两种档位结果对比，确认降级链与标签正确
+    4. 降级容错：坏文件 / 0 字节 / 非视频扩展名的视频 —— 不崩、不挂（重点看 -nostdin 与 timeout 是否生效）
+    5. 版式：中文名 + CJK 宽度对齐；管道（非 TTY）输出；-1 / -t / -S / -r / -a / -d
+    6. PATH：任意目录下敲 vidls / vidls -l
+
+    ---
+    收尾交付（仓库 memory 是交付物的一部分）
+
+    1. 新增 memory/project_ls_probe_pitfalls.md —— 只写事实与踩坑：
+      - -count_frames 会把整片解码一遍，-count_packets 只解复用（CPU 侧降级依据）
+      - GPU 硬解数帧（ffprobe 接受 -hwaccel cuda）vs 包数 vs 包头 vs 估算的实测偏差与适用性
+      - nb_frames 在 webm/mkv 常常缺失 → 必须能降级
+      - coreutils 列算法细节（竖填、列宽 maxw+2、严格 <、MIN=3）与"非 TTY 会退化成每行一个"的差异
+      - -h 与 argparse 默认 help 冲突 → add_help=False
+      - testsrc 是 4:4:4、硬解探针必须用 testsrc2+yuv420p
+    2. 更新 memory/MEMORY.md 索引一行
+    3. 更新 README.md：目录 / 功能矩阵 / 安装（chmod +x 与自检）/ 工具一览新增 vidls.sh 小节 / 快速上手示例 / 已知限制（-R 与 --color 不支持并指向真 
+    ls、帧数来源含义、-h 语义、软链需重建）/ 路线图加 ✅ 已发布 / 目录结构 / 工程记忆清单
+    4. 附一条 agent memory：用户偏好"便捷工具用 .sh 作入口并接入 PATH"
+
+    不做（明确排除，避免范围失控）
+
+    - 不实现 -R / --color（直接提示用真 ls）
+    - 不做跨进程磁盘缓存（只在进程内缓存；避免 mtime 判断失准）
+    - 不实现 -F -i -s -o -g -n --time-style -w -T -m -v -U 等冷门开关
+    - 不改 ls/ll 别名，不装/升任何依赖
+
+> 增加一个 --install/-I 参数，自动检测并安装需要的环境和配置PATH等信息 
+
+> /export 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

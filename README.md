@@ -1630,6 +1630,7 @@ vidutils/
 ├── probe/                    # 上机探针（无 GPU 时只能跑 SELFTEST=1）
 │   ├── probe_green_chroma.sh            # 色度归零归因：解码层 / 编码层 / 命令级二分
 │   ├── probe_scale_cuda_crop.sh         # CUDA 缩放裁剪：计时与画质 A/B/C/D/Q
+│   ├── probe_lossless_qp0.sh            # 「-qp 0 / -crf 0 到底是不是数学无损」（恒等裁剪 + 逐帧哈希；本机可 LOCALCPU=1 自证）
 │   └── enum_cmds.py                     # 无 GPU 时 mock 远程能力、枚举脚本真正下发的命令
 ├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
 ├── Plan/                     # 立项任务书与过程归档（含 vidls 对话记录 .txt）
@@ -1719,7 +1720,17 @@ PROBE_VMAF=1 bash probe/probe_scale_cuda_crop.sh <源视频>   # 完整判据 A/
 SELFTEST=1 bash probe/probe_green_chroma.sh                # 色度探针装置自检，CPU-only
 SRC=<源视频> bash probe/probe_green_chroma.sh               # 色度归零归因（目标默认 768x432）
 SRC=<源视频> OUT_W=640 OUT_H=360 bash probe/probe_green_chroma.sh   # 自定义目标尺寸
+
+SELFTEST=1 bash probe/probe_lossless_qp0.sh                        # 无损探针装置自检（6 格判词），CPU-only
+LOCALCPU=1 SRC=temp/fixture_1080p.mp4 bash probe/probe_lossless_qp0.sh   # 本机替身自证（libx265/libx264）
+SRC=<源视频> bash probe/probe_lossless_qp0.sh                      # 验 NVENC 的 `-qp 0` 到底是不是数学无损
 ```
+
+> `probe_lossless_qp0.sh` 把滤镜链压成**像素恒等**（crop 到整幅、不缩放、`--no-skip-same-size`），
+> 于是唯一可能丢信息的就是编码器；再逐帧比 `framemd5` 的**哈希列**（帧数单独报）。
+> ⚠ **别用 `psnr` 做这个判据**：本机 ffmpeg 实测对**逐位相同**的两份文件仍报 `average:26.0 dB`，
+> 且交换输入顺序会得到不同值（26.0 vs 23.8）——多输入 `psnr` 会按两侧解码器的格式/范围插一次
+> 隐式转换，数字不可信、会给出**与事实相反**的结论（探针头注里记了实测细节）。
 
 > 色度探针的 `SRC` 必须是**裁剪前的原片**（两轴都大于目标）。源 == 目标时 crop 是恒等
 > 操作、且脚本会命中「同尺寸跳过」，第 2/3 节的手写对照与第 4/5/6 节都会失去判别力 ——

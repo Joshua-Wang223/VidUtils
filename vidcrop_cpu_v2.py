@@ -56,7 +56,8 @@ vidcrop_cpu_v2.py – 批量视频裁剪/覆盖缩放工具（CPU 多任务并�
 --codec                视频编码器（默认 libx264，支持别名自动归一化；auto 等同 libx264）
 --crf                  CRF 质量值（默认 21，仅对支持 CRF 的编码器生效；字面量原样下发）
 --cq                   CQ 质量值（默认 23，仅对 NVENC/AMF/QSV 等 GPU 编码器生效，
-                       CPU 编码器下自动映射为等效 CRF）。任一质量参数取 0 = 无损请求
+                       CPU 编码器下自动映射为等效 CRF）。任一质量参数取 0 = 0 档请求
+                       （CPU 编码器上是真无损；NVENC 只是最高质量档）
 --crf-ref              N 以 libx264 CRF 为统一基准，按等效表换算到目标编码器
                        （例：--codec vp9 --crf-ref 21 → -crf 27）；与 --crf/--cq 互斥。
                        与 --rc-mode constqp 并用时换算结果落到 -qp
@@ -3806,7 +3807,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help="CRF 质量值 (CPU 编码器)；默认 21，范围 0-51 越小质量越好。"
              "字面量原样下发给目标编码器；落到只认 -cq/-qp 的编码器时按 libx264 CRF 口径换算。"
-             "0 = 无损",
+             "0 = 0 档（CPU 编码器上是真无损；NVENC 只是最高质量档）",
     )
     ap.add_argument(
         "--cq",
@@ -3849,7 +3850,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         metavar="N",
         help="NVENC 恒定 QP 值（0-51）：只在 --rc-mode constqp 下生效；"
              "constqp 下它与 --crf-ref / --cq-ref 三选一，与字面量 --crf / --cq 互斥"
-             "（量纲不同，混用无法判定意图）。--qp 0 = 无损。"
+             "（量纲不同，混用无法判定意图）。"
+             "--qp 0 = 0 档（CPU 编码器上是真无损；NVENC 只是最高质量档）。"
              "本脚本是纯 CPU 路径，故该值会按等效表换算成 -crf（不丢弃质量值）",
     )
     ap.add_argument(

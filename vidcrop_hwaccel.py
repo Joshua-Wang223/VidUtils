@@ -5049,10 +5049,12 @@ preset 映射（NVENC ↔ libx264 自动转换）：
     parser.add_argument('--crf', type=int, default=None,
                         help='CRF 质量值（CPU 编码器，0-51，不指定时默认 21）；'
                              '字面量原样下发给目标编码器；落到只认 -cq/-qp 的编码器'
-                             '（NVENC/AMF/QSV）时按 libx264 CRF 口径换算过去。0 = 无损')
+                             '（NVENC/AMF/QSV）时按 libx264 CRF 口径换算过去。'
+                             '0 = 0 档（CPU 编码器上是真无损；NVENC 只是最高质量档）')
     parser.add_argument('--cq',  type=int, default=None,
                         help='CQ 质量值（GPU 编码器，0-51，不指定时默认 23）；'
-                             '字面量原样下发；落到 CPU 软编时按等效表换算为 -crf。0 = 无损')
+                             '字面量原样下发；落到 CPU 软编时按等效表换算为 -crf。'
+                             '0 = 0 档（CPU 编码器上是真无损；NVENC 只是最高质量档）')
     parser.add_argument('--crf-ref', type=int, default=None, metavar='N',
                         help='以 libx264 CRF 为统一基准给出质量值，按等效表换算到目标编码器。'
                              '例：--codec libvpx-vp9 --crf-ref 21 → -crf 27。'
@@ -5074,7 +5076,8 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                         help='NVENC 恒定 QP 值（0-51）：只在 --rc-mode constqp 下生效；'
                              'constqp 下它与 --crf-ref / --cq-ref 三选一，'
                              '与字面量 --crf / --cq 互斥（量纲不同，混用无法判定意图）。'
-                             '--qp 0 = 无损。落到 CPU 编码器时按等效表换算成 -crf（不丢弃质量值）')
+                             '--qp 0 = 0 档（CPU 编码器上是真无损；NVENC 只是最高质量档）。'
+                             '落到 CPU 编码器时按等效表换算成 -crf（不丢弃质量值）')
     parser.add_argument('--lookahead', type=int, default=None, metavar='N',
                         help='前向预测帧数（0-250）；不指定=沿用各编码器默认。'
                              '按编码器分别下发：libx264 与 *_nvenc 用 -rc-lookahead，'

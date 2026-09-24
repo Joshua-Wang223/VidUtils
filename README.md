@@ -1347,7 +1347,7 @@ python vidcrop_cpu_v2.py \
 ## 质量参数指南
 
 ```
-CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率，51 = 最低质量
+CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 ≈ 视觉无损，23 = 默认，28 = 低码率，51 = 最低质量
 ```
 
 | 用途 | libx264 CRF | h264_nvenc CQ |
@@ -1436,7 +1436,7 @@ CRF / CQ  →  0 = 无损，18 ≈ 视觉无损，23 = 默认，28 = 低码率�
 - 字面量模式默认不换算；**落到不支持该量纲的编码器时才换算**（`--cq`→CPU 软编、
   `--crf`→只认 `-cq`/`-qp` 的硬件编码器），**不是静默丢弃、回落默认值**
 - 同时指定 `--crf` 和 `--cq` 时，按实际落用的编码器自动选用对应参数
-- 任一质量参数取 `0` 一律按**无损**处理（见上）
+- 任一质量参数取 `0` 一律按**0 档**处理（见上；CPU 编码器上是真无损）
 
 ### 码率控制与 lookahead（`--rc-mode` / `--qp` / `--lookahead` / `--bitrate`）
 
@@ -1681,7 +1681,7 @@ python verify/verify_hwupload_worth.py    # auto 缩放的 hwupload 门槛
 python verify/verify_color_tagging.py     # 色彩属性标到帧上（setparams），命令级
 python verify/verify_chroma_hook.py       # 产物色度自检的阈值 / 取样 / 降级链
 python verify/verify_rc_lookahead.py      # --rc-mode / --qp / --lookahead / --bitrate
-python verify/verify_borrow_enhancement.py # 从 Video_Enhancement 借鉴的那批：恒定质量/真无损/AQ/降档重试 + --flag→--suffix 更名
+python verify/verify_borrow_enhancement.py # 从 Video_Enhancement 借鉴的那批：恒定质量/0 档无损/AQ/降档重试 + --flag→--suffix 更名
 python verify/verify_ratio_single_dim.py  # --crop-ratio + 单维度 → 按比例补全（三模式 + 两脚本 lockstep）
 bash   verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
 ```

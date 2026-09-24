@@ -1631,6 +1631,7 @@ vidutils/
 │   ├── probe_green_chroma.sh            # 色度归零归因：解码层 / 编码层 / 命令级二分
 │   ├── probe_scale_cuda_crop.sh         # CUDA 缩放裁剪：计时与画质 A/B/C/D/Q
 │   ├── probe_lossless_qp0.sh            # 「-qp 0 / -crf 0 到底是不是数学无损」（恒等裁剪 + 逐帧哈希；本机可 LOCALCPU=1 自证）
+│   ├── t4_acceptance.py                 # T4 上机验收（落点 / 运行期 / 无损三组；--local 本机降级自证、--selftest 验装置）
 │   └── enum_cmds.py                     # 无 GPU 时 mock 远程能力、枚举脚本真正下发的命令
 ├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
 ├── Plan/                     # 立项任务书与过程归档（含 vidls 对话记录 .txt）
@@ -1724,7 +1725,18 @@ SRC=<源视频> OUT_W=640 OUT_H=360 bash probe/probe_green_chroma.sh   # 自定�
 SELFTEST=1 bash probe/probe_lossless_qp0.sh                        # 无损探针装置自检（6 格判词），CPU-only
 LOCALCPU=1 SRC=temp/fixture_1080p.mp4 bash probe/probe_lossless_qp0.sh   # 本机替身自证（libx265/libx264）
 SRC=<源视频> bash probe/probe_lossless_qp0.sh                      # 验 NVENC 的 `-qp 0` 到底是不是数学无损
+
+python probe/t4_acceptance.py --selftest                           # 验收脚本装置自检（9 格：判词/解析/空集），CPU-only
+python probe/t4_acceptance.py --local                              # 本机降级自证：只跑本机成立的格，GPU 专属格显式跳过
+python3 probe/t4_acceptance.py --src '<源视频>'                     # T4 上机验收：落点 / 运行期 / 无损 三组
 ```
+
+> `probe/t4_acceptance.py` 是那轮改动**剩下的验收面**的收口（A 落点 / B 运行期 / C 无损）。
+> 每格都带一列**「本机状态」**（本机已验 / 只能单元级 / 需上机）—— 它回答"跑完是绿的是否等于
+> 结论成立"；失败时补一行「⇒ 说明」写清红了意味着什么。判据只用 **framemd5**（见下）。
+> ⚠ **没有 `--local` 就在无 GPU 机器上跑它会大量报红（实测 8 过 11 红）**，这是有意的：
+> 正好证明那些格是真·需上机、不是恒真。反过来 `--local` 只跑 4 格（其余 16 格显式标「跳过」），
+> 并明确提示「结论不完整」。
 
 > `probe_lossless_qp0.sh` 把滤镜链压成**像素恒等**（crop 到整幅、不缩放、`--no-skip-same-size`），
 > 于是唯一可能丢信息的就是编码器；再逐帧比 `framemd5` 的**哈希列**（帧数单独报）。

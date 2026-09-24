@@ -769,6 +769,18 @@ CQ_SUPPORTED_CODECS = {
     "h264_qsv", "hevc_qsv", "av1_qsv",
 }
 
+# 硬件编码器族：ffmpeg 的帧级 `-threads` 对它们没有意义（NVENC/QSV/AMF 在硬件侧
+# 自行调度，VideoToolbox / VA-API 由各自驱动托管），下发只会多一个不生效的选项
+# ⇒ 两脚本一律**跳过 -threads**（--threads 显式给了也只在软编上生效）。
+# ⚠ 这张表必须与 vidcrop_hwaccel.py 的同名常量**逐字相同**（孪生约定，判据里断言相等）。
+_HW_ENCODERS = {
+    "h264_nvenc", "hevc_nvenc", "h265_nvenc", "av1_nvenc",
+    "h264_qsv", "hevc_qsv", "av1_qsv", "vp9_qsv",
+    "h264_amf", "hevc_amf", "av1_amf",
+    "h264_vaapi", "hevc_vaapi",
+    "h264_videotoolbox", "hevc_videotoolbox",
+}
+
 DEFAULT_CRF = 21
 DEFAULT_CQ = 23
 
@@ -2827,7 +2839,11 @@ def build_ffmpeg_cmd(
     cmd += build_encoder_options_v2(codec, crf, cq, preset, pix_fmt, warn,
                                     bitrate=bitrate)
     cmd += pres["post"]                  # 封面/字幕逐流 codec，需覆盖上面的 -c:v
-    cmd += ["-threads", str(max(1, threads))]
+    # --threads：只对**软件编码器**下发（硬件编码器不吃 ffmpeg 的帧级线程，见 _HW_ENCODERS）。
+    # 位置固定在 pres['post'] 之后、-c:a 之前，与 vidcrop_hwaccel.py 逐字对齐
+    # （两脚本同一条逻辑请求要生成逐字相同的命令，见 test/dump_cmd_full.sh）。
+    if codec.lower() not in _HW_ENCODERS:
+        cmd += ["-threads", str(max(1, threads))]
 
     # 码率控制轴（--rc-mode / --qp / --lookahead）：-rc / -qp 只有 NVENC 认，
     # lookahead 按编码器分别下发；libx265 那条必须与 HDR 元数据**合并成同一条**
@@ -3842,7 +3858,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--no-skip-same-size", action="store_true", help="即使源尺寸等于目标尺寸也强制转码")
 
     ap.add_argument("--workers", type=int, default=0, help="并行任务数，0=自动")
-    ap.add_argument("--threads", type=int, default=0, help="每任务 FFmpeg 线程数，0=自动")
+    ap.add_argument("--threads", type=int, default=0, metavar="N",
+                    help="每任务 FFmpeg 编码线程数，0=自动（按逻辑核数/并发任务数推算）。"
+                         "只对软件编码器下发 -threads —— 硬件编码器（NVENC / QSV / AMF 等）"
+                         "不吃 ffmpeg 的帧级线程，显式给出也会跳过")
     ap.add_argument("--mem-per-job", type=float, default=0.0, help="单任务估计内存占用 GB，0=按编码器画像")
     ap.add_argument("--sequential", action="store_true", help="强制顺序执行，显示单文件细粒度进度条")
 

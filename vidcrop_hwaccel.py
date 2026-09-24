@@ -314,6 +314,18 @@ CQ_SUPPORTED_CODECS = {
 # AV1 与 H.264/HEVC 同属此族（av1_nvenc 同样是 NVENC 封装）。
 NVENC_CODECS = {'h264_nvenc', 'hevc_nvenc', 'av1_nvenc'}
 
+# 硬件编码器族：ffmpeg 的帧级 `-threads` 对它们没有意义（NVENC/QSV/AMF 在硬件侧
+# 自行调度，VideoToolbox / VA-API 由各自驱动托管），下发只会多一个不生效的选项
+# ⇒ 两脚本一律**跳过 -threads**（--threads 显式给了也只在软编上生效）。
+# ⚠ 这张表必须与 vidcrop_cpu_v2.py 的同名常量**逐字相同**（孪生约定，判据里断言相等）。
+_HW_ENCODERS = {
+    'h264_nvenc', 'hevc_nvenc', 'h265_nvenc', 'av1_nvenc',
+    'h264_qsv', 'hevc_qsv', 'av1_qsv', 'vp9_qsv',
+    'h264_amf', 'hevc_amf', 'av1_amf',
+    'h264_vaapi', 'hevc_vaapi',
+    'h264_videotoolbox', 'hevc_videotoolbox',
+}
+
 # libsvtav1 的 -preset 是 0~13 的整数（越大越快、质量越低），**不接受**
 # ultrafast~veryslow 或 p1~p7 这类名字——实测传 'medium' 直接报
 # "Unable to parse option value"，故必须单独换算。
@@ -1377,6 +1389,47 @@ def detect_cpu_profile() -> Tuple[int, float]:
     except Exception:
         avail_gb = 0.0
     return cpu, avail_gb
+
+
+def _detect_cpu() -> Tuple[int, str]:
+    """返回 (逻辑 CPU 核数, 探测来源)。与 vidcrop_cpu_v2.py 的同名函数逐字一致。
+
+    为什么不用裸 `os.cpu_count()`：容器里它报的是**宿主机**核数，按它下发 `-threads`
+    会超订（cgroup 只给了 N 个核，却开 M 个线程）。本函数读 cgroup v2/v1 配额，
+    再退到 `sched_getaffinity`。
+
+    ⚠ 本函数**只**用于 `--threads` 的自动取值。`detect_cpu_profile()`（AV1 的
+    `-cpu-used` / libsvtav1 档位）刻意保持原样 —— 那是另一条轴，不在本次统一范围内。
+    """
+    try:
+        with open('/sys/fs/cgroup/cpu.max', 'r', encoding='utf-8') as f:
+            parts = f.read().strip().split()
+        if len(parts) == 2 and parts[0] != 'max':
+            quota = int(parts[0])
+            period = int(parts[1])
+            if quota > 0 and period > 0:
+                return max(1, int(round(quota / period))), f'cgroup v2 ({quota}/{period})'
+    except Exception:
+        pass
+
+    try:
+        with open('/sys/fs/cgroup/cpu/cpu.cfs_quota_us', 'r', encoding='utf-8') as f:
+            quota = int(f.read().strip())
+        with open('/sys/fs/cgroup/cpu/cpu.cfs_period_us', 'r', encoding='utf-8') as f:
+            period = int(f.read().strip())
+        if quota > 0 and period > 0:
+            return max(1, int(round(quota / period))), f'cgroup v1 ({quota}/{period})'
+    except Exception:
+        pass
+
+    try:
+        n = len(os.sched_getaffinity(0))
+        if n > 0:
+            return n, 'sched_getaffinity'
+    except Exception:
+        pass
+
+    return max(1, os.cpu_count() or 1), 'os.cpu_count'
 
 
 # 按资源自动选"编码器速度档位"的档位表：(最小逻辑核数, libaom-av1 的 -cpu-used,
@@ -3702,6 +3755,7 @@ def build_ffmpeg_cmd(
     lookahead: Optional[int] = None,
     bitrate: Optional[str] = None,
     nvenc_aq: bool = False,
+    threads: int = 0,
 ) -> List[str]:
     """
     构建完整的 FFmpeg 命令列表。
@@ -4021,6 +4075,12 @@ def build_ffmpeg_cmd(
 
     cmd += pres['post']                  # 封面/字幕逐流 codec，需覆盖上面的 -c:v
 
+    # --threads：只对**软件编码器**下发（硬件编码器不吃 ffmpeg 的帧级线程，见 _HW_ENCODERS）。
+    # 位置固定在 pres['post'] 之后、-c:a 之前，与 vidcrop_cpu_v2.py 逐字对齐
+    # （两脚本同一条逻辑请求要生成逐字相同的命令，见 test/dump_cmd_full.sh）。
+    if threads > 0 and codec.lower() not in _HW_ENCODERS:
+        cmd += ['-threads', str(threads)]
+
     # 音频（WebM 容器不接受 AAC 等音轨，必要时自动改 Opus 重编码）
     audio_codec = resolve_audio_codec_for_container(
         audio_codec, output_file.suffix, meta, _warn)
@@ -4331,6 +4391,7 @@ def process_file(
     bitrate: Optional[str] = None,
     nvenc_aq: bool = False,
     chroma_check: bool = True,
+    threads: int = 0,
     queue_rest: Optional[float] = None,
     queue_cur: Optional[float] = None,
 ) -> Dict[str, object]:
@@ -4551,6 +4612,7 @@ def process_file(
             lookahead=lookahead,
             bitrate=bitrate,
             nvenc_aq=nvenc_aq,
+            threads=threads,
             policy=policy,
         )
         print('  ' + _label('输出文件') + str(output_file))
@@ -4652,6 +4714,7 @@ def process_file(
                     lookahead=lookahead,
                     bitrate=bitrate,
                     nvenc_aq=nvenc_aq,
+                    threads=threads,
                     policy=policy,
                 )
 
@@ -4985,6 +5048,11 @@ preset 映射（NVENC ↔ libx264 自动转换）：
     parser.add_argument('--preset', default=None,
                         help='编码器预设。默认：CPU 编码器 medium，GPU 编码器 p5；'
                              'NVENC（p1~p7）与 libx264 风格（ultrafast~veryslow）自动双向映射')
+    parser.add_argument('--threads', type=int, default=0, metavar='N',
+                        help='FFmpeg 编码线程数。0=自动：本脚本**串行**处理文件，'
+                             '自动值＝按 cgroup 配额算出的逻辑核数（不是裸 os.cpu_count()）。'
+                             '只对软件编码器下发 -threads —— 硬件编码器（NVENC / QSV / AMF 等）'
+                             '不吃 ffmpeg 的帧级线程，显式给出也会跳过')
     parser.add_argument('--suffix', default=None, metavar='SUFFIX',
                         help='输出文件名后缀标记，用于替代默认的 _cropped / _covered / '
                              '_cropcovered。'
@@ -5337,6 +5405,14 @@ def main() -> int:
         print('[ERROR] --cq-ref 范围为 0-51（h264_nvenc CQ 量程）。', file=sys.stderr)
         return 2
 
+    # --threads：0 = 自动。hwaccel 是**串行**处理（一次一个文件、逐条策略尝试），
+    # 没有 cpu_v2 那种"文件级并发"，所以自动值就是全部逻辑核数（按 cgroup 配额算，
+    # 与 cpu_v2 的同名函数逐字一致 —— 两脚本的 -threads 自动值必须相同）。
+    if args.threads < 0:
+        print('[ERROR] --threads 不能为负数', file=sys.stderr)
+        return 2
+    args.threads_resolved = args.threads if args.threads > 0 else _detect_cpu()[0]
+
     # 归一化编码器名称
     args.codec = normalize_codec_name(args.codec)
 
@@ -5663,6 +5739,7 @@ def main() -> int:
                 bitrate=args.bitrate,
                 nvenc_aq=args.nvenc_aq,
                 chroma_check=args.chroma_check,
+                threads=args.threads_resolved,
                 queue_rest=q_rest,
                 queue_cur=q_cur,
             )

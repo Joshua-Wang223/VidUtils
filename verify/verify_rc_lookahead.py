@@ -251,7 +251,7 @@ for extra, _ in cli_cases:
     chk(f'⑨ {" ".join(extra)} 两脚本报错首行一致', lines[0], lines[1])
     chk_in(f'⑨ {" ".join(extra)} 确有报错', '[ERROR]', lines[0])
 
-print('── ⑩ 借鉴项 [A/C/B/E]：NVENC 恒定质量 / 真无损 / constqp+LA / AQ ──')
+print('── ⑩ 借鉴项 [A/C/B/E]：NVENC 恒定质量 / 0 档改写 / constqp+LA / AQ ──')
 # [A] NVENC -cq 默认配 -b:v 0（恒定质量）；给了 --bitrate 时不补（受限质量语义）。
 chk('⑩ A hwaccel NVENC cq 默认补 -b:v 0',
     '-b:v 0' in tokens(hw('hevc_nvenc', cq=20)[0]), True)
@@ -270,7 +270,7 @@ try:
     chk('⑩ B hwaccel strict 下 constqp+LA 抛错', 'no-raise', 'raise')
 except ValueError:
     chk('⑩ B hwaccel strict 下 constqp+LA 抛错', 'raise', 'raise')
-# [C] 真无损：libx265 crf 0 → lossless=1；libx264 crf 0 本已无损不改写；
+# [C] 0 档：libx265 crf 0 → lossless=1（实测逐位无损）；libx264 crf 0 本已无损不改写；
 #     NVENC cq 0 → hwaccel 在 rc_mode=auto 时改写 constqp、否则只告警；cpu_v2 只告警。
 chk('⑩ C libx265 crf 0 -> lossless=1（hwaccel）',
     tokens(hw('libx265', crf=0)[0]), '-crf 0 -x265-params lossless=1')

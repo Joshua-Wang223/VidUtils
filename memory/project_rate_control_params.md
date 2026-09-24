@@ -112,7 +112,7 @@ type: project
   "`-rc <name>` 的**名字**合法"（解析通过后死在 `Cannot load nvcuda.dll`），
   运行期语义以 `project_t4_gpu_capabilities.md` 的记录为准。
 
-## 追加（2026-09-24）：`--qp` 的降级映射 + `0` 是无损哨兵 + `-ref` 能落到 constqp
+## 追加（2026-09-24）：`--qp` 的降级映射 + `0` 是特殊档哨兵 + `-ref` 能落到 constqp
 
 这一轮把「质量意图 → 目标编码器原生参数」收敛到 `_resolve_quality_params` **一个点**
 （返回值由 `(crf, cq)` 扩成 `(crf, cq, qp)`，两脚本同步）。四个缺口都是**实测复现**的：
@@ -124,12 +124,25 @@ type: project
 | `h264_nvenc` 的 cq **0~5** → libx264 / libvpx-vp9 | **全部** → `-crf 0` = 真无损（`--cq 4 --codec libx264` 静默产出巨大文件） | 非无损换算结果统一**钳到 ≥1** |
 | 字面量 `--crf 21` 落到 `hevc_nvenc` | 忽略 + 回落默认 `-cq 23`（用户给的值蒸发） | 按 libx264 CRF 口径换算 → `-cq 28` |
 
-**`0` = 无损哨兵，不参与线性换算**（各编码器的 0 都是无损档，而 `a×x+b` 会把 0 当普通下界）。
+**`0` = 特殊档哨兵，不参与线性换算**（各编码器的 0 都是极值档，而 `a×x+b` 会把 0 当普通下界）。
 5 路 0 值输入（`--crf` / `--cq` / `--qp` / `--crf-ref` / `--cq-ref`）统一投影成目标的
-无损档：`libx265` → `-crf 0` + `lossless=1`；`libvpx*` → `-crf 0 -b:v 0`；`librav1e` → `-qp 0`；
+0 档：`libx265` → `-crf 0` + `lossless=1`；`libvpx*` → `-crf 0 -b:v 0`；`librav1e` → `-qp 0`；
 NVENC → `-rc constqp -qp 0 -b:v 0`（显式 `--qp 0` 此前缺 `-b:v 0`，已统一）。
 ⚠ **低端饱和是固有性质**：`--cq 1~5` 落到 libx264 / libvpx-vp9 会被钳到同一个最小值、
 在等效表里分辨不出来。
+
+⭐ **「0 = 真无损」只对 CPU 编码器成立（2026-09-24 T4 + 本机实测）**：
+
+| 目标 | 0 档的实际下法 | 是否**逐位**无损 |
+|---|---|---|
+| `libx264` / `libx265` | `-crf 0`（x265 另加 `lossless=1`） | ✅ 是（本机 `LOCALCPU=1`：framemd5 **0/50** 帧不同） |
+| NVENC（hevc / h264） | `-rc constqp -qp 0 -b:v 0` | ❌ **不是**（T4：**43417/43448** 帧不同，只是最高质量档） |
+| `libvpx-vp9` / `librav1e` / `libsvtav1` | `-crf 0 -b:v 0` / `-qp 0` | 未实测 |
+
+装置可信度：同轮负向对照 `-qp 18` = 43443/43448（有分辨力），而同一装置在本机 libx265 上是 0/50
+⇒ 那个「≠0」是真测量。**工具文案已据此改口**（原 cpu_v2 告警把 `--rc-mode constqp --qp 0`
+当无损出路推荐，是错的；现在指向 `libx265`/`libx264` 的 `-crf 0`）。
+探针 `probe/probe_lossless_qp0.sh`、验收 `probe/t4_acceptance.py` C 组。
 
 **组合规则**（用户拍板）：`--rc-mode constqp` 下 `--qp` / `--crf-ref` / `--cq-ref` **三选一**
 （同给报错——量纲不同）；字面量 `--crf` / `--cq` 与 `--bitrate` 仍拒。

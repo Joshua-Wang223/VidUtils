@@ -41,12 +41,18 @@
   「本机 AV1 完全编不出来」这条已更正：custom ffmpeg 7.1 没有、系统 ffmpeg 6.1.1 有
   libsvtav1/libaom-av1；零拷贝管线里 `-pix_fmt` 无效；
   ⇒ **硬解能力是「分编解码器」的、不是布尔量**：2026-09-21 起 `vidcrop_hwaccel.py`
-  按源 codec 用真实输入试解 1 帧（`has_decoder` 那个 H.264 微流探针只代表 H.264）
+  按源 codec 用真实输入试解 1 帧（`has_decoder` 那个 H.264 微流探针只代表 H.264）；
+  ⚠ **有 GPU 的机器上跑 `verify/` 与 `dump_cmd_full.sh` 会有一批「环境假设过时」的假红**
+  （4 处 verify + 2 个默认档用例；`--decode cpu` 只强制 CPU 解码/缩放、**不强制编码器降级**），
+  已用 `git worktree` 在改动前提交复跑证明非回归 —— 清单与判法见文件末；
+  另：`probe/t4_acceptance.py` 的 A 组期望值是**硬编码**的，落点有意变更（V1/V7）后会滞后成假红
 - [FFmpeg 7.1 已合并 nvinterpolate 与 libvmaf](project_nvinterpolate_build.md)
   — 单一 ffmpeg、无需环境文件；`nvinterpolate` 必须放滤镜链末尾否则段错误；移植补丁位置
 - [两个裁剪脚本的行为一致约定](project_preset_equivalence.md)
-  — 两裁剪脚本的 NVENC↔x264 表必须一致（曾错位一档：p4→medium/p5→slow，会让同一条 `--preset p5` 落不同档）；
-  降级到 CPU 编码器时基准档取"请求的编码器"的默认值再换算；概览块只展示最终命令里真正会出现的参数
+  — 两裁剪脚本的 preset 表必须逐字一致；**2026-09-28（V10）拆成两张刻意不对称的表**：
+  `X264_TO_NVENC_PRESET` 按 ffmpeg 官方/VE 枚举（medium→p4）、`NVENC_TO_X264_PRESET`
+  只管 GPU→CPU 降级且保持 medium 落在 p5（否则破坏两脚本命令 lockstep + 基线）；
+  降级到 CPU 编码器时基准档取"请求的编码器"的默认值再换算（libsvtav1 的默认档已固定为 8）；概览块只展示最终命令里真正会出现的参数
   （编码器名取策略链第一条、无 `-preset` 的编码器不展示 preset 字段）；
   `--codec auto` 必须解析成具体编码器，透传会得到 `-c:v auto` 使 ffmpeg 报 Unknown encoder（曾发生在 cpu_v2）；
   **`--mode` 的语义/校验/跳过判定也要两边一致**：2026-09-18 同时加了 `crop-cover`
@@ -165,7 +171,20 @@
   ⭐ **「0 = 真无损」只对 CPU 编码器成立**（本机 libx265/libx264 `-crf 0` framemd5 **0/50**；
   T4 实测 **NVENC `-qp 0` 43417/43448 帧不同** = 只是最高质量档）→ 工具文案已据此改口；
   `--rc-mode constqp` 下 `--qp` / `--crf-ref` / `--cq-ref` 三选一（同给报错）；
-  判据 `verify/verify_quality_mapping.py`
+  判据 `verify/verify_quality_mapping.py`；
+  **2026-09-28 第二轮（V1/V2/V5/V7/V8/V9/V10/V11/V12 全部落地）**：
+  ⭐ **`-qp` 不是一套刻度** —— AV1 是 0~255 qindex（×4）、VAAPI 0~52、H.264/HEVC 0~51，
+  constqp 必须走 `to_constqp_qp()` 回**基准轴**（`av1_nvenc cref21 → 84`），CLI 量程用 `qp_range(codec)`；
+  QSV/VT 移出 CQ 集（无 `-cq`）；默认质量统一到 `DEFAULT_REF=21`（`DEFAULT_CQ=23` 删除）；
+  `librav1e` 移出 CRF 集（单链 → 都 `-qp 80`）；`QUALITY_MAP` 的 libx265/libvpx-vp9/libsvtav1
+  按**真实素材等体积**重标（`probe/calibrate_soft_offsets.py`）；`hevc_videotoolbox` b 105→100；
+  判据 ⑨ 现在默认就是**门禁**（`STRICT_KNOWN=0` 可降级）；新增 ⑪ 组正向断言；
+  ⭐ **T4 上机实测（2026-09-28）把两条前提都验成立**：B 组 `-cq` 偏移（h264 26→1.17×、
+  hevc 28→0.76×，均带内；朴素值 21 越界 2.2×/1.6×）、C 组 constqp `-qp` 回基准轴
+  （h264/hevc `-qp 21` 均带内）⇒ **`QUALITY_MAP` 的 b 与 V1 都无需改**；av1 两格在 T4 必 SKIP
+  （编不了）⇒ `-qp` ×4 尺度待 L40/Ada；报告在 `verification_report/`；
+  **L40/Ada 交接已备好**：探针 `--expect-av1`（本卡不能编 AV1 即 exit 2，防把 SKIP 当已验）
+  + B/C 组 `-结论` 行（直接给动不动 b / `_QP_SCALE`），步骤见方案 §4.10
 
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: 码率控制轴：--rc-mode / --qp / --lookahead / --bitrate（两脚本同名同默认）
-description: 2026-09-22 两个裁剪脚本新增的四个码率控制参数——默认值全部=不下发（不传时命令逐字不变）、-rc/-qp 是 NVENC 专属（非 NVENC 告警忽略、strict 报错）、--lookahead 按编码器映射且默认值三边不同、实测 -x265-params 后者整条覆盖前者故必须与 HDR 元数据合并成同一条
+description: 2026-09-22 两个裁剪脚本新增的四个码率控制参数——默认值全部=不下发（不传时命令逐字不变）、-rc/-qp 是 NVENC 专属（非 NVENC 告警忽略、strict 报错）、--lookahead 按编码器映射且默认值三边不同、实测 -x265-params 后者整条覆盖前者故必须与 HDR 元数据合并成同一条；2026-09-28 追加：-qp 不是一套刻度（AV1 是 0~255 qindex、VAAPI 0~52），constqp 必须走 QP 尺度层；av1_nvenc 的 -cq 实为 0~63
 type: project
 ---
 
@@ -150,3 +150,93 @@ NVENC → `-rc constqp -qp 0 -b:v 0`（显式 `--qp 0` 此前缺 `-b:v 0`，已�
 **How to apply**：再遇到"某参数落到不支持它的编码器"时，默认动作是**换算 + 提示**，
 不是丢弃；只有"0 / 无损"这类**语义哨兵**才跳过换算。判据
 `verify/verify_quality_mapping.py`（八组，含"非无损换算永不落到 0"的小值扫描）。
+
+## 追加（2026-09-28）：`-qp` 不是"一套刻度"，`-cq` 的量程也各有不同
+
+### ⭐ 最值钱的一条：`-qp` 的刻度按编码器分家（`ffmpeg -h encoder=<x>` 实测）
+
+| codec | `-cq` 量程 | `-qp` 量程 | 与 x264 QP 的关系 |
+|---|---|---|---|
+| h264_nvenc / hevc_nvenc | 0~51 | −1~51 | **同尺度**（QP 就是真 QP） |
+| **av1_nvenc** | **0~63** | **−1~255** | `-qp` 是 **AV1 qindex**，≈ 4×QP |
+| libx264 / libx265 | 无（用 -crf） | 0~51 | 同尺度 |
+| libsvtav1 | 无 | 0~63 | = crf 刻度 |
+| librav1e | 无 | −1~255 | 4×（表里已有 `(4.0, -4.0)`） |
+| h264/hevc_vaapi | **无** | 0~52 | 同尺度 |
+| h264_qsv 等 | **本机该编码器无 `-cq`**（`-preset` 也只收 `veryfast..veryslow`） | — | — |
+
+⇒ **两项目在 constqp 上都把 CQ 轴值（或基准轴值）直接当 `-qp`**：
+- VidUtils 拿 CQ 轴值（`crf_ref 21 --codec hevc_nvenc` → `-qp 28`），
+- VE 的 `to_constqp_qp()` 回基准轴（→ `-qp 20/21`，对 H.264/HEVC 是对的），
+- **但 AV1 上两边都错**：`-qp 21/27` 落在 0~255 上是**近无损**（体积暴涨），应为 ~84。
+  正确做法是先有"QP 尺度层"（`_QP_SCALE = {av1_nvenc:4, librav1e:4, 其余:1}`），
+  且 AV1 的 QP 量程要**另立表**（`QUALITY_MAP` 的 `(lo,hi)` 描述的是 CQ 轴，
+  拿它夹 QP 会把 84 夹回 63）。
+
+### 已落地（2026-09-28，两脚本 + 两份 convert_crf.py）
+- `QUALITY_MAP['av1_nvenc']` 的 hi **51 → 63**（原先把 `crf_ref 45~51` 全挤在 51）。
+- 新增 `literal_range()`：字面量按**生效编码器**量程校验（CLI 层拒绝 + 同族下发钳位）。
+  修前 `--cq 60 --codec h264_nvenc` 让 ffmpeg 报 out of range 直接失败、
+  `--crf 60 --codec libx264` 被静默按 51 编码。
+- 新增 `_QP_ONLY_CODECS = {h264_vaapi, hevc_vaapi}` → `encoder_supports_qp()`；
+  质量输入归一到基准轴后走 `-qp`。修前 `--cq 26 --codec h264_vaapi`
+  **一条选项都不发、且无告警**（静默丢值）。
+- 判据：`verify/verify_quality_mapping.py` 新增 **⑨ 组（跨项目体检，13 项）** 与
+  **⑩ 组（V3/V4/V6 正向断言）**；⑨ 组默认只报告、`STRICT_KNOWN=1` 转门禁。
+
+### 追加（2026-09-28 第二轮）：V1/V2/V5/V7/V8/V9/V10/V11/V12 全部落地
+
+这一轮把方案 `Plan/VidUtils_质量控制参数修复方案.md` 的剩余项全部做完，两脚本 + 两份
+`convert_crf.py` 同步（VE 侧 `src/utils/convert_crf.py` 与本仓逐字相同）。
+
+| 项 | 落地要点 |
+|---|---|
+| **V1** | `-qp` 回**基准轴**（不再拿 CQ 轴值直发）。新增 `_QP_SCALE`（AV1 族 ×4）/ `_QP_LIMITS`（av1_nvenc 0~255，**不能**拿 QUALITY_MAP 的 CQ 量程夹）/ `to_constqp_qp()` / `from_constqp_qp()`；constqp 的 `-crf-ref`/`-cq-ref` 与 `--crf` 落硬编都走它。`h264_nvenc cref21 → -qp 21`、`hevc_nvenc → 20`（=VE 的 `to_constqp_qp`）、`av1_nvenc → 84`（21×4） |
+| **V2** | `--qp` 落软编按基准轴回算：`hevc_nvenc constqp --qp 18 → libx265 -crf 18`（此前按 CQ 轴得 14） |
+| **V5** | QSV 移出 `CQ_SUPPORTED_CODECS`（实测无 `-cq`）、VT 也移出（质量轴是 `-q:v`）、去掉 cpu_v2 的 `h265_nvenc` 冗余 ⇒ 两脚本 CQ 集相等。QSV 的 preset 走 x264 档名映射（实测 `-preset` 收 veryfast..veryslow）；对"有质量输入但无质量轴"的编码器补**告警**（不再静默丢值） |
+| **V7** | `DEFAULT_CRF`/`DEFAULT_CQ` → `DEFAULT_REF=21`；未给质量时按基准换算（libx264 21 / libx265 21 / h264_nvenc 26 / hevc_nvenc 28），修掉"硬编默认过配 3 档" |
+| **V8** | `librav1e` 移出 `CRF_SUPPORTED_CODECS`（对齐 VE 的 `supports_crf`）；字面量 `--crf` 与 `--crf-ref` 都走基准轴 ⇒ 都 `-qp 80`（此前字面量 64）。build 层独立判断 librav1e 下发 `-qp` |
+| **V9** | **真实素材等体积标定**（`input_videos/new5_raw.mp4` 1080p→720p 4s，`probe/calibrate_soft_offsets.py`）：`libx265 → 0.9155x+1.6385`、`libvpx-vp9 → 1.6198−5.7553`、`libsvtav1 → 1.9450−15.62`；两份 `convert_crf.py` 同步。`default_preset_for('libsvtav1')` 固定 `8`（不再随核数漂）。⚠ 等体积≠等质量、素材单一 |
+| **V10** | preset 表拆成两张**刻意不对称**的表（详见 `project_preset_equivalence.md` 约定 1） |
+| **V11** | 两份 `convert_crf.py` 的 `hevc_videotoolbox` b **105→100**（lo=1 可达、不再 crf 0~2.58 全饱和） |
+| **V12** | 判据 ①②⑥ 期望值更新、⑨ 待修项逐条转 `chk`（**⑨ 现在默认就是门禁**，`STRICT_KNOWN=0` 可降级为只报告）、新增 **⑪ 组正向断言**、基线更新（`enc_before.txt` 的 hevc_nvenc 行 crf 16→13） |
+
+**关键设计决定（用户拍板）**：
+- V9 用**真实素材**标定再落表（不用方案里合成素材的拟合值）——结果与合成拟合差异大，
+  且 libx265 的真实值也偏离旧表（故三张表都改）。
+- V10 preset 对齐 **VE 当前的官方 ffmpeg 枚举**，但 `DEFAULT_PRESET_GPU` 保持 `p5`、
+  GPU→CPU 反向表保持 `p5→medium`（否则破坏两脚本命令 lockstep + 基线）。
+- V5 以**实测/规范**为准统一两脚本能力集。
+
+**How to apply**：
+- 再动 `QUALITY_MAP` 的 a/b：两份 `convert_crf.py` 必须逐字同步，并重跑
+  `verify/verify_quality_mapping.py`（⑨ 的"真源逐条相等"会红）。
+- 再动 preset 表：先看 `project_preset_equivalence.md` 约定 1，跑 `dump_cmd_full.sh` + `dump_enc_options.sh`。
+- 再动 `-qp`：记住它**不是**一套刻度（AV1 是 0~255 qindex、VAAPI 0~52、H.264/HEVC 0~51），
+  且 constqp 走 `to_constqp_qp()`（基准轴），CLI 量程用 `qp_range(codec)`。
+- 判据：`verify/verify_quality_mapping.py`（①~⑪ 组，⑨ 现在是门禁）；
+  上机脚本 `probe/verify_nvenc_quality_gpu.py`（T4 无 AV1 NVENC 会自动 SKIP、L40 跑满）；
+  标定脚本 `probe/calibrate_soft_offsets.py`。
+
+## T4 上机实测结果（2026-09-28，Tesla T4 / 驱动 580.65.06）
+
+素材 `input_videos/new4_raw.mp4`（1080p HEVC 18.7s）；软编基准 libx264 `crf 21` =
+PSNR 44.02 dB / 6054 kbps。报告：`verification_report/nvenc_quality_T4_20260928_062328.{json,md}`。
+
+- **B 组（`-cq` 偏移）成立**：h264 `-cq 26` → ΔPSNR **+0.69 dB** / 码率 **1.17×**（容忍带内）；
+  hevc `-cq 28` → **+0.39 dB** / **0.76×**（带内）。朴素值 `-cq 21` 对照 = 2.20× / 1.60×（越界）
+  ⇒ **偏移方向与幅度都对，`QUALITY_MAP` 的 b 不必改**。
+- **C 组（constqp `-qp` 回基准轴）成立**：h264 `-qp 21` → **+1.66 dB** / **1.37×**；
+  hevc `-qp 21` → **+1.93 dB** / **1.06×** ⇒ **V1 前提「constqp 的 `-qp` = 基准轴」成立，
+  无需引入 `CONSTQP_QP_OFFSET`**。
+- **av1 两格 SKIP**：T4 的 `av1_nvenc` 实探测到 `error code -22 (Invalid)`（列表里有、编不了）
+  ⇒ `-cq` 偏移与 `-qp` ×4 尺度**仍待 L40/Ada 判定**。
+- `probe/t4_acceptance.py`：**20/20 通过**（修掉 A 组 3 处滞后期望值后，见
+  `project_t4_gpu_capabilities.md` 末节）；C1 复证 NVENC `-qp 0` **不是**逐帧无损（561/561 帧不同）。
+
+**L40/Ada 交接（2026-09-28 备好，方案 §4.10）**：AV1 的 `-cq` 偏移与 `-qp` ×4 尺度是
+**唯一还没端到端实测**的两条，需 Ada 及以上 NVENC。探针已加 `--expect-av1`：**显式 opt-in 的
+fail-fast**——不加它时非 AV1 卡上那几格静默 SKIP（退出码仍 0，易误判成"跑绿了"），加了它则
+要求本卡能编 AV1，否则 **exit 2**。跑完 B/C 组各多一行 `-结论`（`B-av1-结论` / `C-av1-结论`），
+直接给「动不动 `QUALITY_MAP` 的 b / 动不动 `_QP_SCALE`」的可执行结论；两个纯函数结论已纳入
+`--selftest`（避免首次上机才暴露）。步骤、判读矩阵、与 T4 报告对比见方案 §4.10。

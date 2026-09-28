@@ -54,18 +54,20 @@ CMD_RE = re.compile(r"命令[^:]*: (ffmpeg .*)$", re.M)
 #   （test/dump_enc_options.sh / dump_cmd_full.sh）用 CPU 轴验的 —— 本脚本这一格写的是
 #   NVENC 形态，本机 `--codec *_nvenc` 必然降级 ⇒ 期望不成立、必须跳过。
 # (id, 标签, 参数, 必须含[], 必须不含[], local_ok, 本机状态, 红了说明什么)
+# ⚠ A2/A3/A7 的期望值随 V1（constqp 的 -qp 回基准轴）/ V7（默认质量统一到基准 21）更新过：
+#   旧值 -qp 28 / -qp 26 / -cq 23 → 现值 -qp 20 / -qp 18 / -cq 28（2026-09-28 T4 上机实测核对）。
 A_CASES = [
     ("A1", "nvenc constqp --qp 18", ["--codec", "hevc_nvenc", "--rc-mode", "constqp", "--qp", "18"],
      ["-c:v hevc_nvenc", "-rc constqp -qp 18"], ["libx265", "-cq"], False,
      "只能单元级", "GPU 上没走 constqp 透传；先确认这条命令里有没有 libx265（被降级了）"),
     ("A2", "nvenc constqp --crf-ref 21", ["--codec", "hevc_nvenc", "--rc-mode", "constqp",
                                           "--crf-ref", "21"],
-     ["-c:v hevc_nvenc", "-rc constqp -qp 28"], ["-cq"], False,
-     "只能单元级", "-ref 换算到 qp 的值与单元级推算(28)不一致；先看是否被降级"),
+     ["-c:v hevc_nvenc", "-rc constqp -qp 20"], ["-cq"], False,
+     "只能单元级", "-ref 换算到 qp 的值与单元级推算(20：V1 后 -qp 回基准轴)不一致；先看是否被降级"),
     ("A3", "nvenc constqp --cq-ref 23", ["--codec", "hevc_nvenc", "--rc-mode", "constqp",
                                          "--cq-ref", "23"],
-     ["-c:v hevc_nvenc", "-rc constqp -qp 26"], ["-cq"], False,
-     "只能单元级", "-ref(cq 量纲) 换算到 qp 的值与单元级推算(26)不一致"),
+     ["-c:v hevc_nvenc", "-rc constqp -qp 18"], ["-cq"], False,
+     "只能单元级", "-ref(cq 量纲) 换算到 qp 的值与单元级推算(18)不一致"),
     ("A4", "字面量 --crf 21 → -cq", ["--codec", "hevc_nvenc", "--crf", "21"],
      ["-c:v hevc_nvenc", "-cq 28", "-b:v 0"], ["-crf", "libx265"], False,
      "只能单元级", "这是本轮新能力（此前静默回落默认 -cq 23）；若还是 23 说明换算没生效"),
@@ -76,8 +78,8 @@ A_CASES = [
      ["-rc constqp -qp 0", "-b:v 0"], ["-cq 0"], False,
      "只能单元级", "既有的 cq0 改写回归；若变成 -cq 0 说明 0 档改写被本轮改动带坏了"),
     ("A7", "默认（回归）", ["--codec", "hevc_nvenc"],
-     ["-c:v hevc_nvenc", "-cq 23", "-b:v 0"], ["libx265"], False,
-     "本机已验（回归门覆盖）", "既有默认路径被本轮改动带了（应逐字不变）"),
+     ["-c:v hevc_nvenc", "-cq 28", "-b:v 0"], ["libx265"], False,
+     "本机已验（回归门覆盖）", "V7 后默认质量统一为基准 21 ⇒ hevc_nvenc 应下发 -cq 28；若还是 23 说明默认质量没统一"),
     ("A8", "--cq 20（回归）", ["--codec", "hevc_nvenc", "--cq", "20"],
      ["-cq 20", "-b:v 0"], ["libx265"], False,
      "本机已验（回归门覆盖）", "既有 -cq 路径被带了（应逐字不变）"),

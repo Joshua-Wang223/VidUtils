@@ -19,6 +19,12 @@
 #       （对齐 hwaccel：强制 4:2:0 会把 4:2:2 / 4:4:4 的 8bit 源静默降色度）→
 #       全部 cpu_v2 行少一个 `-pix_fmt yuv420p`。基线已按新行为更新。
 #       行为判据见 verify/verify_quality_mapping.py。
+#   例外（2026-09-28，有意变更，V9/V10）：
+#     · V9 重标定 QUALITY_MAP 的 libx265 / libvpx-vp9 / libsvtav1（真实素材等体积），
+#       ⇒ hevc_nvenc 降级到 libx265 的换算值 crf 16 → 13。
+#     · V10 preset：x264→NVENC 方向对齐 ffmpeg 官方/VE 枚举（medium→p4）；GPU→CPU 的
+#       反向降级表**刻意保持** medium 落在 p5（否则两脚本默认请求的编码器不同会让
+#       本门的「逐字相同」破功）——故本门输出不变。判据见 verify 的 ⑨/⑪ 组。
 # 用法: bash test/dump_enc_options.sh > out.txt
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1

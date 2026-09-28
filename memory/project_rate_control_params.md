@@ -217,3 +217,19 @@ NVENC → `-rc constqp -qp 0 -b:v 0`（显式 `--qp 0` 此前缺 `-b:v 0`，已�
 - 判据：`verify/verify_quality_mapping.py`（①~⑪ 组，⑨ 现在是门禁）；
   上机脚本 `probe/verify_nvenc_quality_gpu.py`（T4 无 AV1 NVENC 会自动 SKIP、L40 跑满）；
   标定脚本 `probe/calibrate_soft_offsets.py`。
+
+## T4 上机实测结果（2026-09-28，Tesla T4 / 驱动 580.65.06）
+
+素材 `input_videos/new4_raw.mp4`（1080p HEVC 18.7s）；软编基准 libx264 `crf 21` =
+PSNR 44.02 dB / 6054 kbps。报告：`verification_report/nvenc_quality_T4_20260928_062328.{json,md}`。
+
+- **B 组（`-cq` 偏移）成立**：h264 `-cq 26` → ΔPSNR **+0.69 dB** / 码率 **1.17×**（容忍带内）；
+  hevc `-cq 28` → **+0.39 dB** / **0.76×**（带内）。朴素值 `-cq 21` 对照 = 2.20× / 1.60×（越界）
+  ⇒ **偏移方向与幅度都对，`QUALITY_MAP` 的 b 不必改**。
+- **C 组（constqp `-qp` 回基准轴）成立**：h264 `-qp 21` → **+1.66 dB** / **1.37×**；
+  hevc `-qp 21` → **+1.93 dB** / **1.06×** ⇒ **V1 前提「constqp 的 `-qp` = 基准轴」成立，
+  无需引入 `CONSTQP_QP_OFFSET`**。
+- **av1 两格 SKIP**：T4 的 `av1_nvenc` 实探测到 `error code -22 (Invalid)`（列表里有、编不了）
+  ⇒ `-cq` 偏移与 `-qp` ×4 尺度**仍待 L40/Ada 判定**。
+- `probe/t4_acceptance.py`：**20/20 通过**（修掉 A 组 3 处滞后期望值后，见
+  `project_t4_gpu_capabilities.md` 末节）；C1 复证 NVENC `-qp 0` **不是**逐帧无损（561/561 帧不同）。

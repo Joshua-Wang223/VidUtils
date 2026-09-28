@@ -1648,6 +1648,7 @@ vidutils/
 │   ├── probe_scale_cuda_crop.sh         # CUDA 缩放裁剪：计时与画质 A/B/C/D/Q
 │   ├── probe_lossless_qp0.sh            # 「-qp 0 / -crf 0 到底是不是数学无损」（恒等裁剪 + 逐帧哈希；本机可 LOCALCPU=1 自证）
 │   ├── t4_acceptance.py                 # T4 上机验收（落点 / 运行期 / 无损三组；--local 本机降级自证、--selftest 验装置）
+│   ├── verify_nvenc_quality_gpu.py      # NVENC 质量轴上机验收（B 组 -cq 偏移 / C 组 constqp -qp 尺度；--quick 只跑 A 组逻辑）
 │   └── enum_cmds.py                     # 无 GPU 时 mock 远程能力、枚举脚本真正下发的命令
 ├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
 ├── Plan/                     # 立项任务书与过程归档（含 vidls 对话记录 .txt）
@@ -1745,6 +1746,10 @@ SRC=<源视频> bash probe/probe_lossless_qp0.sh                      # 验 NVEN
 python probe/t4_acceptance.py --selftest                           # 验收脚本装置自检（9 格：判词/解析/空集），CPU-only
 python probe/t4_acceptance.py --local                              # 本机降级自证：只跑本机成立的格，GPU 专属格显式跳过
 python3 probe/t4_acceptance.py --src '<源视频>'                     # T4 上机验收：落点 / 运行期 / 无损 三组
+
+python3 probe/verify_nvenc_quality_gpu.py --quick                  # NVENC 质量轴装置自检（A 组纯逻辑 + 打印 GPU 能力探测）
+python3 probe/verify_nvenc_quality_gpu.py --src '<源视频>'          # 上机验收：B 组 -cq 偏移 / C 组 constqp -qp 尺度（av1 在 T4 会 SKIP）
+python3 probe/verify_nvenc_quality_gpu.py --src '<源视频>' --json verification_report/nvenc_quality.json --md verification_report/nvenc_quality.md   # 落报告
 ```
 
 > `probe/t4_acceptance.py` 是那轮改动**剩下的验收面**的收口（A 落点 / B 运行期 / C 无损）。
@@ -1856,7 +1861,11 @@ SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（五格，不�
   —— 别的流水线会抢 CPU/GPU 导致基准不可信；**VP9 有硬解但从来没有硬编**、
   **AV1 硬解硬编都没有**（`av1_cuvid` 在列表里，运行时报 not supported）；
   「本机 AV1 完全编不出来」这条已更正为：custom `ffmpeg` 7.1 没有 AV1 软编，
-  但系统 `ffmpeg` 6.1.1 有 `libsvtav1`/`libaom-av1`；零拷贝管线里 `-pix_fmt` 无效
+  但系统 `ffmpeg` 6.1.1 有 `libsvtav1`/`libaom-av1`；零拷贝管线里 `-pix_fmt` 无效；
+  ⚠ **有 GPU 的机器上跑 `verify/` 与 `test/dump_cmd_full.sh` 会有一批「环境假设过时」的假红**
+  （4 处 verify + 2 个默认档用例；`--decode cpu` 只强制 CPU 解码/缩放、**不强制编码器降级**），
+  已用 `git worktree` 在改动前提交复跑证明非回归；另 `probe/t4_acceptance.py` 的 A 组期望值
+  是硬编码的，落点有意变更后会滞后成假红 —— 清单与判法见该记忆文件末
 - [解码/缩放/编码三轴模型（`--hwaccel` 已硬更名 `--decode`）](memory/project_three_axis_model.md)
   —— 把 `--hwaccel` 拆成三个正交轴（`--decode` / `--scale-algo` / `--codec`）外加纯策略开关
   `--fallback-policy(auto/strict)`；旧 `--hwaccel` 与 `strict-cuda`/`nvenc-only`/`cpu-only`
@@ -1884,7 +1893,12 @@ SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（五格，不�
 - [码率控制轴：`--rc-mode` / `--qp` / `--lookahead` / `--bitrate`](memory/project_rate_control_params.md)
   —— 两脚本同名同默认，**默认值全部 = 不下发**（不传时命令逐字不变）；`-rc` / `-qp` 是 NVENC
   专属（非 NVENC 告警忽略、`strict` 报错）；`--lookahead` 按编码器映射且默认值三边不同；
-  实测 `-x265-params` 后者**整条覆盖**前者，故必须与 HDR 元数据合并成同一条
+  实测 `-x265-params` 后者**整条覆盖**前者，故必须与 HDR 元数据合并成同一条；
+  **2026-09-28（V1~V12）+ T4 上机实测**：`-qp` 不是一套刻度（AV1 0~255 qindex、VAAPI 0~52、
+  H.264/HEVC 0~51），constqp 走 `to_constqp_qp()` 回基准轴、CLI 量程 `qp_range(codec)`；
+  默认质量统一 `DEFAULT_REF=21`；实测 **B 组 `-cq` 偏移（h264 26→1.17×、hevc 28→0.76×）
+  与 C 组 constqp `-qp 21` 都落在容忍带 ⇒ 表与 V1 均无需改**；av1 在 T4 必 SKIP（编不了），
+  `-qp` ×4 尺度待 L40/Ada；报告在 `verification_report/`
 - [按主题拆分同一文件里的两条改动线（`test/split_diff_by_theme.py`）](memory/project_commit_split_tool.md)
   —— 分提交时的 hunk 手术固化成规则驱动工具（判定顺序 **整块覆盖 → 逐行规则 → 关键词 →
   沿用上一段**，判不出来标 `?` + 告警，绝不静默分错线）；**只出 A 侧补丁**，B 侧 = 工作区减去

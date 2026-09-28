@@ -1,6 +1,6 @@
 ---
 name: T4 编解码能力/性能基线，以及本机可能有并发流水线抢占
-description: Tesla T4 的 NVENC/NVDEC 能力边界与性能基线（VP9 有硬解无硬编、AV1 硬解硬编都没有；AV1 软编取决于用哪个 ffmpeg）；做性能测试前必须先在 /workspace/Video_Enhancement 查是否有流水线在跑（会占 CPU 40%+GPU 70%）
+description: Tesla T4 的 NVENC/NVDEC 能力边界与性能基线（VP9 有硬解无硬编、AV1 硬解硬编都没有；AV1 软编取决于用哪个 ffmpeg）；做性能测试前必须先在 /workspace/Video_Enhancement 查是否有流水线在跑（会占 CPU 40%+GPU 70%）；有 GPU 的机器上跑 verify/ 与 dump_cmd_full 会有一批「环境假设过时」的假红，别当回归
 type: project
 ---
 
@@ -128,3 +128,42 @@ imagemagick 依赖），平时不会被调用。
 同一个 2s 编码产物：跟 60s 源比 = **23.86 dB**，跟等长 2s 片段比 = **47.16 dB**。
 （`-shortest` 救不了，仍是 23.86。）
 教训：对比画质前先确认两个输入帧数一致，否则会得出"短片段画质极差"的错误结论。
+
+## 在有 GPU 的机器上跑 `verify/` 与回归门，会有一批「假红」
+
+本仓的 `verify/` 与部分回归门是在**无 NVIDIA 的开发机**上写的，其中几处把"本机没有 GPU"
+当成了前提。**在 T4（或任何有卡机器）上跑，下面这些必然红/分叉，与代码改动无关**
+（2026-09-28 用 `git worktree` 在改动前提交 `392fc47` 复跑，逐条比对：改前改后一致）。
+
+| 位置 | 旧断言（假定无 GPU） | 有卡机器上的实际 |
+|---|---|---|
+| `verify/verify_quality_mapping.py` ①「端到端命令」 | `--codec hevc_nvenc --qp 18 → -crf 18`（假定降级到 libx265） | hevc_nvenc 可用 ⇒ **不降级** ⇒ 下发 `-qp 18` |
+| `verify/verify_borrow_enhancement.py` ⑧「批汇总」 | 应打印 `实际档位` 行 | libx264 在 GPU 机不是降级档 ⇒ `fallback_count=0` ⇒ 不打该行 |
+| `verify/verify_decode_axis.sh` ⑦ | 「本机无 CUDA ⇒ strict 应 rc=2」 | CUDA 可用 ⇒ rc=0 |
+| `verify/verify_cuda_decode_codec.py` ⑥ | 「本机无 N 卡 ⇒ 应返回 False」 | 有卡 ⇒ True |
+| `test/dump_cmd_full.sh` 2 个**默认档**用例 | 两脚本命令逐字相同 | 默认编码器不同（hwaccel→`h264_nvenc`、cpu_v2→`libx264`）⇒ 分叉；**显式给编码器的用例仍逐字相同** |
+
+**Why:** 看到 FAIL 会先怀疑刚做的改动。这里有一条容易踩空的细节：`verify_quality_mapping.py`
+里那 7 处 hwaccel 调用虽带 `--decode cpu --scale-algo libswscale-*`，但那只强制 **CPU 解码+缩放**，
+**不强制编码器降级** —— 编码器降级只看该编码器在本机可不可用，所以在 GPU 机上结论与本机不一致。
+
+**How to apply:**
+- 在 T4 / 有卡机器上跑全套 verify，**预期就是上表这几处红**；报告时直接说明"环境假设过时、
+  改前改后一致"，别去"修"它们（除非用户明确要求改成按实际能力分支）。
+- 反过来，**在无 GPU 机器上**这几条才是有效的（会 PASS）。
+- 判定方法（复现）：`git worktree add -f /tmp/vu_pre <改动前提交>`，在那边跑同一套 verify，
+  逐条对比失败项是否一致 —— 一致即环境所致，不是回归。
+
+## 验收/探针工具的期望值会滞后于「有意的落点变更」
+
+`probe/t4_acceptance.py` 的 A 组（dry-run 落点断言）把期望值**硬编码**在 `A_CASES` 里。
+2026-09-28 的 V1（constqp 的 `-qp` 回基准轴）/ V7（默认质量统一到基准 21）改掉了同一批落点，
+但 A2/A3/A7 仍是旧值（`-qp 28`/`-qp 26`/`-cq 23`），而同一张表里的 A4 却已更新成新值
+（`-cq 28`）——**表现为 A 组自相矛盾地 3 红**。
+
+**Why:** 这类红**看着像产品回归，实为探针滞后**。当时实测产品命令 `-qp 20`/`-qp 18`/`-cq 28 -b:v 0`
+与方案 §4.5 的期望完全一致 ⇒ 该改的是探针，不是产品。
+**How to apply:** A 组红了先看它打印的 `执行命令`，与方案 §4.5 的期望逐 token 比对：
+- 命令与 §4.5 一致、探针仍红 ⇒ **改 `A_CASES` 期望值**（别动产品）；
+- 命令与 §4.5 不一致 ⇒ 才是真的落点问题，查策略链。
+改动落点（如再动 `-qp`/默认质量）时，**顺手同步 `A_CASES` 与它的 `--selftest`**。

@@ -13,9 +13,11 @@
     `-qp 0` 无损声明（C，配合 `probe/probe_lossless_qp0.sh`）
 - 标定脚本：`probe/calibrate_soft_offsets.py`（真实素材等体积标定，可复现 V9）
 
-> **状态（2026-09-28）：V1 ~ V12 全部已落地**，两脚本 + 两份 `convert_crf.py` 同步，
-> 本机四道回归门 + 全部 verify 套件全绿。**剩下的只有"上机核实"**（AMF 能力表、
-> NVENC 的 `-cq`/`-qp` 实测量程与偏移）——执行方案见 **§4**。
+> **状态（2026-09-28）：V1 ~ V12 全部已落地**，两脚本 + 两份 `convert_crf.py` 同步。
+> **T4 上机验收已完成**（§4.9）：NVENC 的 `-cq` 偏移（B 组）与 constqp `-qp` 回基准轴（C 组的
+> h264/hevc 对照）**实测成立**，`t4_acceptance` 20/20 通过 —— 详见 §4.9。
+> **仍未覆盖的只有**：AV1 的 `-cq` 偏移与 `-qp` ×4 尺度（需 L40/Ada，T4 编不了 AV1）、
+> AMF 能力表、VideoToolbox `-q:v` —— 执行方案见 §4.8。
 
 ---
 
@@ -325,8 +327,23 @@ bash test/check_readme_refs.sh      # 期望：README 引用了全部工具文�
 ```
 
 > `verify/verify_quality_mapping.py` 里 **7 处 hwaccel 调用全带 `--decode cpu
-> --scale-algo libswscale-*`**，强制走 CPU 降级链 ⇒ 在 GPU 机上结论与本机一致，可放心当门禁。
+> --scale-algo libswscale-*`**，强制走 CPU **解码 + 缩放**。⚠ **但这不强制编码器降级** ——
+> 编码器是否降级只看该编码器在本机可不可用，所以**在 GPU 机上结论与本机不一致**（见下）。
 > 临时想只看不拦：`STRICT_KNOWN=0 python3 verify/verify_quality_mapping.py`。
+
+> **T4 上跑 §4.1 的预期偏差（2026-09-28 实测）**：T4 有 GPU ⇒ 依赖「本机无 GPU」旧假设的
+> 4 处 verify + 2 个 `dump_cmd_full` 用例会 FAIL/分叉。**已用 `git worktree` 在改动前提交
+> 392fc47 复跑，逐条比对：改动前完全一致 ⇒ 环境假设过时，不是本轮回归。**
+> | 位置 | 旧断言 | T4 上的实际 |
+> |---|---|---|
+> | `verify_quality_mapping.py` ① 端到端 | `--codec hevc_nvenc … --qp 18 → -crf 18`（假定降级到 libx265） | hevc_nvenc 可用 ⇒ 不降级 ⇒ 下发 `-qp 18`（新行为，正确） |
+> | `verify_borrow_enhancement.py` ⑧ 汇总 | 「应打印 `实际档位`」 | libx264 在 GPU 机非降级档 ⇒ 不打该行 |
+> | `verify_decode_axis.sh` ⑦ | 「本机无 CUDA ⇒ strict 应 rc=2」 | CUDA 可用 ⇒ rc=0 |
+> | `verify_cuda_decode_codec.py` ⑥ | 「本机无 N 卡 ⇒ 应返回 False」 | 有卡 ⇒ True |
+> | `test/dump_cmd_full.sh` 2 个**默认档**用例 | 两脚本命令逐字相同 | hwaccel 默认 h264_nvenc vs cpu_v2 默认 libx264 ⇒ 分叉（显式给编码器的 18 个用例仍逐字相同） |
+>
+> 其余 verify 套件 + 三道回归门全绿。`test/check_readme_refs.sh` 本轮**真红过一次**：
+> `probe/verify_nvenc_quality_gpu.py` 未登记进 README（已补，43/43 ✓）。
 
 ### 4.2 上机前置自检（GPU 机）
 
@@ -374,16 +391,23 @@ python3 probe/t4_acceptance.py --src '/path/to/真实素材.mp4'
 
 ### 4.5 Step 3 · 落点抽查（dry-run，秒级，可在任何机器）
 
+> ⚠ `--dry-run` **也要求裁剪尺寸**（`--output-width/--output-height` 或 `--crop-ratio` 二者之一），
+> 否则直接 `[ERROR] 必须指定 --output-width/--output-height 或 --crop-ratio 其中之一。`（rc=2）。
+
 ```bash
 python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
+    --output-width 640 --output-height 360 \
     --codec hevc_nvenc --rc-mode constqp --crf-ref 21 | grep 执行命令
 #   期望： … -rc constqp -qp 20 …                （V1）
 
 python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
+    --output-width 640 --output-height 360 \
     --codec av1_nvenc --rc-mode constqp --crf-ref 21 | grep 执行命令
-#   期望： … -rc constqp -qp 84 …                （V1 + AV1 QP 尺度 ×4）
+#   期望（仅 AV1 可控 GPU）： … -rc constqp -qp 84 …   （V1 + AV1 QP 尺度 ×4）
+#   T4 上 av1_nvenc 不可用 ⇒ 会**自动降级 libsvtav1**，落点是 -crf 25（V9 表），看不到 -qp 84
 
 python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
+    --output-width 640 --output-height 360 \
     --codec hevc_nvenc | grep 执行命令
 #   期望： … -cq 28 -b:v 0 …                     （V7 默认基准 21）
 ```
@@ -396,7 +420,7 @@ python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
 | `C-av1-qp84` 不落、105 更优 | 改 `_QP_SCALE['av1_nvenc']`（**两脚本同步**），必要时调 `_QP_LIMITS` |
 | `C-h264/hevc -qp 21` FAIL | 与"constqp QP = 基准轴"冲突（V1 前提）→ 需引入 `CONSTQP_QP_OFFSET` 重新评估 |
 | `B-*-表值` FAIL（质量下探超 1.5 dB） | 该编码器 `-cq` 偏移需重标 → 改 `QUALITY_MAP` 的 b（**两份 `convert_crf.py` 同步**），回跑 §4.1 |
-| `t4_acceptance` A 组 FAIL | 策略链没有按设计下发（落点问题）：按它打印的 `执行命令` 与 §4.5 期望逐 token 对比 |
+| `t4_acceptance` A 组 FAIL | 先把 `执行命令` 与 §4.5 期望逐 token 对比。若产品命令与 §4.5 一致而探针仍红，则是**探针期望值滞后**（V1/V7 改过落点，见 §4.8），改 `A_CASES` 期望值 —— **别去改产品** |
 | 某编码器 SKIP | 本卡不支持（如 T4 的 av1），不算失败 |
 | 退出码 | `0` 无 FAIL（PASS/WARN/SKIP 均可）；`1` 有 FAIL；`2` 前置不满足 |
 
@@ -414,5 +438,45 @@ python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
 - **AMF**（`h264_amf`/`hevc_amf`/`av1_amf`）：本机与 NVIDIA 机都测不到，其 `-cq` 量程/偏移
   只能按规范保留，待 AMD 机器复核（V5 残留）。
 - **VideoToolbox**：Linux 无该编码器；其 `-q:v` 质量轴与 preset 待 macOS 复核。
+- **AV1 的 `-cq` 偏移与 `-qp` ×4 尺度**：T4 编不了 AV1（`av1_nvenc` 探测实测 `-22 Invalid`）⇒
+  §4.3 的 `B-av1_nvenc` / `C-av1-*` 全 SKIP，**必须在 L40/Ada 上跑**才算判完。
 - **V9 的多素材/多分辨率复核**：当前表基于单条 4s 素材，若要更稳可换 2~3 条不同类型素材
   重跑 `probe/calibrate_soft_offsets.py` 再落表。
+
+### 4.9 本轮 T4 上机实测结果（2026-09-28；Tesla T4 / 驱动 580.65.06 / ffmpeg 7.1）
+
+素材 `/workspace/input_videos/new4_raw.mp4`（1080p HEVC，18.7s，30fps）；
+软编基准 libx264 `crf 21` = **PSNR 44.02 dB / 6054 kbps**。
+
+| 步骤 | 结果 |
+|---|---|
+| §4.2 前置自检 | `av1_nvenc` 的 `-cq (0 to 63)`、`-qp (-1 to 255)`；h264/hevc 的 `-cq (0 to 51)`；有 `libvmaf` —— 与 V3/V1 假设一致 |
+| §4.3 NVENC 质量轴 | **PASS 14 / WARN 4 / FAIL 0 / SKIP 2**（rc=0）；报告 `verification_report/nvenc_quality_T4_20260928_062328.{json,md}` |
+| §4.4 落点/运行期/无损 | **20/20 通过**（rc=0，修掉 A 组 3 处滞后期望值后） |
+| §4.5 dry-run 抽查 | hevc `-cq 28 -b:v 0` ✓、`-rc constqp -qp 20` ✓；av1 在 T4 自动降级 libsvtav1 `-crf 25`（V9 表）✓ |
+| §4.1 本机门禁 | 其余 verify/回归门全绿；4 处 verify + 2 个 `dump_cmd_full` 用例为**有 GPU 的环境假设过时**（`git worktree` 在 392fc47 复跑已证改动前一致） |
+
+**§4.3 关键判读**：
+
+- **B 组（`-cq` 偏移）成立**：h264 `-cq 26` → ΔPSNR **+0.69 dB** / 码率 **1.17×**（带内）；
+  hevc `-cq 28` → +0.39 dB / **0.76×**（带内）。朴素值 `-cq 21` 对照 = 2.20× / 1.60×（越界）
+  ⇒ **偏移方向与幅度都对，`QUALITY_MAP` 不必改**。
+- **C 组（constqp `-qp` 回基准轴）成立**：h264 `-qp 21` → +1.66 dB / **1.37×**；
+  hevc `-qp 21` → +1.93 dB / **1.06×**（均带内）⇒ **V1 前提"constqp 的 `-qp` = 基准轴"成立，
+  无需引入 `CONSTQP_QP_OFFSET`**。
+- **av1 两格 SKIP**（本卡 `av1_nvenc` 实探测到 `error code -22 (Invalid)`）⇒ `-qp` ×4 尺度
+  仍**待 L40/Ada 判定**（§4.8）。
+
+**§4.4 关键判读**（C1 无损探针）：
+
+- NVENC `-qp 0`：逐帧差异 **561/561 帧** ⇒ **不是**数学无损，只是最高质量档；
+- 负向对照 `-qp 18` 也全帧不同（证明装置有分辨力）；
+- h264_nvenc `-qp 0` 同样全帧不同 ⇒ 文档中"真无损改写"的说法**必须按编码器区分**
+  （CPU 的 `-crf 0` 才是）—— 与本轮更正的声明一致。
+
+**本轮修掉的两处真实问题**（其余 FAIL 均为环境假设，见 §4.1）：
+
+1. `test/check_readme_refs.sh` 红：`probe/verify_nvenc_quality_gpu.py` 未登记进 README（已补，43/43 ✓）。
+2. `probe/t4_acceptance.py` 的 A2/A3/A7 期望值滞后于 V1/V7（旧 `-qp 28`/`-qp 26`/`-cq 23`
+   → 新 `-qp 20`/`-qp 18`/`-cq 28`）⇒ 产品行为正确、探针误报 3 红，已更新探针（复跑 20/20）。
+

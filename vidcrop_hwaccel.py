@@ -213,10 +213,10 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 # 只在"GPU 编码器降级为 CPU 编码器"这一条路径上使用；用户显式给出的同族参数
 # （CPU 的 --crf、GPU 的 --cq）一律原样下发。
 try:
-    from convert_crf import convert_quality, from_x264_crf, to_x264_crf
+    from convert_crf import QUALITY_MAP, convert_quality, from_x264_crf, to_x264_crf
 except ImportError:                       # 从其他工作目录启动时 sys.path 未必含本脚本所在目录
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from convert_crf import convert_quality, from_x264_crf, to_x264_crf
+    from convert_crf import QUALITY_MAP, convert_quality, from_x264_crf, to_x264_crf
 
 # ═══════════════════════════════════════════════════════════════════
 #  常量定义
@@ -299,16 +299,26 @@ PRESET_SUPPORTED_CODECS = {
 CRF_SUPPORTED_CODECS = {
     'libx264', 'libx265',
     'libvpx-vp9', 'libvpx',
-    'libaom-av1', 'libsvtav1', 'librav1e',
+    'libaom-av1', 'libsvtav1',
+    # librav1e **不在**此集（与 Video_Enhancement 的 supports_crf() 对齐，V8）：
+    # 它的 ffmpeg 选项里根本没有 -crf，只有 -qp（0~255）。此前把它列进来会让
+    # 字面量 --crf 走"libaom 刻度"、--crf-ref 走"基准轴"两条链，同一条 --crf 21
+    # 得到 64 与 80 两个值；移出后统一走基准轴（见 _resolve_quality_params）。
 }
 
-# 支持 -cq 的编码器集合（GPU 硬件编码器）
+# 支持 -cq 的编码器集合（即 ffmpeg 私有选项 `-cq` 真正存在的那些）。
+# ⚠ 必须与 vidcrop_cpu_v2.py 的同名常量**逐字相同**（孪生约定，判据里断言相等）。
+# V5 依实测/规范收敛：
+#   · QSV（h264/hevc/av1_qsv）**没有** `-cq`（实测本机 ffmpeg `-h encoder=h264_qsv`
+#     只有 `-preset (0~7)`），移出；
+#   · VideoToolbox 的质量轴是 `-q:v`、不是 `-cq`，也移出（原先只在此脚本里）。
 CQ_SUPPORTED_CODECS = {
     'h264_nvenc', 'hevc_nvenc', 'av1_nvenc',
-    'h264_amf',   'hevc_amf',   'av1_amf',
-    'h264_qsv',   'hevc_qsv',   'av1_qsv',
-    'h264_videotoolbox', 'hevc_videotoolbox',
+    'h264_amf', 'hevc_amf', 'av1_amf',
 }
+
+# QSV 族：preset 用 veryfast..veryslow 名字（实测枚举 0~7 命名档），**不认** p1~p7。
+_QSV_CODECS = {'h264_qsv', 'hevc_qsv', 'av1_qsv'}
 
 # NVENC 家族：p1~p7 风格 preset + -cq 质量控制，可走"硬解 + NVENC 硬编"策略。
 # AV1 与 H.264/HEVC 同属此族（av1_nvenc 同样是 NVENC 封装）。
@@ -330,19 +340,21 @@ _HW_ENCODERS = {
 # ultrafast~veryslow 或 p1~p7 这类名字——实测传 'medium' 直接报
 # "Unable to parse option value"，故必须单独换算。
 X264_TO_SVTAV1_PRESET = {
-    'ultrafast': 12, 'superfast': 11, 'veryfast': 10, 'faster': 9,
-    'fast': 8, 'medium': 8, 'slow': 6, 'slower': 4, 'veryslow': 2,
+    'ultrafast': 13, 'superfast': 12, 'veryfast': 11, 'faster': 10,
+    'fast': 9, 'medium': 8, 'slow': 6, 'slower': 4, 'veryslow': 2,
     'placebo': 0,
 }
 NVENC_TO_SVTAV1_PRESET = {
-    'p1': 12, 'p2': 11, 'p3': 10, 'p4': 9, 'p5': 8, 'p6': 6, 'p7': 4,
+    'p1': 12, 'p2': 11, 'p3': 10, 'p4': 9, 'p5': 8, 'p6': 6, 'p7': 2,
 }
 
-# NVENC preset ↔ libx264 preset 双向映射表。
-# 必须与 vidcrop_cpu_v2.py 的同名表一致：两张表错位会让同一条 `--preset p5`
-# 在两个脚本里落到不同档位（历史上这里错位一档：p4→medium / p5→slow，
-# 而 cpu_v2 是 p4→faster / p5→medium / p6→slow，已按 cpu_v2 对齐）。
-# 对应关系是把 NVENC 的 7 档均匀铺在 x264 阶梯上，两端各留一档（faster 起、veryslow 止）。
+# NVENC preset → libx264 preset（**用于 GPU→CPU 降级的档位等效**，不是 x264→NVENC 的
+# 逆表；两者刻意不对称，原因见下）。
+# ⚠ 必须与 vidcrop_cpu_v2.py 的同名表逐字相同（孪生约定）。
+# 取向：把 NVENC 的 7 档均匀铺在 x264 阶梯上（faster 起、veryslow 止），**medium 落在
+# p5** —— 这样两脚本"默认请求编码器不同"（hwaccel=h264_nvenc、cpu_v2=libx264）时，
+# 同一条逻辑请求（无 --codec）都能落到 `-preset medium`，保住 dump_cmd_full 的
+# 「逐字相同」硬约束，也保住既有基线。
 NVENC_TO_X264_PRESET = {
     'p1': 'ultrafast',
     'p2': 'superfast',
@@ -353,11 +365,28 @@ NVENC_TO_X264_PRESET = {
     'p7': 'veryslow',
 }
 
-DEFAULT_CRF = 21
-DEFAULT_CQ  = 23
+# x264 名字 → NVENC 档：**用户显式给 x264 风格 preset 时用**，取值与 Video_Enhancement
+# 的 _PRESET_P_INDEX（ffmpeg 官方枚举）逐档一致。
+# ⚠ 它与上面 NVENC_TO_X264_PRESET **不是互逆**：x264 有 10 档、NVENC 只有 7 档，两端
+# 必须压缩（ultrafast/superfast→p1、faster/fast→p3、veryslow/placebo→p7），且官方
+# 枚举把 medium 放在 p4，而反向降级表把 medium 放在 p5。这是有意为之（见上）。
+X264_TO_NVENC_PRESET = {
+    'ultrafast': 'p1', 'superfast': 'p1',
+    'veryfast': 'p2', 'faster': 'p3', 'fast': 'p3',
+    'medium': 'p4', 'slow': 'p5', 'slower': 'p6',
+    'veryslow': 'p7', 'placebo': 'p7',
+}
+
+# 统一质量基准（libx264 CRF 轴）。未给质量参数时按它换算到目标编码器的原生刻度，
+# 保证软编/硬编的**默认视觉质量一致**（V7）：此前 DEFAULT_CRF=21（基准轴）与
+# DEFAULT_CQ=23（CQ 轴，≡ crf 18）并不等效 ⇒ 硬编默认比软编过配 3 档。
+# 换算结果：libx264→21 / libx265→24 / h264_nvenc→26 / hevc_nvenc→28。
+DEFAULT_REF = 21
 
 # 未指定 --preset 时的默认预设：CPU 软件编码器 medium，GPU 硬件编码器 p5，
-# libsvtav1 为 8（0~13 整数中速度与质量的平衡点）
+# libsvtav1 为 8（0~13 整数中速度与质量的平衡点）。
+# ⚠ p5 按 ffmpeg 官方 NVENC 枚举是 **slow**（不是 medium；官方 medium 是 p4）。
+# 保持默认 p5 是既有行为/基线的选择（V10 决策：映射对齐官方，默认档不动）。
 DEFAULT_PRESET_CPU = 'medium'
 DEFAULT_PRESET_GPU = 'p5'
 DEFAULT_PRESET_SVTAV1 = '8'
@@ -378,13 +407,15 @@ _RC_MODE_HELP = ('nvenc：' + ' '.join(_RC_MODES)
 _RC_MODES_WITH_BITRATE = ('auto',) + tuple(m for m in _RC_MODES if m != 'constqp')
 # lookahead 范围：x264 的上限就是 250；NVENC / x265 无上限，250 足够且统一。
 _LOOKAHEAD_RANGE = (0, 250)
-# --qp 与 --cq 同量纲（NVENC 的 -qp 是 0~51）
+# --qp 是**真实 QP**（基准轴，非 CQ 轴）；量程随编码器不同（见 qp_range()）
 _QP_RANGE = (0, 51)
 # 码率写法：ffmpeg 记法，如 8M / 8000k / 12000000（裸数字按 bps 解释）
 _BITRATE_RE = re.compile(r'^\d+(\.\d+)?[kKmM]?$')
 # 量程报错里的"为什么"必须与 vidcrop_cpu_v2.py 逐字一致（报错首行可对比）
 _LOOKAHEAD_HINT = f'x264 的上限就是 {_LOOKAHEAD_RANGE[1]}；不指定=沿用各编码器默认'
-_QP_HINT = '与 --cq 同量纲（NVENC 的 -qp 量程）'
+# --qp 是**真实 QP**（与 x264 QP 同尺度），**不是** CQ 轴（targetQuality）——两者
+# 差着 +5/+7.5 的偏移，混用会让画质偏松。量程按生效编码器取（见 qp_range()）。
+_QP_HINT = '真实 QP（与 x264 QP 同尺度，非 --cq 的 CQ 轴）；量程随编码器不同'
 
 # [借鉴1] NVENC 策略失败时的 preset 降档重试表：只降不升，p4 及以下不再重试。
 # 对照 Video_Enhancement 的 SDK 路径——InitializeEncoder 返回 code=8（驱动不认该
@@ -1201,9 +1232,8 @@ def normalize_preset(preset: str, target_codec: str, quiet: bool = False) -> str
     if target_codec in NVENC_CODECS:
         if preset.startswith('p') and preset[1:].isdigit():
             return preset
-        rev = {v: k for k, v in NVENC_TO_X264_PRESET.items()}
-        if preset in rev:
-            mapped = rev[preset]
+        if preset in X264_TO_NVENC_PRESET:
+            mapped = X264_TO_NVENC_PRESET[preset]
             _note(f"  提示：--preset '{preset}' 已映射为 '{mapped}'"
                   f"（{target_codec} 使用 NVENC 风格 preset）。")
             return mapped
@@ -1211,7 +1241,9 @@ def normalize_preset(preset: str, target_codec: str, quiet: bool = False) -> str
               f"使用默认 '{DEFAULT_PRESET_GPU}'。")
         return DEFAULT_PRESET_GPU
 
-    if target_codec in ('libx264', 'libx265'):
+    # libx264/libx265 使用 ultrafast~veryslow；QSV 同样收这些名字
+    #（实测 QSV 的 -preset 枚举就是 veryfast..veryslow，**不认** p1~p7）。
+    if target_codec in ('libx264', 'libx265') or target_codec in _QSV_CODECS:
         if preset.startswith('p') and preset[1:].isdigit():
             mapped = NVENC_TO_X264_PRESET.get(preset, DEFAULT_PRESET_CPU)
             _note(f"  提示：--preset '{preset}' 已映射为 '{mapped}'"
@@ -1288,11 +1320,14 @@ def check_container_compatibility(ext: str, codec: str) -> bool:
 
 
 def default_preset_for(codec: str) -> str:
-    """按编码器类型给出默认预设：GPU 硬件编码器 p5，libsvtav1 按资源取档，其余 medium。"""
+    """按编码器类型给出默认预设：GPU 硬件编码器 p5，libsvtav1 固定 8，其余 medium。
+
+    libsvtav1 的默认档**不再随核数漂移**（V9）：QUALITY_MAP 里 svtav1 的等效关系是在
+    `-preset 8` 下标定的，若默认档随 `auto_effort()` 变（16 核会给 7），等效点就会漂。
+    """
     c = codec.lower()
     if c == 'libsvtav1':
-        # 0~13 整数，按 CPU 核数自动取值（见 auto_effort）
-        return str(auto_effort()[1])
+        return DEFAULT_PRESET_SVTAV1
     return DEFAULT_PRESET_GPU if c in CQ_SUPPORTED_CODECS else DEFAULT_PRESET_CPU
 
 
@@ -1332,6 +1367,113 @@ def encoder_supports_crf(codec: str) -> bool:
 
 def encoder_supports_cq(codec: str) -> bool:
     return codec in CQ_SUPPORTED_CODECS
+
+
+# 只认 `-qp`、既不认 `-crf` 也不认 `-cq` 的编码器（实测 `ffmpeg -h encoder=h264_vaapi`：
+# 只有 `-qp (0 to 52)`）。此前它们在两脚本里**不属于任何能力集** ⇒ 用户给的 `--cq 26`
+# 落到 _resolve_quality_params 末尾的兜底 `return None, None, None`：一条选项都不发、
+# **连告警都没有**（静默丢值）。VAAPI 的 QP 与 x264 QP 同尺度（0~52 vs 0~51），
+# 故直接取基准轴值经 -qp 下发。
+_QP_ONLY_CODECS = {'h264_vaapi', 'hevc_vaapi'}
+
+
+def encoder_supports_qp(codec: str) -> bool:
+    """编码器是否只认 `-qp`（VAAPI 族；与 NVENC 的 `-qp` 不是同一套选项体系）。"""
+    return codec in _QP_ONLY_CODECS
+
+
+def literal_range(codec: str, kind: str = 'crf') -> Tuple[int, int]:
+    """字面量质量参数在给定编码器下的**实际可用量程** ``(lo, hi)``。
+
+    用途：CLI 层按**生效编码器**校验 ``--crf`` / ``--cq``，而不是一刀切 0~63 ——
+    实测 ``--cq 60`` 会让 ffmpeg 报 `Value 60.000000 for parameter 'cq' out of range
+    [0 - 51]` 直接失败；``--crf 60`` 则被 libx264/libx265 **静默按 51 编码**
+    （最差质量、无任何提示）。
+
+    刻度归属（与 `_resolve_quality_params` 的字面量分支一致）：
+      · ``kind='crf'`` —— 值按 libx264 CRF 轴解释。原生用 ``-crf`` 的编码器取其自身
+        量程（libvpx-vp9 / libsvtav1 为 0~63）；硬件编码器不认 CRF（值会经等效表
+        换算），故以 libx264 的 0~51 为准。
+      · ``kind='cq'``  —— 值按 h264_nvenc CQ 轴解释。原生用 ``-cq`` 的编码器取其自身
+        量程（av1_nvenc 实测为 0~63）；软编不认 CQ（值会经换算），故以 0~51 为准。
+
+    未知编码器（含 ``auto``）回退到源轴量程 0~51，不做猜测。
+    """
+    c = (codec or '').lower()
+    if kind == 'cq':
+        key = c if encoder_supports_cq(c) else 'h264_nvenc'
+    else:
+        key = c if encoder_supports_crf(c) else 'libx264'
+    m = QUALITY_MAP.get(key) or QUALITY_MAP['h264_nvenc' if kind == 'cq' else 'libx264']
+    return int(m[2]), int(m[3])
+
+
+# ── CONSTQP 轴（V1/V2）：`-qp` 是**真实量化步长**，与 x264 QP 同尺度 ──────────
+# 它 **不是** CQ 轴（targetQuality，即 -cq）：后者相对 x264 CRF 有 +5(h264)/
+# +7.5(hevc) 的偏移，两者混用会让画质偏松（Plan V1 的跨项目实测反证）。
+# 但 AV1 族的 `-qp` 是 AV1 qindex（≈ 4×QP），必须再过一层尺度；
+# 且各编码器的 `-qp` 量程与 CQ 量程**不同** —— QUALITY_MAP 的 (lo,hi) 描述的是 CQ 轴
+# （av1_nvenc 是 0~63），拿它夹 QP 会把 AV1 的 ~84 夹回 63，故另立 _QP_LIMITS。
+_QP_SCALE: Dict[str, int] = {
+    'av1_nvenc': 4,
+    'librav1e': 4,
+}
+_QP_LIMITS: Dict[str, Tuple[int, int]] = {
+    'h264_nvenc': (0, 51), 'hevc_nvenc': (0, 51),
+    'av1_nvenc': (0, 255), 'librav1e': (0, 255),
+    'libsvtav1': (0, 63),
+    'h264_vaapi': (0, 52), 'hevc_vaapi': (0, 52),
+    'libx264': (0, 51), 'libx265': (0, 51),
+}
+
+
+def qp_scale(codec: str) -> int:
+    """该编码器 `-qp` 相对 x264 QP 的尺度（AV1 的 qindex ≈ 4×QP，其余为 1）。"""
+    return _QP_SCALE.get((codec or '').lower(), 1)
+
+
+def qp_limits(codec: str) -> Tuple[int, int]:
+    """该编码器 `-qp` 的实测量程（可能与 QUALITY_MAP 的 CQ 轴量程不同）。"""
+    return _QP_LIMITS.get((codec or '').lower(), (0, 51))
+
+
+def qp_range(codec: str) -> Tuple[int, int]:
+    """CLI 层 `--qp` 的可用量程：按生效编码器取（AV1 族 0~255、VAAPI 0~52、其余 0~51）。"""
+    return qp_limits(codec)
+
+
+def to_constqp_qp(codec: str, value: int) -> int:
+    """CQ 轴（targetQuality）的值 → 该编码器 CONSTQP 的 `-qp`。
+
+    与 Video_Enhancement 的 quality_map.to_constqp_qp() 同语义，另加 AV1 的 QP 尺度层
+    （VE 侧未覆盖 AV1，见 Plan 的 V1）：
+        value --to_x264_crf--> 基准轴 --×qp_scale--> -qp（再钳到 _QP_LIMITS）
+    未知编码器原样返回（不猜测）。
+    """
+    c = (codec or '').lower()
+    ref = to_x264_crf(c, value)
+    if ref is None:
+        return int(value)
+    lo, hi = qp_limits(c)
+    return int(max(lo, min(hi, int(round(ref)) * qp_scale(c))))
+
+
+def from_constqp_qp(codec: str, qp: int) -> float:
+    """`-qp` → 基准轴 libx264 CRF（`to_constqp_qp` 的反向，供降级换算用）。"""
+    return max(0.0, min(51.0, float(qp) / qp_scale(codec)))
+
+
+def default_quality_for(codec: str) -> int:
+    """未给质量参数时，按统一基准 DEFAULT_REF 换算到目标编码器的原生刻度。
+
+    对 `-cq` 编码器返回 CQ 值、对 `-crf` 编码器返回 CRF 值（调用方按能力集选轴）。
+    这修的是「DEFAULT_CRF=21（基准轴）与 DEFAULT_CQ=23（CQ 轴）不等效 ⇒ 硬编默认
+    过配 3 档」（V7）。
+    """
+    v = from_x264_crf(codec, DEFAULT_REF)
+    if v is None:
+        return DEFAULT_REF
+    return max(1, int(round(v)))
 
 
 # WebM 只接受 Vorbis / Opus 音轨。VP9 / AV1 的默认容器就是 .webm，而绝大多数
@@ -3146,7 +3288,8 @@ def _resolve_quality_params(
          只有"落到不支持该量纲的编码器"时才按等效表换算（--cq 落到 CPU 软编、
          --crf 落到只认 -cq/-qp 的硬件编码器）。
       2. --crf-ref / --cq-ref：统一基准轴——先归一到 libx264 CRF，再换算到目标编码器；
-         目标处于 `--rc-mode constqp` 时结果落到 `-qp`（qp 与 cq 同量纲，见 _QP_HINT）。
+         目标处于 `--rc-mode constqp` 时结果落到 `-qp`（`-qp` 是该编码器的**真实 QP**，
+         经 `to_constqp_qp()` 从基准轴取，见 _QP_HINT）。
       3. --qp（只在 `--rc-mode constqp` 下有效）：目标支持 -qp 就透传，
          落到 CPU 编码器时换算为等效 `-crf`（此前是"静默丢弃、回落默认 CRF 21"）。
 
@@ -3180,6 +3323,38 @@ def _resolve_quality_params(
         if not quiet:
             print(msg)
 
+    # ── VAAPI 等"只认 -qp"的编码器：所有质量输入先归一到基准轴，再经 -qp 下发 ──
+    # 此前它们不属于任何能力集 ⇒ 落到函数末尾的兜底 `return None, None, None`，
+    # 用户给的 --cq/--crf **一条选项都不发、连告警都没有**（静默丢值）。
+    # VAAPI 的 -qp 量程 0~52 与 x264 QP 同尺度 ⇒ 基准轴值直取，不叠加 CQ 轴那套
+    # +5 / +7.5 偏移（那是"目标质量档"刻度，与真实 QP 不是一回事）。
+    # 位置放在 [LOSSLESS] 之前：0 档在这里一并处理（VAAPI 的 0 是最高质量档）。
+    if codec in _QP_ONLY_CODECS:
+        _zero_qp = next((_n for _n, _v in (('--crf', user_crf), ('--cq', user_cq),
+                                           ('--qp', qp), ('--crf-ref', crf_ref),
+                                           ('--cq-ref', cq_ref)) if _v == 0), None)
+        if qp is not None:
+            _qp_val = qp
+        elif user_crf is not None:
+            _qp_val = int(round(to_x264_crf('libx264', user_crf) or 0))
+        elif user_cq is not None:
+            _qp_val = int(round(to_x264_crf(_src, user_cq) or 0))
+        elif crf_ref is not None:
+            _qp_val = int(crf_ref)
+        elif cq_ref is not None:
+            _qp_val = int(round(to_x264_crf('h264_nvenc', cq_ref) or 0))
+        else:
+            _qp_val = DEFAULT_REF
+        _lo, _hi = qp_limits(codec)
+        _qp_val = max(_lo, min(_hi, _qp_val))
+        if _zero_qp is not None:
+            _say(f'  提示：{_zero_qp}=0 → 编码器 {codec} 的 -qp 0'
+                 f'（最高质量档，非逐位无损）。')
+        else:
+            _say(f'  提示：编码器 {codec} 只认 -qp（无 -crf/-cq），'
+                 f'质量已归一到基准轴 → -qp {_qp_val}。')
+        return None, None, _qp_val
+
     # ── [LOSSLESS] 0 档：跳过换算，直接给目标编码器的 0 档 ──────────────
     _zero = next((_n for _n, _v in (('--crf', user_crf), ('--cq', user_cq),
                                     ('--qp', qp), ('--crf-ref', crf_ref),
@@ -3191,25 +3366,57 @@ def _resolve_quality_params(
             # 非 constqp：返回 cq=0，交给 build_ffmpeg_cmd 的 [LOSSLESS] 改写块
             # （它发 -rc constqp -qp 0 -b:v 0，与 --cq 0 走同一条路）
             return None, 0, None
-        if encoder_supports_crf(codec):
+        if encoder_supports_crf(codec) or codec == 'librav1e':
             _say(f'  提示：{_zero}=0 是无损请求，已按编码器 {codec} 的 0 档下发。')
             return 0, None, None
         _say(f'  警告：{_zero}=0 是无损请求，但编码器 {codec} 没有对应的 0 档，改用默认质量。')
-        return (None, DEFAULT_CQ, None) if encoder_supports_cq(codec) \
-            else (DEFAULT_CRF, None, None)
+        return (None, default_quality_for(codec), None) if encoder_supports_cq(codec) \
+            else (default_quality_for(codec), None, None)
+
+    # ── librav1e：只有 -qp（0~255，≈4×QP），标定以 AV1(libaom) CRF 为输入 ──────
+    # 移出 CRF_SUPPORTED_CODECS 后（V8），无论从哪条路径进来都先归一到 **libaom-av1
+    # CRF**，再由命令构建处套 crf_to_rav1e_qp()。这样消除了"字面量按 libaom 刻度、
+    # -ref 按基准轴"的双链分歧：`--crf 21` 与 `--crf-ref 21` 都得到 -qp 80。
+    if codec == 'librav1e':
+        if qp is not None:
+            _ref = from_constqp_qp(_src, qp)
+        elif user_crf is not None:
+            _ref = float(user_crf)
+        elif user_cq is not None:
+            _ref = to_x264_crf(_src, user_cq)
+        elif crf_ref is not None:
+            _ref = float(crf_ref)
+        elif cq_ref is not None:
+            _ref = to_x264_crf('h264_nvenc', cq_ref)
+        else:
+            _ref = float(DEFAULT_REF)
+        if _ref is None:
+            _ref = float(DEFAULT_REF)
+        _v = from_x264_crf('libaom-av1', _ref)          # 基准轴 → AV1 CRF 轴
+        if _v is None:
+            _say('  警告：librav1e 无法确定等效 CRF，改用默认质量。')
+            return None, None, None
+        _out = max(0, int(round(_v)))
+        _say(f'  提示：librav1e 无 -crf，已按基准轴换算为 -qp {crf_to_rav1e_qp(_out)}'
+             f'（等效视觉质量）。')
+        return _out, None, None
 
     # ── 方式 3：--qp（constqp 的恒定 QP）─────────────────────────────────
     if qp is not None:
         if codec in NVENC_CODECS:
             return None, None, qp
         if encoder_supports_crf(codec):
-            mapped_crf = max(1, cq_to_crf(qp, codec, _src))
+            # --qp 是**真实 QP / 基准轴**上的值（V2）——此前按 CQ 轴回算（`cq_to_crf`），
+            # 对 hevc_nvenc 多扣了 7.5 档、h264_nvenc 多扣 5 档，降级后画质偏松。
+            _ref = from_constqp_qp(_src, qp)
+            _v = from_x264_crf(codec, _ref)
+            mapped_crf = max(1, int(round(_v))) if _v is not None else int(qp)
             _say(f'  提示：编码器 {codec} 不支持 -qp，'
-                 f'已将 --qp {qp}（{_src} QP 量纲）映射为 -crf {mapped_crf}（等效视觉质量）。')
+                 f'已将 --qp {qp}（{_src} QP 基准）映射为 -crf {mapped_crf}（等效视觉质量）。')
             return mapped_crf, None, None
         _say(f'  警告：编码器 {codec} 既没有 -qp 也没有 -crf，--qp {qp} 无法换算，改用默认质量。')
-        return (None, DEFAULT_CQ, None) if encoder_supports_cq(codec) \
-            else (DEFAULT_CRF, None, None)
+        return (None, default_quality_for(codec), None) if encoder_supports_cq(codec) \
+            else (default_quality_for(codec), None, None)
 
     # ── 方式 2：统一基准轴换算 ────────────────────────────────────────────
     if crf_ref is not None or cq_ref is not None:
@@ -3221,24 +3428,18 @@ def _resolve_quality_params(
             ref_desc = f'--cq-ref {cq_ref}（h264_nvenc CQ 基准）'
             if ref_x264 is None:
                 ref_x264 = float(cq_ref or 0)
-        if codec == 'librav1e':
-            # librav1e 没有 -crf；其实测标定以 AV1(libaom) CRF 为输入，
-            # 故先落到 AV1 CRF 轴，再由命令构建处套 crf_to_rav1e_qp()。
-            _v = from_x264_crf('libaom-av1', ref_x264)
-            _out = max(1, int(round(_v))) if _v is not None else None
-            if _out is not None:
-                _say(f'  提示：{ref_desc} → {codec} 的 -qp {crf_to_rav1e_qp(_out)}。')
-            return _out, None, None
         _v2 = from_x264_crf(codec, ref_x264)
         if _v2 is None:
             _say(f'  警告：{codec} 不在等效换算表中，{ref_desc} 无法换算，改用默认质量。')
-            return (None, DEFAULT_CQ, None) if encoder_supports_cq(codec) \
-                else (DEFAULT_CRF, None, None)
+            return (None, default_quality_for(codec), None) if encoder_supports_cq(codec) \
+                else (default_quality_for(codec), None, None)
         _val = max(1, int(round(_v2)))
         if encoder_supports_cq(codec):
             if rc_mode == 'constqp':
-                _say(f'  提示：{ref_desc} → {codec} 的 -qp {_val}（rc-mode constqp）。')
-                return None, None, _val
+                # constqp 的 -qp 是**基准轴**上的真实 QP，不是 CQ 轴值（V1）。
+                _qp = to_constqp_qp(codec, _val)
+                _say(f'  提示：{ref_desc} → {codec} 的 -qp {_qp}（rc-mode constqp）。')
+                return None, None, _qp
             _say(f'  提示：{ref_desc} → {codec} 的 -cq {_val}。')
             return None, _val, None
         _say(f'  提示：{ref_desc} → {codec} 的 -crf {_val}。')
@@ -3247,33 +3448,47 @@ def _resolve_quality_params(
     # ── 方式 1：字面量原样下发 ────────────────────────────────────────────
     if encoder_supports_cq(codec):
         if user_cq is not None:
-            return None, user_cq, None
+            # 同族字面量原样下发 —— 仍钳到该编码器的实测量程：CLI 层已按生效编码器
+            # 拦过一道，这里给"绕过 CLI 的直接调用方"补第二道保险。
+            _lo, _hi = literal_range(codec, 'cq')
+            return None, max(_lo, min(_hi, user_cq)), None
         if user_crf is not None:
             # --crf 落到只认 -cq/-qp 的编码器：按 libx264 CRF 口径换算过去，
             # 不再"忽略 + 回落默认 CQ"（那会让用户给的质量值直接蒸发）。
             mapped = max(1, crf_to_cq(user_crf, codec))
             if rc_mode == 'constqp':
+                # constqp 要的是基准轴真实 QP（V1），不是 CQ 轴值。
+                _qp = to_constqp_qp(codec, mapped)
                 _say(f'  提示：编码器 {codec} 不支持 -crf，已将 --crf {user_crf}'
-                     f'（libx264 CRF 量纲）映射为 -qp {mapped}（rc-mode constqp）。')
-                return None, None, mapped
+                     f'（libx264 CRF 量纲）映射为 -qp {_qp}（rc-mode constqp）。')
+                return None, None, _qp
             _say(f'  提示：编码器 {codec} 不支持 -crf，已将 --crf {user_crf}'
                  f'（libx264 CRF 量纲）映射为 -cq {mapped}（等效视觉质量）。')
             return None, mapped, None
         if rc_mode == 'constqp':
-            # 无质量输入时的 constqp 默认（CLI 会先报错，这里只为直接调用方兜底）
-            return None, None, DEFAULT_CQ
-        return None, DEFAULT_CQ, None
+            # 无质量输入时的 constqp 默认（CLI 会先报错，这里只为直接调用方兜底）。
+            return None, None, to_constqp_qp(codec, default_quality_for(codec))
+        return None, default_quality_for(codec), None
 
     if encoder_supports_crf(codec):
         if user_crf is not None:
-            return user_crf, None, None
+            # 同上：同族原样下发也钳到实测可用量程（vp9/svtav1 的 0~63 不受影响）。
+            _lo, _hi = literal_range(codec, 'crf')
+            return max(_lo, min(_hi, user_crf)), None, None
         if user_cq is not None:
             mapped_crf = max(1, cq_to_crf(user_cq, codec, _src))
             _say(f'  提示：编码器 {codec} 不支持 -cq，'
                  f'已将 --cq {user_cq}（{_src} 量纲）映射为 -crf {mapped_crf}（等效视觉质量）。')
             return mapped_crf, None, None
-        return DEFAULT_CRF, None, None
+        return default_quality_for(codec), None, None
 
+    # 既不认 -cq、也不认 -crf/-qp 的编码器（如 QSV）：别静默丢值（V5）。
+    _asked = next((n for n, v in (('--crf', user_crf), ('--cq', user_cq),
+                                  ('--crf-ref', crf_ref), ('--cq-ref', cq_ref),
+                                  ('--qp', qp)) if v is not None), None)
+    if _asked is not None:
+        _say(f'  警告：编码器 {codec} 没有可用的质量参数（-crf/-cq/-qp 均不适用），'
+             f'{_asked} 无法下发，已忽略。')
     return None, None, None
 
 
@@ -3336,6 +3551,12 @@ def apply_rc_control_args(codec: str,
                     args += ['-rc', rc_mode]
                 if qp is not None:
                     args += ['-qp', str(qp)]
+        elif c in _QP_ONLY_CODECS:
+            # VAAPI 族：--qp 已由 build_ffmpeg_cmd 的 `-qp` 分支下发，这里既不重复
+            # 下发、也不把已生效的 --qp 误报成"已忽略"；只剩"模式名本身不适用"要告知。
+            if rc_mode != 'auto':
+                _ignore(f'--rc-mode {rc_mode}',
+                        f'-rc 是 NVENC 专属选项，编码器 {c} 没有这个开关')
         elif rc_mode != 'auto':
             # --qp 落到 CPU 编码器时已在 _resolve_quality_params 里换算成 -crf（值不再丢），
             # 所以这里只剩"模式名本身不适用"要告知。
@@ -4013,7 +4234,11 @@ def build_ffmpeg_cmd(
     _nvenc_lossless = (_quality_is_zero and codec in NVENC_CODECS
                        and rc_mode == 'auto' and not bitrate)
 
-    if cq is not None and encoder_supports_cq(codec):
+    if codec in _QP_ONLY_CODECS and qp is not None:
+        # VAAPI 族只认 -qp（0~52），质量已由 _resolve_quality_params 归一到基准轴。
+        # 放在 -cq/-crf 之前：那两个对 VAAPI 都不适用（也不在能力集里）。
+        cmd += ['-qp', str(qp)]
+    elif cq is not None and encoder_supports_cq(codec):
         if _nvenc_lossless:
             # -cq 0 在 VBR 下不是无损；rc_mode=auto（用户未指定模式）时改写成
             # constqp qp 0 —— 但**别叫它「真无损」**：T4 实测不是逐位无损。
@@ -4037,6 +4262,10 @@ def build_ffmpeg_cmd(
             # 用户要的正是"受码率约束"语义，两者都不补 0。
             if codec in NVENC_CODECS and not bitrate and rc_mode != 'constqp':
                 cmd += ['-b:v', '0']
+    elif crf is not None and codec == 'librav1e':
+        # rav1e 不认 -crf（会被静默忽略），换算成等效 -qp。它已移出
+        # CRF_SUPPORTED_CODECS，故必须独立判断（V8）。
+        cmd += ['-qp', str(crf_to_rav1e_qp(crf))]
     elif crf is not None and encoder_supports_crf(codec):
         if codec in ('libvpx', 'libvpx-vp9') and not bitrate:
             # VP8/VP9 的 CRF 必须配合 -b:v 0 才是纯恒定质量，否则退化成
@@ -4044,11 +4273,7 @@ def build_ffmpeg_cmd(
             # 用户给了 --bitrate 时**不补这个 0**：同一个 -b:v 发两次会互相打架，
             # 而且此时用户要的正是"受码率约束"（constrained quality）语义。
             cmd += ['-b:v', '0']
-        if codec == 'librav1e':
-            # rav1e 不认 -crf（会被静默忽略），换算成等效 -qp
-            cmd += ['-qp', str(crf_to_rav1e_qp(crf))]
-        else:
-            cmd += ['-crf', str(crf)]
+        cmd += ['-crf', str(crf)]
         if _quality_is_zero and codec == 'libx265':
             # libx265 的 -crf 0 不是无损，必须显式 lossless=1；与 HDR 元数据、
             # lookahead 合并进同一条 -x265-params（见 build_hdr_args）。
@@ -5073,7 +5298,8 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                              '（它们用 -crf / -b:v / -qp 的组合表达），届时告警忽略'
                              '（--fallback-policy strict 下报错）')
     parser.add_argument('--qp', type=int, default=None, metavar='N',
-                        help='NVENC 恒定 QP 值（0-51）：只在 --rc-mode constqp 下生效；'
+                        help='恒定 QP 值（默认量程 0-51；AV1 的 -qp 是 0~255 的 qindex）：'
+                             '只在 --rc-mode constqp 下生效；'
                              'constqp 下它与 --crf-ref / --cq-ref 三选一，'
                              '与字面量 --crf / --cq 互斥（量纲不同，混用无法判定意图）。'
                              '--qp 0 = 0 档（CPU 编码器上是真无损；NVENC 只是最高质量档）。'
@@ -5409,7 +5635,11 @@ def main() -> int:
         if args.lookahead is not None:
             check_int_range(args.lookahead, '--lookahead', _LOOKAHEAD_RANGE, _LOOKAHEAD_HINT)
         if args.qp is not None:
-            check_int_range(args.qp, '--qp', _QP_RANGE, _QP_HINT)
+            # 量程随生效编码器不同（AV1 族 0~255、VAAPI 0~52、其余 0~51，见 qp_range）。
+            # 此处 args.codec 尚未归一化，按别名表静默解析（normalize_codec_name 会打印）。
+            _qp_codec = CODEC_ALIASES.get((args.codec or '').lower(),
+                                          (args.codec or '').lower())
+            check_int_range(args.qp, '--qp', qp_range(_qp_codec), _QP_HINT)
     except ValueError as exc:
         print(f'[ERROR] {exc}', file=sys.stderr)
         return 2
@@ -5429,7 +5659,7 @@ def main() -> int:
             return 2
         if args.qp is not None and _refs_given:
             print('[ERROR] --rc-mode constqp 下 --qp 与 ' + ' / '.join(_refs_given)
-                  + ' 不能同时使用：两者都表达恒定质量，但 --qp 是 NVENC QP 量纲，'
+                  + ' 不能同时使用：两者都表达恒定质量，但 --qp 是真实 QP（基准轴）量纲，'
                   '而 ' + ' / '.join(_refs_given) + ' 是统一基准轴，'
                   '混用无法确定以哪个为准。', file=sys.stderr)
             return 2
@@ -5462,13 +5692,24 @@ def main() -> int:
                   f'ffmpeg 会用它自己的默认码率（200kbps）。建议补 --bitrate 8M 之类。',
                   file=sys.stderr)
 
-    if args.crf is not None and not (0 <= args.crf <= 63):
-        print('[ERROR] --crf 建议范围为 0-63。', file=sys.stderr)
-        return 2
+    # 字面量量程按**生效编码器**判定（不再是一刀切 0~63）：实测 --cq 60 会让 ffmpeg
+    # 报 `Value 60.000000 for parameter 'cq' out of range [0 - 51]` 直接失败；
+    # --crf 60 则被 libx264/libx265 静默按 51 编码（最差质量、无任何提示）。
+    # 刻度归属见 literal_range() 的 docstring；args.codec 此处已归一化（auto 未解析
+    # 时回退 0~51，与 auto 最终落到的 libx264 / h264_nvenc 量程一致）。
+    if args.crf is not None:
+        _lo, _hi = literal_range(args.codec, 'crf')
+        if not (_lo <= args.crf <= _hi):
+            print(f'[ERROR] --crf {args.crf} 超出编码器 {args.codec} 的可用范围 '
+                  f'{_lo}~{_hi}（CRF 字面量按该编码器刻度解释）。', file=sys.stderr)
+            return 2
 
-    if args.cq is not None and not (0 <= args.cq <= 63):
-        print('[ERROR] --cq 建议范围为 0-63。', file=sys.stderr)
-        return 2
+    if args.cq is not None:
+        _lo, _hi = literal_range(args.codec, 'cq')
+        if not (_lo <= args.cq <= _hi):
+            print(f'[ERROR] --cq {args.cq} 超出编码器 {args.codec} 的可用范围 '
+                  f'{_lo}~{_hi}（CQ 字面量按该编码器刻度解释）。', file=sys.stderr)
+            return 2
 
     # -ref 的基准轴量程：libx264 CRF 与 h264_nvenc CQ 都是 0-51
     if args.crf_ref is not None and not (0 <= args.crf_ref <= 51):

@@ -45,8 +45,10 @@
 - [FFmpeg 7.1 已合并 nvinterpolate 与 libvmaf](project_nvinterpolate_build.md)
   — 单一 ffmpeg、无需环境文件；`nvinterpolate` 必须放滤镜链末尾否则段错误；移植补丁位置
 - [两个裁剪脚本的行为一致约定](project_preset_equivalence.md)
-  — 两裁剪脚本的 NVENC↔x264 表必须一致（曾错位一档：p4→medium/p5→slow，会让同一条 `--preset p5` 落不同档）；
-  降级到 CPU 编码器时基准档取"请求的编码器"的默认值再换算；概览块只展示最终命令里真正会出现的参数
+  — 两裁剪脚本的 preset 表必须逐字一致；**2026-09-28（V10）拆成两张刻意不对称的表**：
+  `X264_TO_NVENC_PRESET` 按 ffmpeg 官方/VE 枚举（medium→p4）、`NVENC_TO_X264_PRESET`
+  只管 GPU→CPU 降级且保持 medium 落在 p5（否则破坏两脚本命令 lockstep + 基线）；
+  降级到 CPU 编码器时基准档取"请求的编码器"的默认值再换算（libsvtav1 的默认档已固定为 8）；概览块只展示最终命令里真正会出现的参数
   （编码器名取策略链第一条、无 `-preset` 的编码器不展示 preset 字段）；
   `--codec auto` 必须解析成具体编码器，透传会得到 `-c:v auto` 使 ffmpeg 报 Unknown encoder（曾发生在 cpu_v2）；
   **`--mode` 的语义/校验/跳过判定也要两边一致**：2026-09-18 同时加了 `crop-cover`
@@ -165,7 +167,14 @@
   ⭐ **「0 = 真无损」只对 CPU 编码器成立**（本机 libx265/libx264 `-crf 0` framemd5 **0/50**；
   T4 实测 **NVENC `-qp 0` 43417/43448 帧不同** = 只是最高质量档）→ 工具文案已据此改口；
   `--rc-mode constqp` 下 `--qp` / `--crf-ref` / `--cq-ref` 三选一（同给报错）；
-  判据 `verify/verify_quality_mapping.py`
+  判据 `verify/verify_quality_mapping.py`；
+  **2026-09-28 第二轮（V1/V2/V5/V7/V8/V9/V10/V11/V12 全部落地）**：
+  ⭐ **`-qp` 不是一套刻度** —— AV1 是 0~255 qindex（×4）、VAAPI 0~52、H.264/HEVC 0~51，
+  constqp 必须走 `to_constqp_qp()` 回**基准轴**（`av1_nvenc cref21 → 84`），CLI 量程用 `qp_range(codec)`；
+  QSV/VT 移出 CQ 集（无 `-cq`）；默认质量统一到 `DEFAULT_REF=21`（`DEFAULT_CQ=23` 删除）；
+  `librav1e` 移出 CRF 集（单链 → 都 `-qp 80`）；`QUALITY_MAP` 的 libx265/libvpx-vp9/libsvtav1
+  按**真实素材等体积**重标（`probe/calibrate_soft_offsets.py`）；`hevc_videotoolbox` b 105→100；
+  判据 ⑨ 现在默认就是**门禁**（`STRICT_KNOWN=0` 可降级）；新增 ⑪ 组正向断言
 
 ---
 

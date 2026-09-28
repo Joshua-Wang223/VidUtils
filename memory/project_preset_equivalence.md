@@ -1,26 +1,30 @@
 ---
 name: 两个裁剪脚本的行为一致约定（preset 换算、概览展示、--codec auto 解析、--mode 语义与校验）
-description: vidcrop_hwaccel.py 与 vidcrop_cpu_v2.py 的 NVENC↔x264 preset 表必须一致；降级到 CPU 编码器时 preset 要按"请求的编码器"换算；概览块只展示最终命令里真正会出现的参数；--codec auto 必须解析成具体编码器而不能透传；--mode（含 crop-cover）的语义、参数校验、同尺寸跳过判定也必须两边一样
+description: vidcrop_hwaccel.py 与 vidcrop_cpu_v2.py 的 preset 表必须逐字一致（2026-09-28 起是两张刻意不对称的表：x264→NVENC 按官方枚举、NVENC→x264 只管降级且 medium 落在 p5）；降级到 CPU 编码器时 preset 要按"请求的编码器"换算、libsvtav1 默认档固定为 8；概览块只展示最终命令里真正会出现的参数；--codec auto 必须解析成具体编码器而不能透传；--mode（含 crop-cover）的语义、参数校验、同尺寸跳过判定也必须两边一样
 type: project
 ---
 
 ## 约定 1：两个裁剪脚本的 preset 表必须逐字一致
 
-`NVENC_TO_X264_PRESET` 在 `vidcrop_hwaccel.py` 与 `vidcrop_cpu_v2.py` 里各有一份，
-**两处必须相同**。2026-09-16 发现它们曾经错位一档：
+preset 表在 `vidcrop_hwaccel.py` 与 `vidcrop_cpu_v2.py` 里各有一份，**两处必须相同**。
+2026-09-16 曾发现它们错位一档（p4/p5/p6 分别 medium/slow/slower vs faster/medium/slow），
+已按 cpu_v2 对齐。**2026-09-28（V10）拆成两张方向不同、刻意不对称的表**：
 
-| NVENC | hwaccel（错） | cpu_v2（对） |
+| 表 | 方向 | 取值 |
 |---|---|---|
-| p4 | medium | faster |
-| p5 | slow | medium |
-| p6 | slower | slow |
+| `X264_TO_NVENC_PRESET` | 用户给 x264 名 → NVENC pN | **ffmpeg 官方枚举**，与 VE 的 `_PRESET_P_INDEX` 逐档一致：`medium→p4`、`slow→p5`、两端压缩（ultrafast/superfast→p1、faster/fast→p3、veryslow/placebo→p7） |
+| `NVENC_TO_X264_PRESET` | pN → x264 名（**只用于 GPU→CPU 降级**） | 把 7 档均匀铺在 x264 阶梯上，**medium 落在 p5**（`p1 ultrafast … p5 medium … p7 veryslow`） |
 
-**Why:** 后果是同一条 `--preset p5` 在两个脚本里落到不同档位（一个 `slow` 一个 `medium`），
-用户按 README 的"两个脚本参数一致"预期去用会被坑。而且错位那版还会把 `--preset faster`
-判成"无对应"并静默退回默认值。已按 cpu_v2 对齐（把 NVENC 7 档均匀铺在 x264 阶梯上，
-两端各留一档：`faster` 起、`veryslow` 止）。
-**How to apply:** 动其中一处就要同步另一处。若为某个编码器新增映射，两个文件一起改，
-并顺手确认 `README.md` 里 `--preset` 那一行是否还说得到。
+**Why:** 两张表**不是互逆**，是刻意的：
+- x264→NVENC 必须跟 ffmpeg/VE 一致（用户按官方习惯写 `--preset medium` 应得 p4）；
+- GPU→CPU 降级表若也改成 `p5→slow`，会破坏 `test/dump_cmd_full.sh` 的
+  「两脚本同一条逻辑请求 → 命令逐字相同」硬约束——因为**两脚本默认请求的编码器不同**
+  （hwaccel=`h264_nvenc`→默认 p5，cpu_v2=`libx264`→默认 medium），正是靠 `p5→medium`
+  两者才都落到 `-preset medium`。同理也保住了 `test/baseline/enc_before.txt`。
+**How to apply:** 动任一表都要同步另一脚本 + 复查 README 的 `--preset` 行 + 跑
+`dump_cmd_full.sh`（lockstep）与 `dump_enc_options.sh`（基线）。VE 侧会实时改动
+（`Video_Enhancement/external/realesrgan_video/nvenc_sdk.py`），判据 ⑨ 的 `[9-preset]`
+按运行时读取，改完记得重跑。
 
 ## 约定 2：降级后的 preset 要"与降级前等效"
 
@@ -32,9 +36,11 @@ type: project
 - `h264_nvenc`(默认 p5) → `libx264`  得 `medium`
 - `av1_nvenc` (默认 p5) → `libsvtav1` 得 `8`
 
-**Why:** 取目标编码器自己的默认值会让档位漂移——`libsvtav1` 的默认值还是按 CPU 核数变
-（`_AUTO_EFFORT_TIERS`：≥16 核给 7、8 核给 8、4 核给 9、更少给 10），同一份请求在不同
-机器上会得到不同的速度/质量档，用户拿到的就不是他请求的那个档位了。
+**Why:** 取目标编码器自己的默认值会让档位漂移。
+⚠ **2026-09-28（V9）改了一条**：`libsvtav1` 的默认档**不再按 CPU 核数变**，
+固定为 `DEFAULT_PRESET_SVTAV1='8'`（`default_preset_for` 不再用 `auto_effort()`）——
+因为 QUALITY_MAP 里 svtav1 的等体积标定就是在 `-preset 8` 下做的，默认档随核数漂会让等效点漂。
+`auto_effort()` 仍用于 libaom-av1 的 `-cpu-used`。
 **How to apply:** 新增"硬件编码器 → CPU 编码器"的降级路径时，照 `strategy_preset()` 的
 写法走，别在策略循环里直接 `default_preset_for(当前编码器)`。
 

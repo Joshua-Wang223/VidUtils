@@ -233,3 +233,10 @@ PSNR 44.02 dB / 6054 kbps。报告：`verification_report/nvenc_quality_T4_20260
   ⇒ `-cq` 偏移与 `-qp` ×4 尺度**仍待 L40/Ada 判定**。
 - `probe/t4_acceptance.py`：**20/20 通过**（修掉 A 组 3 处滞后期望值后，见
   `project_t4_gpu_capabilities.md` 末节）；C1 复证 NVENC `-qp 0` **不是**逐帧无损（561/561 帧不同）。
+
+**L40/Ada 交接（2026-09-28 备好，方案 §4.10）**：AV1 的 `-cq` 偏移与 `-qp` ×4 尺度是
+**唯一还没端到端实测**的两条，需 Ada 及以上 NVENC。探针已加 `--expect-av1`：**显式 opt-in 的
+fail-fast**——不加它时非 AV1 卡上那几格静默 SKIP（退出码仍 0，易误判成"跑绿了"），加了它则
+要求本卡能编 AV1，否则 **exit 2**。跑完 B/C 组各多一行 `-结论`（`B-av1-结论` / `C-av1-结论`），
+直接给「动不动 `QUALITY_MAP` 的 b / 动不动 `_QP_SCALE`」的可执行结论；两个纯函数结论已纳入
+`--selftest`（避免首次上机才暴露）。步骤、判读矩阵、与 T4 报告对比见方案 §4.10。

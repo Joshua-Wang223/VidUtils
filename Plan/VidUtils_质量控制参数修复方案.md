@@ -17,7 +17,8 @@
 > **T4 上机验收已完成**（§4.9）：NVENC 的 `-cq` 偏移（B 组）与 constqp `-qp` 回基准轴（C 组的
 > h264/hevc 对照）**实测成立**，`t4_acceptance` 20/20 通过 —— 详见 §4.9。
 > **仍未覆盖的只有**：AV1 的 `-cq` 偏移与 `-qp` ×4 尺度（需 L40/Ada，T4 编不了 AV1）、
-> AMF 能力表、VideoToolbox `-q:v` —— 执行方案见 §4.8。
+> AMF 能力表、VideoToolbox `-q:v` —— **L40/Ada 的交接步骤已备好**（见 §4.10：
+> `--expect-av1` fail-fast 防误判 + 跑完直接给「动不动表」的结论行）；AMF/VT 见 §4.8。
 
 ---
 
@@ -439,7 +440,7 @@ python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
   只能按规范保留，待 AMD 机器复核（V5 残留）。
 - **VideoToolbox**：Linux 无该编码器；其 `-q:v` 质量轴与 preset 待 macOS 复核。
 - **AV1 的 `-cq` 偏移与 `-qp` ×4 尺度**：T4 编不了 AV1（`av1_nvenc` 探测实测 `-22 Invalid`）⇒
-  §4.3 的 `B-av1_nvenc` / `C-av1-*` 全 SKIP，**必须在 L40/Ada 上跑**才算判完。
+  §4.3 的 `B-av1_nvenc` / `C-av1-*` 全 SKIP，**必须在 L40/Ada 上跑**才算判完 —— 交接步骤见 **§4.10**。
 - **V9 的多素材/多分辨率复核**：当前表基于单条 4s 素材，若要更稳可换 2~3 条不同类型素材
   重跑 `probe/calibrate_soft_offsets.py` 再落表。
 
@@ -480,3 +481,69 @@ python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
 2. `probe/t4_acceptance.py` 的 A2/A3/A7 期望值滞后于 V1/V7（旧 `-qp 28`/`-qp 26`/`-cq 23`
    → 新 `-qp 20`/`-qp 18`/`-cq 28`）⇒ 产品行为正确、探针误报 3 红，已更新探针（复跑 20/20）。
 
+
+### 4.10 L40/Ada 上验证 AV1 的交接步骤（2026-09-28 备好）
+
+> 给**有 Ada 及以上 NVENC（RTX 40 / L40 / L4…）**的机器用。T4 编不了 AV1（`av1_nvenc`
+> 在 `-encoders` 里但实编报 `-22 Invalid`），所以 AV1 的两条结论——`-cq` 偏移
+> （`QUALITY_MAP['av1_nvenc']` 的 b=6）与 constqp `-qp` 的 ×4 尺度（`_QP_SCALE['av1_nvenc']=4`）
+> ——**至今只有纯逻辑断言（探针 A 组），没有端到端实测**。
+
+**第 0 步 · 前置自检（必须过，否则别开始）**
+
+```bash
+nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv   # 期望 L40 / RTX 40 系
+ffmpeg -hide_banner -h encoder=av1_nvenc | grep -E '\-(cq|qp)'
+#   期望：-cq (0 to 63) 与 -qp (-1 to 255)
+
+# 关键：加 --expect-av1 实编一次短探测（不是只看 -encoders 列表）
+python3 probe/verify_nvenc_quality_gpu.py --expect-av1 --src '<素材>'
+#   ✓ 「--expect-av1：av1_nvenc 可编 ⇒ B/C 组会跑满」 ⇒ 继续
+#   ✗ 「[ERROR] --expect-av1 未满足 …」+ 退出 2 ⇒ 本卡不是 AV1 卡，别继续
+```
+
+`--expect-av1` 是**显式 opt-in 的 fail-fast**：不加它，卡不支持 av1 时那几格 SKIP（T4 的正常行为）；
+加了它，就要求"本卡必须能编 AV1"，否则 **exit 2** —— 防止在非 AV1 卡上跑完却误以为 AV1 已验。
+
+**第 1 步 · 跑验收（报告带 GPU 名 + 时间戳）**
+
+```bash
+TS=$(date +%Y%m%d_%H%M%S)
+python3 probe/verify_nvenc_quality_gpu.py --expect-av1 \
+    --src '<>=10s、720p+ 的真实素材>' \
+    --json "verification_report/nvenc_quality_L40_${TS}.json" \
+    --md   "verification_report/nvenc_quality_L40_${TS}.md"
+#   想留中间产物人工比对：追加 --keep
+```
+
+**第 2 步 · 看两条结论行（本次交接的唯一目的）**
+
+跑完后 **B/C 组各会多一行 `-结论`**，直接说该不该动表：
+
+| 结论行 | 取值 | 对应动作 |
+|---|---|---|
+| `B-av1-结论`（`-cq` 表值 27 是否等质量） | `PASS` | 偏移方向成立 ⇒ **不改** `QUALITY_MAP['av1_nvenc']` 的 b |
+| | `FAIL` | 表值未落带 ⇒ 按实测重标 b（**两份 `convert_crf.py` 同步** + 回跑 §4.1） |
+| `C-av1-结论`（`-qp` 尺度） | `PASS` | 「仅 84 落带」⇒ `_QP_SCALE['av1_nvenc']=4` 成立 ⇒ **不改** |
+| | `WARN` | 仅 105 落带 ⇒ 建议改尺度→5；仅 21 落带 ⇒ 需人工复核（与 AV1 qindex 语义矛盾）；多候选落带 ⇒ 人工取更贴者。**改 `_QP_SCALE` 要两脚本同步 + 复核 `_QP_LIMITS`** |
+| | `FAIL` | 三候选都不落带 ⇒ 需扩扫（42 / 63 / 126）或按实测码率重标 |
+
+> 顺带一步秒级抽查（不占 GPU）：L40 上 §4.5 的 av1 落点应显示 `-rc constqp -qp 84`
+> （T4 上因自动降级 libsvtav1 看不到这一格）。
+
+**第 3 步 · 与 T4 报告对比、归档**
+
+- T4 那份已入库：`verification_report/nvenc_quality_T4_20260928_062328.{json,md}`；
+  L40 那份应能与它对上：**A 组完全相同**；B/C 组的 h264/hevc 对照应复现
+  （`h264 -cq26 ≈1.17×`、`hevc -cq28 ≈0.76×`、`h264/hevc -qp21 落在带内`）；
+  额外多出 **av1 的三格 + 两条结论行**。
+- 报告入库（`verification_report/` 不是 gitignored，是本仓的验收证据），提交信息写清
+  「L40 上 AV1 的 `-cq`/`-qp` 结论 + 是否动了表」。
+
+**容易踩的三个坑**
+
+1. **别把 SKIP 当已验**：不加 `--expect-av1` 时，非 AV1 卡上 B/C 的 av1 格是 SKIP，
+   退出码仍是 `0` ⇒ 会误判成"跑绿了"。交接一律加 `--expect-av1`。
+2. **改 `_QP_SCALE` 的前提**：它与两脚本同语义；改完必须回跑 §4.1（⑨ 组会红）。
+3. **L40 上 §4.1 的假红与 T4 相同**（有 GPU ⇒ 4 处 verify + 2 个 `dump_cmd_full` 用例），
+   不是新回归 —— 见 §4.1 的表。

@@ -182,7 +182,9 @@
   ⭐ **T4 上机实测（2026-09-28）把两条前提都验成立**：B 组 `-cq` 偏移（h264 26→1.17×、
   hevc 28→0.76×，均带内；朴素值 21 越界 2.2×/1.6×）、C 组 constqp `-qp` 回基准轴
   （h264/hevc `-qp 21` 均带内）⇒ **`QUALITY_MAP` 的 b 与 V1 都无需改**；av1 两格在 T4 必 SKIP
-  （编不了）⇒ `-qp` ×4 尺度待 L40/Ada；报告在 `verification_report/`
+  （编不了）⇒ `-qp` ×4 尺度待 L40/Ada；报告在 `verification_report/`；
+  **L40/Ada 交接已备好**：探针 `--expect-av1`（本卡不能编 AV1 即 exit 2，防把 SKIP 当已验）
+  + B/C 组 `-结论` 行（直接给动不动 b / `_QP_SCALE`），步骤见方案 §4.10
 
 ---
 

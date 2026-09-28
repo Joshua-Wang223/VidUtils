@@ -1648,7 +1648,7 @@ vidutils/
 │   ├── probe_scale_cuda_crop.sh         # CUDA 缩放裁剪：计时与画质 A/B/C/D/Q
 │   ├── probe_lossless_qp0.sh            # 「-qp 0 / -crf 0 到底是不是数学无损」（恒等裁剪 + 逐帧哈希；本机可 LOCALCPU=1 自证）
 │   ├── t4_acceptance.py                 # T4 上机验收（落点 / 运行期 / 无损三组；--local 本机降级自证、--selftest 验装置）
-│   ├── verify_nvenc_quality_gpu.py      # NVENC 质量轴上机验收（B 组 -cq 偏移 / C 组 constqp -qp 尺度；--quick 只跑 A 组逻辑）
+│   ├── verify_nvenc_quality_gpu.py      # NVENC 质量轴上机验收（B 组 -cq 偏移 / C 组 constqp -qp 尺度；--quick 只跑 A 组逻辑、--expect-av1 要求本卡能编 AV1 否则 exit 2）
 │   └── enum_cmds.py                     # 无 GPU 时 mock 远程能力、枚举脚本真正下发的命令
 ├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
 ├── Plan/                     # 立项任务书与过程归档（含 vidls 对话记录 .txt）
@@ -1749,6 +1749,7 @@ python3 probe/t4_acceptance.py --src '<源视频>'                     # T4 上�
 
 python3 probe/verify_nvenc_quality_gpu.py --quick                  # NVENC 质量轴装置自检（A 组纯逻辑 + 打印 GPU 能力探测）
 python3 probe/verify_nvenc_quality_gpu.py --src '<源视频>'          # 上机验收：B 组 -cq 偏移 / C 组 constqp -qp 尺度（av1 在 T4 会 SKIP）
+python3 probe/verify_nvenc_quality_gpu.py --expect-av1 --src '<源视频>'   # L40/Ada 交接：要求本卡真能编 AV1，否则 exit 2（防把静默 SKIP 当成"AV1 已验"）
 python3 probe/verify_nvenc_quality_gpu.py --src '<源视频>' --json verification_report/nvenc_quality.json --md verification_report/nvenc_quality.md   # 落报告
 ```
 
@@ -1898,7 +1899,9 @@ SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（五格，不�
   H.264/HEVC 0~51），constqp 走 `to_constqp_qp()` 回基准轴、CLI 量程 `qp_range(codec)`；
   默认质量统一 `DEFAULT_REF=21`；实测 **B 组 `-cq` 偏移（h264 26→1.17×、hevc 28→0.76×）
   与 C 组 constqp `-qp 21` 都落在容忍带 ⇒ 表与 V1 均无需改**；av1 在 T4 必 SKIP（编不了），
-  `-qp` ×4 尺度待 L40/Ada；报告在 `verification_report/`
+  `-qp` ×4 尺度待 L40/Ada；报告在 `verification_report/`；
+  **L40/Ada 交接已备好**：探针 `--expect-av1`（本卡不能编 AV1 即 exit 2，防把 SKIP 当已验）
+  + B/C 组 `-结论` 行，步骤见方案 §4.10
 - [按主题拆分同一文件里的两条改动线（`test/split_diff_by_theme.py`）](memory/project_commit_split_tool.md)
   —— 分提交时的 hunk 手术固化成规则驱动工具（判定顺序 **整块覆盖 → 逐行规则 → 关键词 →
   沿用上一段**，判不出来标 `?` + 告警，绝不静默分错线）；**只出 A 侧补丁**，B 侧 = 工作区减去

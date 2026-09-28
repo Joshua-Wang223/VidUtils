@@ -28,6 +28,8 @@ T4 与 L40 的差别（脚本自动判）
     可能列出选项表，但真编码会失败 ⇒ 脚本会实跑一次短编码探测，失败即把
     B/C 组的 av1_nvenc 格标为 SKIP 并打印原因（不是 FAIL）。
   · **L40（Ada）支持 AV1**，B/C 组全跑。此时 C 组的结论就是"AV1 的 QP 尺度是几倍"。
+  · L40/Ada 交接请加 `--expect-av1`（见用法 ⑤）：把"av1 静默 SKIP"升级为 **exit 2**，
+    防止在**非 AV1 卡**上跑完却误以为"AV1 已验过"。
 
 用法
 ────
@@ -43,17 +45,27 @@ T4 与 L40 的差别（脚本自动判）
     # ④ 指定输出报告
     python3 probe/verify_nvenc_quality_gpu.py --src x.mp4 --json report.json --md report.md
 
+    # ⑤ L40/Ada 交接：要求本卡真能编 AV1（不可用即 exit 2，不静默 SKIP）
+    python3 probe/verify_nvenc_quality_gpu.py --expect-av1 \
+        --src /data/clip.mp4 --json verification_report/nvenc_quality_L40_<TS>.json \
+        --md verification_report/nvenc_quality_L40_<TS>.md
+
 判据（与 Video_Enhancement 的 G7 同一套容忍带，避免两边结论不可比）
 ────────────────────────────────────────────────────────────────
     · 码率比（目标码率 / libx264 crf21 码率）落在 RATE_PASS = (0.65, 1.50)
     · ΔPSNR（目标 − 软编基准）单向下探 ≤ TOL_PSNR = 1.5 dB（过配不罚）
     · VMAF（有 libvmaf 时）：差 ≤ 2.0
 
+结论行（av1 可用时才出现，L40/Ada 上照它决定动不动表）
+──────────────────────────────────────────────────────
+    · `B-av1-结论`：`-cq` 表值(27) 是否等质量 ⇒ 决定要不要改 QUALITY_MAP 的 b
+    · `C-av1-结论`：`-qp` 尺度该取几倍（21 / 84=×4 / 105=×5）⇒ 决定要不要改 _QP_SCALE
+
 退出码
 ──────
     0 = 无 FAIL（PASS / WARN / SKIP 均可接受）
     1 = 存在 FAIL
-    2 = 前置不满足（缺 ffmpeg / 缺素材 / 需要 GPU 但未加 --quick）
+    2 = 前置不满足（缺 ffmpeg / 缺素材 / 需要 GPU 但未加 --quick / --expect-av1 但本卡不能编 AV1）
 """
 from __future__ import annotations
 
@@ -223,6 +235,37 @@ def rate_verdict(d_psnr, ratio):
     return 'FAIL', f'ΔPSNR {d_psnr:+.2f} dB，码率 {ratio:.2f}×（越界）'
 
 
+def av1_qp_conclusion(av1_ok: dict) -> tuple[str, str]:
+    """AV1 constqp 的 -qp 尺度结论（**纯函数**，供 group_c 与 --selftest 共用）。
+
+    av1_ok = {候选 qp: 判词}（判词来自 rate_verdict 的 status）。返回 (status, detail)。
+    L40/Ada 上跑完照这条决定动不动 `_QP_SCALE['av1_nvenc']`。
+    """
+    in_band = [v for v, st in av1_ok.items() if st == 'PASS']
+    if in_band == [84]:
+        return 'PASS', ('仅 ×4(84) 落带内 ⇒ `_QP_SCALE["av1_nvenc"]=4` 成立，**无需改动**')
+    if 105 in in_band and 84 not in in_band:
+        return 'WARN', ('仅 ×5(105) 落带内 ⇒ 建议改 `_QP_SCALE["av1_nvenc"]`→5'
+                        '（**两脚本同步** + 复核 `_QP_LIMITS`；改完回跑方案 §4.1）')
+    if 21 in in_band:
+        return 'WARN', ('直取基准轴(21) 落带内 ⇒ 可能不需要 QP 尺度层；但与 AV1 qindex 语义'
+                        '（21 近无损、体积应暴涨）矛盾，务必人工复核后才能撤尺度')
+    if not in_band:
+        return 'FAIL', (f'三个候选都不落容忍带（{av1_ok}）⇒ 无法判定唯一尺度，'
+                        '需扩扫（如 42 / 63 / 126）或按实测码率重标 `QUALITY_MAP["av1_nvenc"]`')
+    return 'WARN', f'多个候选落带内（{in_band}）⇒ 无法判定唯一尺度，需人工取更贴者'
+
+
+def av1_cq_conclusion(st: str, ratio: float, d: float, table_v: int) -> tuple[str, str]:
+    """AV1 的 -cq 表值结论（**纯函数**，供 group_b 与 --selftest 共用）。"""
+    if st == 'PASS':
+        return 'PASS', (f'表值 {table_v} 落带内（ΔPSNR {d:+.2f} dB / 码率 {ratio:.2f}×）'
+                        '⇒ 偏移方向成立；若幅度也满意则不改表')
+    return 'FAIL', (f'表值 {table_v} 未落带内（ΔPSNR {d:+.2f} dB / 码率 {ratio:.2f}×）'
+                    '⇒ 需重标 QUALITY_MAP["av1_nvenc"] 的 b'
+                    '（改完两份 convert_crf.py 同步 + 回跑方案 §4.1）')
+
+
 # ══════════════════════════════════════════════════════════════════════
 # A 组：量程与换算（纯逻辑，本机可跑）
 # ══════════════════════════════════════════════════════════════════════
@@ -307,6 +350,7 @@ def nvenc_usable(codec: str, src: Path, work: Path) -> tuple[bool, str]:
 def group_b(res: Result, src: Path, work: Path, soft: dict, soft_bytes: int,
             usable: dict) -> None:
     print('\n【B】crf_ref 21 的 -cq 是否等质量（GPU 实测）')
+    cell: dict[tuple[str, str], tuple[str, str, dict, float, float]] = {}
     for codec in NVENC_CODECS:
         if not usable.get(codec):
             res.add(f'B-{codec}', 'B', f'{codec} 的 -cq 等质量对齐',
@@ -332,6 +376,7 @@ def group_b(res: Result, src: Path, work: Path, soft: dict, soft_bytes: int,
             # 只有"表值"格计入 FAIL；朴素值格是**对照组**（用来证明为什么需要偏移）
             if label == '朴素值' and st == 'FAIL':
                 st = 'WARN'
+            cell[(codec, label)] = (st, vd, m, ratio, d)
             res.add(f'B-{codec}-{label}', 'B',
                     f'{codec} -cq:v {v}（{label}，crf_ref 21）',
                     st, vd,
@@ -344,10 +389,21 @@ def group_b(res: Result, src: Path, work: Path, soft: dict, soft_bytes: int,
     # 与"按表换算 vs 朴素下发"的码率对比（回答"偏移到底该多大"）
     res.add('B-summary', 'B', '表值 vs 朴素值的码率比', 'PASS',
             '见上逐格 evidence（朴素值码率比 > 表值 ⇒ 偏移方向正确）')
+    # av1 的专项结论行：L40/Ada 上跑完就能直接照它决定"动不动 QUALITY_MAP"
+    if usable.get('av1_nvenc'):
+        tb = cell.get(('av1_nvenc', '表值'))
+        if tb is None:
+            res.add('B-av1-结论', 'B', 'av1_nvenc 的 -cq 表值结论', 'FAIL',
+                    '表值格未产出（编码失败或超量程）⇒ 无法判定')
+        else:
+            st, vd, m, ratio, d = tb
+            cst, cdet = av1_cq_conclusion(st, ratio, d, CQ_TABLE_AT_21['av1_nvenc'])
+            res.add('B-av1-结论', 'B', 'av1_nvenc 的 -cq 表值结论', cst, cdet)
 
 
 def group_c(res: Result, src: Path, work: Path, soft: dict, usable: dict) -> None:
     print('\n【C】constqp 的 -qp 尺度（专门针对 av1_nvenc；H.264/HEVC 作对照）')
+    av1_ok: dict[int, str] = {}          # 候选 qp → 判词（仅 av1 可用时填充）
     if not usable.get('av1_nvenc'):
         res.add('C-av1', 'C', 'AV1 constqp 的 QP 尺度', 'SKIP',
                 '本卡不支持 AV1 NVENC（T4 情形）⇒ 此格必须在 L40/Ada 上跑')
@@ -366,10 +422,14 @@ def group_c(res: Result, src: Path, work: Path, soft: dict, usable: dict) -> Non
             ratio = (m['kbps'] / soft['kbps']) if (m['kbps'] and soft['kbps']) else 0.0
             d = (m['psnr'] - soft['psnr']) if (m['psnr'] and soft['psnr']) else 0.0
             st, vd = rate_verdict(d, ratio)
+            av1_ok[v] = st
             res.add(f'C-av1-qp{v}', 'C', f'av1_nvenc -rc constqp -qp {v}（{tag}）',
                     st, vd,
                     evidence=[f'PSNR {m["psnr"] and round(m["psnr"], 2)} dB  '
                               f'{round(m["kbps"] or 0)} kbps  码率比 {ratio:.2f}×'])
+        # 结论行：L40/Ada 上跑完直接照它决定"动不动 _QP_SCALE"
+        cst, cdet = av1_qp_conclusion(av1_ok)
+        res.add('C-av1-结论', 'C', 'AV1 的 -qp 尺度结论', cst, cdet)
     # H.264 / HEVC 的对照组：QP 与 x264 QP 同尺度 ⇒ 21 应落在带内
     for codec in ('h264_nvenc', 'hevc_nvenc'):
         if not usable.get(codec):
@@ -433,6 +493,30 @@ def selftest() -> int:
         bad.append('码率越界应 FAIL')
     if rate_verdict(0.0, 1.6)[0] != 'WARN':
         bad.append('警戒带应 WARN')
+    # av1 结论行是纯函数、且只在 L40/Ada 上会走到 ⇒ 必须先自证（否则首次上机才暴露）
+    _qp = {21: 'FAIL', 84: 'PASS', 105: 'FAIL'}
+    if av1_qp_conclusion(_qp)[0] != 'PASS':
+        bad.append('qp 结论：仅 ×4(84) 落带应 PASS')
+    if av1_qp_conclusion({21: 'FAIL', 84: 'FAIL', 105: 'PASS'})[0] != 'WARN':
+        bad.append('qp 结论：仅 ×5(105) 落带应 WARN（建议改尺度）')
+    if av1_qp_conclusion({21: 'PASS', 84: 'FAIL', 105: 'FAIL'})[0] != 'WARN':
+        bad.append('qp 结论：仅直取(21) 落带应 WARN（要求人工复核）')
+    if av1_qp_conclusion({21: 'FAIL', 84: 'FAIL', 105: 'FAIL'})[0] != 'FAIL':
+        bad.append('qp 结论：三候选都不落带应 FAIL')
+    if av1_qp_conclusion({21: 'PASS', 84: 'PASS', 105: 'FAIL'})[0] != 'WARN':
+        bad.append('qp 结论：多候选落带应 WARN（无法判定唯一尺度）')
+    if '无需改动' not in av1_qp_conclusion({84: 'PASS'})[1]:
+        bad.append('qp 结论：×4 成立时应写明"无需改动"')
+    _qp_in = {84: 'PASS'}
+    av1_qp_conclusion(_qp_in)
+    if _qp_in != {84: 'PASS'}:
+        bad.append('qp 结论：不应修改入参（须为纯函数）')
+    if av1_cq_conclusion('PASS', 1.20, 0.5, 27)[0] != 'PASS':
+        bad.append('cq 结论：表值 PASS 应 PASS')
+    if av1_cq_conclusion('WARN', 2.20, 3.5, 27)[0] != 'FAIL':
+        bad.append('cq 结论：非 PASS 应 FAIL 并提示重标 b')
+    if '重标' not in av1_cq_conclusion('FAIL', 2.20, 3.5, 27)[1]:
+        bad.append('cq 结论：未落带时应提示重标 QUALITY_MAP')
     for b in bad:
         print(f'  ✗ {b}')
     print('  ✓ 装置自检通过' if not bad else f'  ✗ {len(bad)} 项不过')
@@ -444,6 +528,9 @@ def main() -> int:
     ap.add_argument('--src', help='真实素材（默认用合成 720p testsrc2）')
     ap.add_argument('--quick', action='store_true', help='只跑 A 组（纯逻辑）')
     ap.add_argument('--selftest', action='store_true', help='只验装置本身')
+    ap.add_argument('--expect-av1', action='store_true',
+                    help='要求本卡能编 AV1（L40/Ada 交接用）：av1_nvenc 不可用即 exit 2，'
+                         '避免把"静默 SKIP"当成"已验过 AV1"')
     ap.add_argument('--json', help='JSON 报告输出路径')
     ap.add_argument('--md', help='Markdown 报告输出路径')
     ap.add_argument('--keep', action='store_true', help='保留中间编码产物')
@@ -451,6 +538,9 @@ def main() -> int:
 
     if args.selftest:
         return selftest()
+    if args.expect_av1 and args.quick:
+        print('[ERROR] --expect-av1 需要跑 B/C 组（可用性探测在 B/C 之前），不能与 --quick 同用')
+        return 2
     if shutil.which('ffmpeg') is None:
         print('[ERROR] 未找到 ffmpeg')
         return 2
@@ -473,6 +563,21 @@ def main() -> int:
     try:
         src = make_source(work, args.src)
         print(f'\n素材：{src}')
+
+        # --expect-av1：先只探 av1 可编性，好在跑软编基准与全量之前 fail-fast
+        probe_cache: dict[str, tuple[bool, str]] = {}
+        if args.expect_av1:
+            ok, why = nvenc_usable('av1_nvenc', src, work)
+            probe_cache['av1_nvenc'] = (ok, why)
+            if not ok:
+                print(f'\n[ERROR] --expect-av1 未满足：本卡（{gpu or "未知"}）不能编 av1_nvenc。\n'
+                      f'        实测失败：{why[:160]}\n'
+                      '        AV1 NVENC 需 Ada 代及以上（RTX 40 / L40 等）；本卡不满足 L40 交接前提。\n'
+                      '        已 fail-fast 退出，以免把 B/C 组的 av1 SKIP 误当成"已验过 AV1"。\n'
+                      '        如只想跑 h264/hevc 部分，请去掉 --expect-av1。')
+                return 2
+            print('  ✓ --expect-av1：av1_nvenc 可编 ⇒ B/C 组会跑满（av1 的 -cq 偏移与 -qp ×4 尺度）')
+
         soft_out = work / 'soft_crf21.mp4'
         rc, log = encode_soft(src, soft_out, 21)
         if rc != 0:
@@ -485,7 +590,10 @@ def main() -> int:
         usable = {}
         print('\n── NVENC 可用性探测（选项存在 ≠ 本卡能编）──')
         for codec in NVENC_CODECS:
-            ok, why = nvenc_usable(codec, src, work)
+            if codec in probe_cache:
+                ok, why = probe_cache[codec]
+            else:
+                ok, why = nvenc_usable(codec, src, work)
             usable[codec] = ok
             print(f'  {"✓" if ok else "–"} {codec}：'
                   f'{"可用" if ok else "不可用（" + why[:80] + "）"}')

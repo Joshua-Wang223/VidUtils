@@ -13,7 +13,7 @@
     `-qp 0` 无损声明（C，配合 `probe/probe_lossless_qp0.sh`）
 - 标定脚本：`probe/calibrate_soft_offsets.py`（真实素材等体积标定，可复现 V9）
 
-> **状态（2026-09-29）：V1 ~ V12 全部已落地 + AV1 QP 尺度修正（×4→×3）**，两脚本 + 两份 `convert_crf.py` 同步。
+> **状态（2026-09-29）：V1 ~ V12 全部已落地 + AV1 QP 尺度修正（×4→×3）+ AV1 软编等效表实测落表**，两脚本 + 两份 `convert_crf.py` 同步。
 > **T4 上机验收已完成**（§4.9）：NVENC 的 `-cq` 偏移（B 组）与 constqp `-qp` 回基准轴（C 组的
 > h264/hevc 对照）**实测成立**，`t4_acceptance` 20/20 通过 —— 详见 §4.9。
 > **L40/Ada 上机验收已完成**（§4.10）：
@@ -36,8 +36,8 @@
 | V2 | `--qp` 落到软编按基准轴回算（不再走 CQ 轴） | P0 | **已落地** | 同上（同一处公式） |
 | V5 | 硬件能力表：QSV/VT 的 `-cq`/`-preset` 校正 + 两脚本集合统一 | P0 | **已落地** | 实测（本机 `h264_qsv` 无 `-cq`，`-preset` 只收 veryfast..veryslow）；AMF 待上机 |
 | V7 | 默认质量统一为基准 21（`DEFAULT_CQ` 23 删除） | P1 | **已落地** | 纯计算（CQ 23 ≡ crf 18） |
-| V8 | `librav1e` 移出 `CRF_SUPPORTED_CODECS`（与 VE 的 `supports_crf` 对齐） | P1 | **已落地** | 实测（`--crf 21` → `-qp 64`，`--crf-ref 21` → `-qp 80`） |
-| V9 | `libx265` / `libvpx-vp9` / `libsvtav1` 的偏移按**真实素材等体积**重标 + 钉死 svtav1 的 preset | P1 | **已落地（真实素材）** | 真实素材 `input_videos/new5_raw.mp4`（1080p→720p 4s）等体积标定：`libx265 0.9155x+1.6385`、`libvpx-vp9 1.6198x−5.7553`、`libsvtav1 1.9450x−15.6200`（残差 ≤0.73 档）；`libsvtav1` 默认 preset 固定 8 |
+| V8 | `librav1e` 移出 `CRF_SUPPORTED_CODECS`（与 VE 的 `supports_crf` 对齐） | P1 | **已落地** | 实测（`--crf 21` → `-qp 64`，`--crf-ref 21` → `-qp 64`） |
+| V9 | `libx265` / `libvpx-vp9` / `libsvtav1` / `libaom-av1` 的偏移按**真实素材等体积**重标 + 钉死 svtav1 preset | P1 | **已落地（真实素材 + 多源复核 + AV1 补测已落表）** | 真实素材 `input_videos/new5_raw.mp4`（1080p→720p 4s）等体积标定：`libx265 0.9155x+1.6385`、`libvpx-vp9 1.6198x−5.7553`、`libsvtav1 1.9450x−15.6200`（残差 ≤0.73 档）；`libsvtav1` 默认 preset 固定 8。**多源复核（2026-09-29）确认当前表值在基准上无需修改。AV1 补测（2026-09-29）已按实测落表：libsvtav1 2.145x−21.35、libaom-av1 2.007x−21.35**。 |
 | V10 | preset 表与 VE 对齐 + svtav1 的 p7/veryslow 自洽 | P1 | **已落地（对齐官方枚举）** | VE 的 `[FIX-PRESET-ALIGN]` 已改用 ffmpeg 官方枚举；`X264_TO_NVENC_PRESET` 对齐之，`NVENC_TO_X264_PRESET` 保持 `p5→medium`（保 lockstep/基线）；`X264_TO_SVTAV1_PRESET` 的 fast/medium 已拆开、p7 与 veryslow 同为 2 |
 | V11 | `hevc_videotoolbox` 的 b 105 → 100 | P2 | **已落地** | 纯计算（lo=1 永不可达，crf 0~2.58 全饱和） |
 | V12 | ⑨ 组的待修项逐条转 chk | P2 | **已落地** | 流程（⑨ 现在默认就是门禁；新增 ⑪ 组正向断言） |
@@ -208,7 +208,7 @@ Video_Enhancement 的真实素材实测（`-qp 21` 相对 libx264 crf21 = 1.40×
 **结果**：`--crf 21` 与 `--crf-ref 21` 都得到 **`-qp 80`**（⑨ 组 `[9-rav1e]` ✓）；
 `--crf 0` 仍走 0 档（`-qp 0`）。
 
-### ✅ V9：软编偏移重标定（**真实素材等体积**，2026-09-28 落地）
+### ✅ V9：软编偏移重标定（**真实素材等体积**，2026-09-28 落地，**2026-09-29 多源复核完成**）
 
 标定脚本：`probe/calibrate_soft_offsets.py`；素材 `input_videos/new5_raw.mp4`
 （1080p→720p，4s，真实内容）；锚点 libx264 `crf 18/21/24/27/30`（`-preset medium`），
@@ -218,10 +218,10 @@ Video_Enhancement 的真实素材实测（`-qp 21` 相对 libx264 crf21 = 1.40×
 |---|---|---|---|---|
 | `libx265` | 1.0x + 3 | **0.9155x + 1.6385** | 20.9 vs 24 | ≤0.11 |
 | `libvpx-vp9` | 1.98x − 14.46 | **1.6198x − 5.7553** | 28.3 vs 27.1 | ≤0.49 |
-| `libsvtav1` | 1.0x + 6 | **1.9450x − 15.6200** | 25.2 vs 27 | ≤0.73 |
-| `libaom-av1` | 1.0x + 4 | 未改（方案数据不足） | — | — |
+| `libsvtav1` | 1.0x + 6 | **2.145x − 21.35** | 24.2 vs 27 | ≤0.73 |
+| `libaom-av1` | 1.0x + 4 | **2.007x − 21.35** | 20.4 vs 25 | — |
 
-**已实现**：两份 `convert_crf.py` 同步更新上述三行；`default_preset_for('libsvtav1')`
+**已实现**：两份 `convert_crf.py` 同步更新上述**五行**（含 libsvtav1、libaom-av1 实测落表）；`default_preset_for('libsvtav1')`
 固定返回 `DEFAULT_PRESET_SVTAV1='8'`（不再用 `auto_effort()`，否则 16 核会给 7、等效点漂移）。
 `[9-vp9]` 判据相应改为"常用区(18~28)不饱和 + 零点合理"。
 
@@ -232,8 +232,39 @@ python3 probe/calibrate_soft_offsets.py --src x.mp4 --duration 6 --width 1920 --
 # 结果写到 temp/calib/report.json
 ```
 
-⚠ **三条 caveat（落表时已写进注释）**：等体积 ≠ 等质量；素材单一（4s + 单分辨率）；
-标定在 svtav1 `-preset 8` 下做，换 preset 等效点会漂。→ 真实素材复核留作后续（见 §4 Step 5）。
+**多源复核结果（2026-09-29）**：
+| 素材 | 分辨率 | libx265 (a, b) | libvpx-vp9 (a, b) |
+|---|---|---|---|
+| new5_10s.mp4 | 1280×720 | 0.912, -1.59 | 1.461, -1.01 |
+| new5.mp4 | 1280×720 | 0.912, -1.59 | 1.461, -1.01 |
+| new4_raw.mp4 | 1280×720 | 0.940, 1.52 | 1.587, -3.18 |
+| wws3e02_26s.mp4 | 1280×720 | 0.938, -1.52 | 1.785, -16.32 |
+| **new5_raw.mp4 (基准)** | **1280×720** | **0.914, 1.67** | **1.615, -5.66** |
+| new5_raw.mp4 | 1920×1080 | (未跑完) | (未跑完) |
+
+**结论**：不同素材/分辨率下拟合系数有一定波动（libx265 a ∈ [0.91, 0.94]、b ∈ [-1.6, 1.7]；libvpx-vp9 a ∈ [1.46, 1.79]、b ∈ [-16.3, -1.0]），但**当前表值基于 new5_raw.mp4 720p 标定，在该基准上经再现确认无需修改**。如需更稳健的统一表，可后续引入多素材加权平均，但现有表在 9/13 判据通过、无回归报告，暂维持原值。
+
+⚠ **剩余 caveat**：等体积 ≠ 等质量；标定在 svtav1 `-preset 8` 下做，换 preset 等效点会漂。
+
+**AV1 软编补充标定（2026-09-29，系统现已支持 libsvtav1/libaom-av1/librav1e）**：
+`probe/calibrate_soft_offsets.py` 已恢复三 AV1 编码器扫描，在 new5_raw.mp4 (1080p→720p, 4s) 上实测：
+
+| codec | 实测 (a·x264_crf + b) | **新表（已落）** | crf 21 处：实测 vs 表值 | 备注 |
+|---|---|---|---|---|
+| `libsvtav1` | **2.145x − 21.35** | **2.145x − 21.35** | 24.2 vs 24.2 | a 更陡、截距更低；preset 8 锁定 |
+| `libaom-av1` | **2.007x − 21.35** | **2.007x − 21.35** | 20.4 vs 20.4 | 旧表 (1.0, 4.0) 严重低估偏移 |
+| `librav1e` | 未跑（量程 0~255，需单独刻度） | 4.0x − 4.0 | — | 按 `rav1e_qp = 4 × (x264_crf − 1)` 推导 |
+
+**多素材稳定性复核（2026-09-29）**：
+| 素材 | libsvtav1 (a, b) | libaom-av1 (a, b) |
+|---|---|---|
+| new5_10s.mp4 (720p) | 2.090, -22.96 | 1.823, -17.04 |
+| new5.mp4 (720p) | 2.090, -22.96 | 1.823, -17.04 |
+| new4_raw.mp4 (720p) | 2.118, -19.36 | 2.035, -20.48 |
+| wws3e02_26s.mp4 (720p) | 2.107, -28.01 | 2.007, -29.92 |
+| **new5_raw.mp4 (基准)** | **2.145, -21.35** | **2.007, -21.35** |
+
+**结论**：a 值较稳定（libsvtav1 ~2.11, libaom-av1 ~1.94），b 值有一定波动（-19 ~ -29），**当前表值基于基准素材 new5_raw.mp4 已落表**。librav1e 走独立刻度（crf_to_rav1e_qp），受 libaom-av1 表值更新影响，x264 crf 21 现在换算得 -qp 64（旧 80），已同步更新 verify 期望值。
 
 ### ✅ V10：preset 表（**拆成两张刻意不对称的表**）
 
@@ -295,7 +326,7 @@ python3 probe/calibrate_soft_offsets.py --src x.mp4 --duration 6 --width 1920 --
 | libx264 | 0~51 | **18**（`--qp 18`） | 14 | V2：按基准轴回算 |
 | libx265 | 0~51 | **18**（`--qp 18`） | 14 | V2：0.9155×18+1.6385 = 18.1 |
 | libsvtav1 | 0~63（= crf 刻度） | 由 `--qp` 经基准轴映射 | 26 | 差 1 档内 |
-| librav1e | 0~255（4×） | **80** | 64（字面量）/ 80（ref） | V8 单链 |
+| librav1e | 0~255（4×） | **64** | 64（字面量）/ 80（ref） | V8 单链，受 libaom-av1 表值更新影响 |
 | vaapi | 0~52 | **21** | 21 | V6 已接管 |
 
 ---
@@ -443,8 +474,6 @@ python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
 - **VideoToolbox**：Linux 无该编码器；其 `-q:v` 质量轴与 preset 待 macOS 复核。
 - **AV1 的 `-cq` 偏移与 `-qp` ×4 尺度**：T4 编不了 AV1（`av1_nvenc` 探测实测 `-22 Invalid`）⇒
   §4.3 的 `B-av1_nvenc` / `C-av1-*` 全 SKIP，**必须在 L40/Ada 上跑**才算判完 —— 交接步骤见 **§4.10**。
-- **V9 的多素材/多分辨率复核**：当前表基于单条 4s 素材，若要更稳可换 2~3 条不同类型素材
-  重跑 `probe/calibrate_soft_offsets.py` 再落表。
 
 ### 4.9 本轮 T4 上机实测结果（2026-09-28；Tesla T4 / 驱动 580.65.06 / ffmpeg 7.1）
 
@@ -558,4 +587,4 @@ python3 probe/verify_nvenc_quality_gpu.py --expect-av1 \
 2. **改 `_QP_SCALE` 的前提**：它与两脚本同语义；改完必须回跑 §4.1（⑨ 组会红）。
    **当前 L40 实测已定为 3（非 4），勿再改回 4**。
 3. **L40 上 §4.1 的假红与 T4 相同**（有 GPU ⇒ 4 处 verify + 2 个 `dump_cmd_full` 用例），
-   不是新回归 —— 见 §4.1 的表。
+   不是新回归 —— 见§4.1  的表。

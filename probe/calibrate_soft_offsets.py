@@ -54,6 +54,8 @@ def encode(src, codec, crf, out, preset_args, quiet=True):
         cmd += ['-c:v', 'libx265', '-preset', 'medium', '-crf', str(crf)]
     elif codec == 'libsvtav1':
         cmd += ['-c:v', 'libsvtav1', '-preset', '8', '-crf', str(crf)]
+    elif codec == 'libsvtav1':
+        cmd += ['-c:v', 'libsvtav1', '-preset', '8', '-crf', str(crf)]
     elif codec == 'libvpx-vp9':
         cmd += ['-c:v', 'libvpx-vp9', '-b:v', '0', '-crf', str(crf),
                 '-deadline', 'good', '-cpu-used', '2']
@@ -119,7 +121,7 @@ def main():
 
     codecs = ['libx264'] + list(TARGET_SWEEPS)
     if args.selftest:
-        codecs = ['libx264', 'libsvtav1']
+        codecs = ['libx264', 'libx265', 'libsvtav1']
 
     sizes = {}
     for codec in codecs:

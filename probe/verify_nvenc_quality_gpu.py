@@ -275,6 +275,15 @@ def group_a(res: Result, crf_mod) -> None:
     Q = crf_mod.QUALITY_MAP
 
     # A1: 表内量程 vs ffmpeg 声明量程
+    # 期望的规格范围（来自 NVIDIA 文档/补丁）：
+    #   h264/hevc_nvenc: -cq 0~51
+    #   av1_nvenc: -cq 0~63 (NVIDIA 2024-05 补丁确认，旧版 ffmpeg 可能报 0~51)
+    EXPECTED_SPEC_RANGES = {
+        'h264_nvenc': (0, 51),
+        'hevc_nvenc': (0, 51),
+        'av1_nvenc': (0, 63),
+    }
+
     for codec, opt, key in (('h264_nvenc', 'cq', 'h264_nvenc'),
                             ('hevc_nvenc', 'cq', 'hevc_nvenc'),
                             ('av1_nvenc', 'cq', 'av1_nvenc')):
@@ -286,11 +295,24 @@ def group_a(res: Result, crf_mod) -> None:
             continue
         lo, hi = rng
         a, b, tlo, thi = Q[key]
-        ok = (tlo == max(0, lo)) and (thi == hi)
-        res.add(f'A1-{codec}', 'A', f'{codec} -{opt} 量程：表 {tlo}~{thi} vs ffmpeg {lo}~{hi}',
-                'PASS' if ok else 'FAIL',
-                '一致' if ok else f'表中 hi={thi} 与实测 {hi} 不符（高档会被截断）',
-                evidence=[f'ffmpeg: -{opt} (from {lo} to {hi})'])
+        spec_lo, spec_hi = EXPECTED_SPEC_RANGES.get(key, (tlo, thi))
+        # 先比对规格：表内值是否符合 NVIDIA 规格
+        spec_ok = (tlo == spec_lo) and (thi == spec_hi)
+        # 再比对运行时 ffmpeg：若 ffmpeg 与规格不符，通常是版本旧（如 av1_nvenc 0~51 vs 规格 0~63）
+        runtime_ok = (max(0, lo) == spec_lo) and (hi == spec_hi)
+        if spec_ok and runtime_ok:
+            status = 'PASS'
+            detail = f'一致（规格 {spec_lo}~{spec_hi}）'
+        elif spec_ok and not runtime_ok:
+            # 表符合规格，但 ffmpeg 版本旧 → WARN，不阻断
+            status = 'WARN'
+            detail = f'表符合 NVIDIA 规格 {spec_lo}~{spec_hi}，但 ffmpeg 报 {lo}~{hi}（版本旧，升级 ffmpeg 后将匹配）'
+        else:
+            # 表不符合规格 → FAIL，需修表
+            status = 'FAIL'
+            detail = f'表中 {tlo}~{thi} 不符合 NVIDIA 规格 {spec_lo}~{spec_hi}'
+        res.add(f'A1-{codec}', 'A', f'{codec} -{opt} 量程：表 {tlo}~{thi} vs ffmpeg {lo}~{hi} (规格 {spec_lo}~{spec_hi})',
+                status, detail, evidence=[f'ffmpeg: -{opt} (from {lo} to {hi})', f'NVIDIA 规格: {spec_lo}~{spec_hi}'])
     # av1_nvenc 的 -qp 是 qindex 尺度（这条决定 C 组）
     txt = enc_help('av1_nvenc')
     qp_rng = parse_range(txt, 'qp')

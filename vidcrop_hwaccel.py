@@ -1382,6 +1382,41 @@ def encoder_supports_qp(codec: str) -> bool:
     return codec in _QP_ONLY_CODECS
 
 
+# 运行时缓存：编码器 -> {option: (lo, hi)}
+_FFMPEG_RANGE_CACHE: Dict[str, Dict[str, Tuple[int, int]]] = {}
+
+
+def _query_ffmpeg_range(encoder: str, option: str) -> Tuple[int, int] | None:
+    """
+    运行时查询 ffmpeg 对给定编码器的指定选项（-crf/-cq/-qp）的实际可用量程。
+
+    解析 `ffmpeg -h encoder=xxx` 输出中形如 "(from X to Y)" 或 "(X to Y)" 的范围。
+    失败或解析不到时返回 None，由调用方回退到静态表。
+    """
+    cache = _FFMPEG_RANGE_CACHE.setdefault(encoder, {})
+    if option in cache:
+        return cache[option]
+
+    try:
+        import subprocess
+        import re
+        out = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-h', f'encoder={encoder}'],
+            capture_output=True, text=True, timeout=5, check=False
+        ).stdout
+        # 匹配 "(from -1 to 63)" 或 "(0 to 51)" 或 "(-1 to 255)" 等模式
+        # 选项行格式：  -cq  <float> ... (from 0 to 51)
+        pattern = rf'^\s+-{re.escape(option)}\b.*?\((?:from\s+)?([-\d]+)\s+to\s+([-\d]+)\)'
+        m = re.search(pattern, out, re.MULTILINE)
+        if m:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            cache[option] = (lo, hi)
+            return (lo, hi)
+    except Exception:
+        pass
+    return None
+
+
 def literal_range(codec: str, kind: str = 'crf') -> Tuple[int, int]:
     """字面量质量参数在给定编码器下的**实际可用量程** ``(lo, hi)``。
 
@@ -1402,8 +1437,16 @@ def literal_range(codec: str, kind: str = 'crf') -> Tuple[int, int]:
     c = (codec or '').lower()
     if kind == 'cq':
         key = c if encoder_supports_cq(c) else 'h264_nvenc'
+        option = 'cq'
     else:
         key = c if encoder_supports_crf(c) else 'libx264'
+        option = 'crf'
+
+    # 优先运行时查询 ffmpeg 实际量程；失败则回退静态表
+    runtime = _query_ffmpeg_range(key, option)
+    if runtime is not None:
+        return runtime
+
     m = QUALITY_MAP.get(key) or QUALITY_MAP['h264_nvenc' if kind == 'cq' else 'libx264']
     return int(m[2]), int(m[3])
 

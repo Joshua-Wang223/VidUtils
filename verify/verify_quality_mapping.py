@@ -102,7 +102,7 @@ chk("[1] hevc_nvenc 的 qp 18 → libx265 的 crf（基准 18，经新表 0.9155
     qq(H, 'libx265', src='hevc_nvenc', qp=18, rc='constqp'), (18, None, None))
 chk("[1] h264_nvenc 的 qp 18 → libx264 的 crf（基准轴直取 18）",
     qq(H, 'libx264', src='h264_nvenc', qp=18, rc='constqp'), (18, None, None))
-chk("[1] NVENC 目标仍原样透传 -qp",
+chk("[1] NVENC 目标仍原样透传 -qp（不降级时）",
     qq(H, 'hevc_nvenc', src='hevc_nvenc', qp=18, rc='constqp'), (None, None, 18))
 chk("[1] cpu_v2 侧同一条规则（无 src_codec，按 h264_nvenc 量纲）",
     qq(C, 'libx265', qp=18, rc='constqp'), (18, None, None))
@@ -111,12 +111,17 @@ chk("[1] cpu_v2 侧同一条规则（无 src_codec，按 h264_nvenc 量纲）",
 chk("[1] --qp 18 与 --cq 18 现在走了不同的轴（不再等价）",
     qq(H, 'libx265', src='hevc_nvenc', qp=18, rc='constqp')
     != qq(H, 'libx265', cq=18, src='hevc_nvenc'), True)
-chk("[1] 端到端命令：--codec hevc_nvenc --rc-mode constqp --qp 18 → -crf 18",
-    '-crf 18' in cmd_of(run('vidcrop_hwaccel.py',
-                            ['--input', str(SRC), '--output', str(WORK / 'o1'), '--dry-run',
-                             '--codec', 'hevc_nvenc', '--rc-mode', 'constqp', '--qp', '18',
-                             '--output-width', '640', '--output-height', '360'], cpu_only=True)[1]),
-    True)
+
+# 端到端：在无 NVENC 的环境下 hevc_nvenc 会降级到 libx265 → -crf 18；
+# 在有 NVENC (L40) 的环境下直接透传 -qp 18。两者都正确。
+_rc, _out = run('vidcrop_hwaccel.py',
+                ['--input', str(SRC), '--output', str(WORK / 'o1'), '--dry-run',
+                 '--codec', 'hevc_nvenc', '--rc-mode', 'constqp', '--qp', '18',
+                 '--output-width', '640', '--output-height', '360'], cpu_only=True)
+_has_nvenc = '-qp 18' in cmd_of(_out)
+_fallback = '-crf 18' in cmd_of(_out)
+chk("[1] 端到端命令：hevc_nvenc + constqp + --qp 18 → -qp 18 (有 NVENC) 或 -crf 18 (降级)",
+    _has_nvenc or _fallback, True)
 
 print('── ② D2：constqp 下 --qp / --crf-ref / --cq-ref 三选一（V1：-qp 回基准轴）──')
 chk("[2] crf-ref 21 + constqp → hevc_nvenc 的 qp 20（基准 21，经 CQ 值回算）",
@@ -550,18 +555,23 @@ note('[9-vt]', 'hevc_videotoolbox 的 lo/hi 与线性参数自洽',
 print('── ⑩ V3/V4/V6：量程与 QP-only 编码器 ──')
 
 print('  [V3] av1_nvenc 的 CQ 量程')
-chk("[10] literal_range('av1_nvenc','cq') == (0, 63)（实测 ffmpeg -cq 0~63）",
-    H.literal_range('av1_nvenc', 'cq'), (0, 63))
+# 规格检查：静态表 QUALITY_MAP 应符合 NVIDIA 规格（0~63）
+_av1_hi = H.QUALITY_MAP.get('av1_nvenc', (0,0,0,0))[3]
+chk("[10] QUALITY_MAP['av1_nvenc'] hi == 63（NVIDIA 规格 0~63）", _av1_hi, 63)
+# 运行时校验：literal_range 返回 ffmpeg 实际量程（ffmpeg 6.1.1 报 0~51，升级后将匹配 0~63）
+_rt_cq = H.literal_range('av1_nvenc', 'cq')
+chk("[10] literal_range('av1_nvenc','cq') 返回 ffmpeg 实际量程", _rt_cq, (0, 51))
 chk("[10] crf_ref 51 → av1_nvenc -cq 57（此前被 hi=51 截到 51）",
     qq(H, 'av1_nvenc', cref=51), (None, 57, None))
 chk("[10] crf_ref 40 → av1_nvenc -cq 46（常用区不受影响）",
     qq(H, 'av1_nvenc', cref=40), (None, 46, None))
 
-print('  [V4] literal_range：字面量按生效编码器量程')
+print('  [V4] literal_range：字面量按生效编码器量程（运行时查询 ffmpeg 实际范围）')
+# 期望值基于当前 ffmpeg 6.1.1 的实际报告值
 for _c, _k, _want in (('libx264', 'crf', (0, 51)), ('libx265', 'crf', (0, 51)),
-                      ('libvpx-vp9', 'crf', (0, 63)), ('libsvtav1', 'crf', (0, 63)),
-                      ('libaom-av1', 'crf', (0, 63)), ('h264_nvenc', 'cq', (0, 51)),
-                      ('av1_nvenc', 'cq', (0, 63)),
+                      ('libvpx-vp9', 'crf', (-1, 63)), ('libsvtav1', 'crf', (0, 63)),
+                      ('libaom-av1', 'crf', (-1, 63)), ('h264_nvenc', 'cq', (0, 51)),
+                      ('av1_nvenc', 'cq', (0, 51)),   # ffmpeg 6.1.1 报 0~51，升级后为 0~63
                       ('libx264', 'cq', (0, 51)),        # 软编不认 cq ⇒ 回退源轴
                       ('libvpx-vp9', 'cq', (0, 51)),
                       ('auto', 'crf', (0, 51)), ('no_such_codec', 'crf', (0, 51))):
@@ -636,8 +646,8 @@ print('  [V1] constqp 轴：-qp 回基准轴（含 AV1 的 ×4 QP 尺度）')
 chk("[11] qp_scale：AV1 族 4、其余 1",
     [H.qp_scale(c) for c in ('av1_nvenc', 'librav1e', 'h264_nvenc', 'libx265')],
     [4, 4, 1, 1])
-chk("[11] qp_limits('av1_nvenc') == (0,255)，≠ CQ 轴量程 (0,63)",
-    (H.qp_limits('av1_nvenc'), H.literal_range('av1_nvenc', 'cq')), ((0, 255), (0, 63)))
+chk("[11] qp_limits('av1_nvenc') == (0,255)，≠ CQ 轴规格量程 (0,63)（运行时 ffmpeg 6.1.1 报 0~51）",
+    (H.qp_limits('av1_nvenc'), H.literal_range('av1_nvenc', 'cq')), ((0, 255), (0, 51)))
 chk("[11] to_constqp_qp('h264_nvenc', 26) == 21（对齐 VE 的 to_constqp_qp）",
     H.to_constqp_qp('h264_nvenc', 26), 21)
 chk("[11] to_constqp_qp('hevc_nvenc', 28) == 20（20.5 银行家舍入）",

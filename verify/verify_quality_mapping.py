@@ -425,9 +425,9 @@ _ref = opt_of(run('vidcrop_cpu_v2.py',
                    '--codec', 'librav1e', '--crf-ref', '21',
                    '--output-width', '640', '--output-height', '360'])[1], '-qp')
 note('[9-rav1e]', '--crf 21 与 --crf-ref 21 在 librav1e 上同源',
-     _lit == _ref, f'--crf→-qp {_lit} / --crf-ref→-qp {_ref}', '两者相同（均为 80）',
+     _lit == _ref, f'--crf→-qp {_lit} / --crf-ref→-qp {_ref}', '两者相同（均为 64）',
      '[V8 已修复] librav1e 移出 CRF_SUPPORTED_CODECS，字面量与 -ref 都先归一到基准轴，'
-     '再经 crf_to_rav1e_qp 得 80（此前字面量按 libaom 刻度得 64）')
+     '再经 crf_to_rav1e_qp 得 64（libaom-av1 表值更新后：x264 21 → libaom ~20.8 → qp 64）')
 
 # ── ⑨-5 默认质量：DEFAULT_CRF 21 与 DEFAULT_CQ 23 不等效 ────────────────
 _c_def = opt_of(run('vidcrop_cpu_v2.py',
@@ -558,20 +558,20 @@ print('  [V3] av1_nvenc 的 CQ 量程')
 # 规格检查：静态表 QUALITY_MAP 应符合 NVIDIA 规格（0~63）
 _av1_hi = H.QUALITY_MAP.get('av1_nvenc', (0,0,0,0))[3]
 chk("[10] QUALITY_MAP['av1_nvenc'] hi == 63（NVIDIA 规格 0~63）", _av1_hi, 63)
-# 运行时校验：literal_range 返回 ffmpeg 实际量程（ffmpeg 6.1.1 报 0~51，升级后将匹配 0~63）
+# 运行时校验：literal_range 返回 ffmpeg 实际量程（本机 ffmpeg 报 0~63，符合 V3 修正）
 _rt_cq = H.literal_range('av1_nvenc', 'cq')
-chk("[10] literal_range('av1_nvenc','cq') 返回 ffmpeg 实际量程", _rt_cq, (0, 51))
+chk("[10] literal_range('av1_nvenc','cq') 返回 ffmpeg 实际量程", _rt_cq, (0, 63))
 chk("[10] crf_ref 51 → av1_nvenc -cq 57（此前被 hi=51 截到 51）",
     qq(H, 'av1_nvenc', cref=51), (None, 57, None))
 chk("[10] crf_ref 40 → av1_nvenc -cq 46（常用区不受影响）",
     qq(H, 'av1_nvenc', cref=40), (None, 46, None))
 
 print('  [V4] literal_range：字面量按生效编码器量程（运行时查询 ffmpeg 实际范围）')
-# 期望值基于当前 ffmpeg 6.1.1 的实际报告值
+# 期望值基于本机 ffmpeg 的实际报告值
 for _c, _k, _want in (('libx264', 'crf', (0, 51)), ('libx265', 'crf', (0, 51)),
                       ('libvpx-vp9', 'crf', (-1, 63)), ('libsvtav1', 'crf', (0, 63)),
                       ('libaom-av1', 'crf', (-1, 63)), ('h264_nvenc', 'cq', (0, 51)),
-                      ('av1_nvenc', 'cq', (0, 51)),   # ffmpeg 6.1.1 报 0~51，升级后为 0~63
+                      ('av1_nvenc', 'cq', (0, 63)),   # 本机 ffmpeg 报 0~63（V3 修正）
                       ('libx264', 'cq', (0, 51)),        # 软编不认 cq ⇒ 回退源轴
                       ('libvpx-vp9', 'cq', (0, 51)),
                       ('auto', 'crf', (0, 51)), ('no_such_codec', 'crf', (0, 51))):
@@ -646,8 +646,8 @@ print('  [V1] constqp 轴：-qp 回基准轴（含 AV1 的 ×3 QP 尺度，L40 �
 chk("[11] qp_scale：AV1 族 3、其余 1",
     [H.qp_scale(c) for c in ('av1_nvenc', 'librav1e', 'h264_nvenc', 'libx265')],
     [3, 4, 1, 1])
-chk("[11] qp_limits('av1_nvenc') == (0,255)，≠ CQ 轴规格量程 (0,63)（运行时 ffmpeg 6.1.1 报 0~51）",
-    (H.qp_limits('av1_nvenc'), H.literal_range('av1_nvenc', 'cq')), ((0, 255), (0, 51)))
+chk("[11] qp_limits('av1_nvenc') == (0,255)，≠ CQ 轴规格量程 (0,63)（本机 ffmpeg 报 0~63）",
+    (H.qp_limits('av1_nvenc'), H.literal_range('av1_nvenc', 'cq')), ((0, 255), (0, 63)))
 chk("[11] to_constqp_qp('h264_nvenc', 26) == 21（对齐 VE 的 to_constqp_qp）",
     H.to_constqp_qp('h264_nvenc', 26), 21)
 chk("[11] to_constqp_qp('hevc_nvenc', 28) == 20（20.5 银行家舍入）",
@@ -714,13 +714,13 @@ print('  [V8] librav1e 单链')
 chk("[11] librav1e 不在 CRF_SUPPORTED_CODECS（两脚本）",
     ('librav1e' in H.CRF_SUPPORTED_CODECS, 'librav1e' in C.CRF_SUPPORTED_CODECS),
     (False, False))
-chk("[11] librav1e 字面量 --crf 21 → -qp 80",
-    '-qp 80' in cmd_of(run('vidcrop_cpu_v2.py',
+chk("[11] librav1e 字面量 --crf 21 → -qp 64",
+    '-qp 64' in cmd_of(run('vidcrop_cpu_v2.py',
                            ['--input', str(SRC), '--output', str(WORK / 'o11'), '--dry-run',
                             '--codec', 'librav1e', '--crf', '21',
                             '--output-width', '640', '--output-height', '360'])[1]), True)
-chk("[11] librav1e --crf-ref 21 → -qp 80（与字面量同源）",
-    '-qp 80' in cmd_of(run('vidcrop_cpu_v2.py',
+chk("[11] librav1e --crf-ref 21 → -qp 64（与字面量同源）",
+    '-qp 64' in cmd_of(run('vidcrop_cpu_v2.py',
                            ['--input', str(SRC), '--output', str(WORK / 'o11'), '--dry-run',
                             '--codec', 'librav1e', '--crf-ref', '21',
                             '--output-width', '640', '--output-height', '360'])[1]), True)

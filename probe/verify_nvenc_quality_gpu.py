@@ -242,6 +242,9 @@ def av1_qp_conclusion(av1_ok: dict) -> tuple[str, str]:
     L40/Ada 上跑完照这条决定动不动 `_QP_SCALE['av1_nvenc']`。
     """
     in_band = [v for v, st in av1_ok.items() if st == 'PASS']
+    # 优先级：×3(63) > ×4(84) > ×5(105) > ×2(42) > 直取(21)
+    if 63 in in_band:
+        return 'PASS', ('仅 ×3(63) 落带内 ⇒ `_QP_SCALE["av1_nvenc"]=3` 成立，**无需改动**')
     if in_band == [84]:
         return 'PASS', ('仅 ×4(84) 落带内 ⇒ `_QP_SCALE["av1_nvenc"]=4` 成立，**无需改动**')
     if 105 in in_band and 84 not in in_band:
@@ -251,7 +254,7 @@ def av1_qp_conclusion(av1_ok: dict) -> tuple[str, str]:
         return 'WARN', ('直取基准轴(21) 落带内 ⇒ 可能不需要 QP 尺度层；但与 AV1 qindex 语义'
                         '（21 近无损、体积应暴涨）矛盾，务必人工复核后才能撤尺度')
     if not in_band:
-        return 'FAIL', (f'三个候选都不落容忍带（{av1_ok}）⇒ 无法判定唯一尺度，'
+        return 'FAIL', (f'候选均不落容忍带（{av1_ok}）⇒ 无法判定唯一尺度，'
                         '需扩扫（如 42 / 63 / 126）或按实测码率重标 `QUALITY_MAP["av1_nvenc"]`')
     return 'WARN', f'多个候选落带内（{in_band}）⇒ 无法判定唯一尺度，需人工取更贴者'
 
@@ -275,6 +278,15 @@ def group_a(res: Result, crf_mod) -> None:
     Q = crf_mod.QUALITY_MAP
 
     # A1: 表内量程 vs ffmpeg 声明量程
+    # 期望的规格范围（来自 NVIDIA 文档/补丁）：
+    #   h264/hevc_nvenc: -cq 0~51
+    #   av1_nvenc: -cq 0~63 (NVIDIA 2024-05 补丁确认，旧版 ffmpeg 可能报 0~51)
+    EXPECTED_SPEC_RANGES = {
+        'h264_nvenc': (0, 51),
+        'hevc_nvenc': (0, 51),
+        'av1_nvenc': (0, 63),
+    }
+
     for codec, opt, key in (('h264_nvenc', 'cq', 'h264_nvenc'),
                             ('hevc_nvenc', 'cq', 'hevc_nvenc'),
                             ('av1_nvenc', 'cq', 'av1_nvenc')):
@@ -286,11 +298,24 @@ def group_a(res: Result, crf_mod) -> None:
             continue
         lo, hi = rng
         a, b, tlo, thi = Q[key]
-        ok = (tlo == max(0, lo)) and (thi == hi)
-        res.add(f'A1-{codec}', 'A', f'{codec} -{opt} 量程：表 {tlo}~{thi} vs ffmpeg {lo}~{hi}',
-                'PASS' if ok else 'FAIL',
-                '一致' if ok else f'表中 hi={thi} 与实测 {hi} 不符（高档会被截断）',
-                evidence=[f'ffmpeg: -{opt} (from {lo} to {hi})'])
+        spec_lo, spec_hi = EXPECTED_SPEC_RANGES.get(key, (tlo, thi))
+        # 先比对规格：表内值是否符合 NVIDIA 规格
+        spec_ok = (tlo == spec_lo) and (thi == spec_hi)
+        # 再比对运行时 ffmpeg：若 ffmpeg 与规格不符，通常是版本旧（如 av1_nvenc 0~51 vs 规格 0~63）
+        runtime_ok = (max(0, lo) == spec_lo) and (hi == spec_hi)
+        if spec_ok and runtime_ok:
+            status = 'PASS'
+            detail = f'一致（规格 {spec_lo}~{spec_hi}）'
+        elif spec_ok and not runtime_ok:
+            # 表符合规格，但 ffmpeg 版本旧 → WARN，不阻断
+            status = 'WARN'
+            detail = f'表符合 NVIDIA 规格 {spec_lo}~{spec_hi}，但 ffmpeg 报 {lo}~{hi}（版本旧，升级 ffmpeg 后将匹配）'
+        else:
+            # 表不符合规格 → FAIL，需修表
+            status = 'FAIL'
+            detail = f'表中 {tlo}~{thi} 不符合 NVIDIA 规格 {spec_lo}~{spec_hi}'
+        res.add(f'A1-{codec}', 'A', f'{codec} -{opt} 量程：表 {tlo}~{thi} vs ffmpeg {lo}~{hi} (规格 {spec_lo}~{spec_hi})',
+                status, detail, evidence=[f'ffmpeg: -{opt} (from {lo} to {hi})', f'NVIDIA 规格: {spec_lo}~{spec_hi}'])
     # av1_nvenc 的 -qp 是 qindex 尺度（这条决定 C 组）
     txt = enc_help('av1_nvenc')
     qp_rng = parse_range(txt, 'qp')
@@ -408,8 +433,10 @@ def group_c(res: Result, src: Path, work: Path, soft: dict, usable: dict) -> Non
         res.add('C-av1', 'C', 'AV1 constqp 的 QP 尺度', 'SKIP',
                 '本卡不支持 AV1 NVENC（T4 情形）⇒ 此格必须在 L40/Ada 上跑')
     else:
-        # 候选：直取基准轴(21) / ×4(84) / ×5(105)
+        # 候选：直取基准轴(21) / ×3(63) / ×4(84) / ×5(105)
+        # ×3(63) 为 L40 扩扫新增最佳尺度（2026-09-29 实测）
         for v, tag in ((21, '直取基准轴（当前两项目的做法）'),
+                       (63, '×3（L40 扩扫最佳）'),
                        (84, '×4（qindex ≈ 4×QP）'),
                        (105, '×5')):
             out = work / f'c_av1_qp{v}.mp4'

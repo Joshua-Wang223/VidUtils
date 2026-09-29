@@ -306,11 +306,11 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--mode` | `crop` | `crop` / `cover` / `crop-cover`（`crop-cover`=先按 `--crop-ratio`（未给出时即目标宽高比）最大化裁剪，再缩放覆盖到最终尺寸） |
 | `--codec` | `libx264` | 视频编码器；支持别名（`vp9`→`libvpx-vp9`、`av1`→`libaom-av1`、`svtav1`→`libsvtav1`、`rav1e`→`librav1e` …）；`auto` 等同 `libx264`（本脚本为纯 CPU 路径，与硬件版的 `auto` 在无 NVENC 时解析结果一致） |
 | `--crf` | `21` | CPU 编码器质量（0–51）；**字面量原样下发**，但落到只认 `-cq`/`-qp` 的编码器时会按 libx264 CRF 口径换算过去。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档） |
-| `--cq` | `26`（h264_nvenc） | GPU 编码器质量（0–51）；落到 CPU 软编时按等效表换算为 CRF。**未给质量参数时按统一基准 21 换算**（h264_nvenc 26 / hevc_nvenc 28，见[默认质量](#质量参数的两种取值方式)）。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档） |
+| `--cq` | `26`（h264_nvenc） | GPU 编码器质量：NVENC/AMF 为 0–51，**av1_nvenc 为 0–63**；落到 CPU 软编时按等效表换算为 CRF。**未给质量参数时按统一基准 21 换算**（h264_nvenc 26 / hevc_nvenc 28 / av1_nvenc 27，见[默认质量](#质量参数的两种取值方式)）。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档） |
 | `--crf-ref` | 无 | 以 **libx264 CRF** 为基准给出质量，按等效表换算到目标编码器；与 `--crf`/`--cq` 互斥。与 `--rc-mode constqp` 并用时结果落到 `-qp` |
 | `--cq-ref` | 无 | 以 **h264_nvenc CQ** 为基准给出质量，按等效表换算；与 `--crf`/`--cq` 互斥。与 `--rc-mode constqp` 并用时结果落到 `-qp` |
 | `--rc-mode` | `auto` | NVENC 码率控制模式（**只对 NVENC 编码器生效**）：`auto`=不下发 `-rc`（由 preset 决定，与不写等价）/ `constqp`（恒定 QP，需 `--qp`）/ `vbr` `vbr_hq`（可变码率）/ `cbr` `cbr_hq` `cbr_ld_hq`（恒定码率，需 `--bitrate`）。写法 `<mode>` 或 `nvenc-<mode>`（本轴只有一个后端，裸名不歧义）。⚠ 本脚本默认 `libx264` 且不做硬件探测（`--codec hevc_nvenc` 是原样透传给 ffmpeg），所以要用它得先显式 `--codec hevc_nvenc`；其它编码器下告警忽略 |
-| `--qp` | 无 | NVENC 恒定 QP（0–51）：只在 `--rc-mode constqp` 下生效。constqp 下与 `--crf-ref` / `--cq-ref` **三选一**（同给报错退出 2），与字面量 `--crf` / `--cq` 互斥；非 constqp 模式给了它 → 告警忽略。**落到 CPU 编码器时换算成等效 `-crf`**（不再静默丢弃、回落默认 CRF 21），`--qp 0` 是无损 |
+| `--qp` | 无 | NVENC 恒定 QP：**H.264/HEVC 0–51，av1_nvenc 0–255（qindex，基准×4）**，VAAPI 0–52；只在 `--rc-mode constqp` 下生效。constqp 下与 `--crf-ref` / `--cq-ref` **三选一**（同给报错退出 2），与字面量 `--crf` / `--cq` 互斥；非 constqp 模式给了它 → 告警忽略。**落到 CPU 编码器时按基准轴换算成等效 `-crf`**（不再静默丢弃、回落默认 CRF 21），`--qp 0` 是无损 |
 | `--lookahead` | 无（沿用各编码器默认） | 前向预测帧数 0–250。按编码器落不同选项：`libx264` / `*_nvenc` → `-rc-lookahead`；`libx265` → `-x265-params rc-lookahead=`（**与 HDR 元数据合并成同一条**）；`libvpx-vp9` / `libaom-av1` → `-lag-in-frames`；其余（如 `libsvtav1`）选项名未实测 → 告警忽略。⚠ **默认值本身不同**：NVENC `0`、x265 `20`、x264 由自身决定。⚠ **`--rc-mode constqp` 下 NVENC 会静默禁用 lookahead**，此时不下发 `-rc-lookahead` 并告警 |
 | `--bitrate` | 无 | 目标码率（`8M` / `8000k` / `12000000`），**所有编码器**都下发 `-b:v`。与质量参数同给时**按 rc 模式区分**：`auto` / `vbr*` / `cbr*` 下并存 =「受码率约束的恒定质量」（`-b:v` 视作上限，VP9 下即 constrained quality）；`constqp` 下**报错**（该模式完全无视 `-b:v`）。`cbr*` 模式未给码率会落到 ffmpeg 默认 200kbps，会告警 |
 | `--nvenc-aq` | 关闭 | 给 NVENC 编码器加 `-spatial-aq 1 -temporal-aq 1`（自适应量化，同码率下画质略升、速度略降；对照 Video_Enhancement 的 `enableAQ`/`enableTemporalAQ`）。**逐策略判断**：降级到 CPU 编码器的那条策略会告警忽略。默认关闭，不改变既有输出 |
@@ -361,11 +361,11 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--scale-algo` | 裸 `lanczos` | 缩放算法，写法 `<backend>-<algo>` 或裸 `<algo>`（后端自动）。`libswscale-*`：同 v2 的那 10 个；`cuda-*`：`nearest` `bilinear` `bicubic` `lanczos`（**仅 cover 模式**，走显存内缩放，需自建 FFmpeg）。前缀用于**强制**后端；裸名字要求两表都认（只在一个后端有的必须带前缀，如 `libswscale-spline`）。降级与冲突处理见[硬件加速说明](#硬件加速说明) |
 | `--original-width/height` | 自动检测 | 手动指定源尺寸，跳过 ffprobe |
 | `--codec` | **`h264_nvenc`** | 支持 `auto`；无 NVENC 时自动降级为 **`libx264`** |
-| `--cq` | **`26`**（h264_nvenc） | GPU 编码器质量（0–51）；字面量原样下发。**未给质量参数时按统一基准 21 换算**（h264_nvenc 26 / hevc_nvenc 28）。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档）（不是普通取值，见[质量参数的换算](#质量参数的两种取值方式)） |
+| `--cq` | **`26`**（h264_nvenc） | GPU 编码器质量：NVENC/AMF 为 0–51，**av1_nvenc 为 0–63**；字面量原样下发。**未给质量参数时按统一基准 21 换算**（h264_nvenc 26 / hevc_nvenc 28 / av1_nvenc 27）。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档）（不是普通取值，见[质量参数的换算](#质量参数的两种取值方式)） |
 | `--crf` | **`21`** | CPU 编码器质量（0–51）；字面量原样下发。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档）；落到只认 `-cq`/`-qp` 的编码器（NVENC / AMF）时**按 libx264 CRF 口径换算过去**（不再静默回落默认 CQ） |
-| `--crf-ref` / `--cq-ref` | 无 | 统一质量基准（同上），与 `--crf`/`--cq` **互斥，混用直接报错退出**。⚠ 与 `--rc-mode constqp` **可以并用**：换算结果落到 `-qp`（`-qp` 是该编码器的**真实 QP / 基准轴**，不是 CQ 轴），此时它与 `--qp` 属**三选一** |
+| `--crf-ref` / `--cq-ref` | 无 | 统一质量基准（同上），与 `--crf`/`--cq` **互斥，混用直接报错退出**。⚠ 与 `--rc-mode constqp` **可以并用**：换算结果落到 `-qp`（`-qp` 是该编码器的**真实 QP / 基准轴**，不是 CQ 轴；AV1 NVENC 为基准×4），此时它与 `--qp` 属**三选一** |
 | `--rc-mode` | `auto` | NVENC 码率控制模式（**只对 NVENC 编码器生效**）：`auto`=不下发 `-rc`（由 preset 决定，与不写等价）/ `constqp`（恒定 QP，需 `--qp`）/ `vbr` `vbr_hq`（可变码率）/ `cbr` `cbr_hq` `cbr_ld_hq`（恒定码率，需 `--bitrate`）。写法 `<mode>` 或 `nvenc-<mode>`。⚠ 实际编码器是**逐策略**定的：`--codec auto` 或 NVENC 不可用而降级到 CPU 编码器时，本参数会被**告警忽略**（`--fallback-policy strict` 下改为报错退出 2） |
-| `--qp` | 无 | NVENC 恒定 QP（0–51）：只在 `--rc-mode constqp` 下生效。constqp 下与 `--crf-ref` / `--cq-ref` **三选一**（同给报错退出 2），与字面量 `--crf` / `--cq` 互斥；非 constqp 模式给了它 → 告警忽略。**落到 CPU 编码器时换算成等效 `-crf`**（不再静默丢弃、回落默认 CRF 21），`--qp 0` 是无损 |
+| `--qp` | 无 | NVENC 恒定 QP：**H.264/HEVC 0–51，av1_nvenc 0–255（qindex，基准×4）**，VAAPI 0–52；只在 `--rc-mode constqp` 下生效。constqp 下与 `--crf-ref` / `--cq-ref` **三选一**（同给报错退出 2），与字面量 `--crf` / `--cq` 互斥；非 constqp 模式给了它 → 告警忽略。**落到 CPU 编码器时按基准轴换算成等效 `-crf`**（不再静默丢弃、回落默认 CRF 21），`--qp 0` 是无损 |
 | `--lookahead` | 无（沿用各编码器默认） | 前向预测帧数 0–250。按编码器落不同选项：`libx264` / `*_nvenc` → `-rc-lookahead`；`libx265` → `-x265-params rc-lookahead=`（**与 HDR 元数据合并成同一条**——实测两次 `-x265-params` 是后者整条覆盖前者，各发一条会静默抹掉 HDR 元数据）；`libvpx-vp9` / `libaom-av1` → `-lag-in-frames`；其余（如 `libsvtav1`）选项名未实测 → 告警忽略。⚠ **默认值本身不同**：NVENC `0`（关闭）、x265 `20`、x264 由自身决定。⚠ **`--rc-mode constqp` 下 NVENC 会静默禁用 lookahead**，此时不下发 `-rc-lookahead` 并告警（`strict` 下报错）——免得"设了却没生效" |
 | `--bitrate` | 无 | 目标码率（`8M` / `8000k` / `12000000`），**所有编码器**都下发 `-b:v`。与质量参数同给时**按 rc 模式区分**：`auto` / `vbr*` / `cbr*` 下并存 =「受码率约束的恒定质量」（`-b:v` 视作上限）；`constqp` 下**报错**（该模式完全无视 `-b:v`）。VP9 的 `-b:v 0` 在给了本参数时不再补（否则同选项打架）。`cbr*` 模式未给码率会落到 ffmpeg 默认 200kbps，会告警 |
 | `--preset` | GPU `p5` / CPU `medium` | x264 风格 ↔ NVENC `p1~p7` 映射：x264→NVENC 按 **ffmpeg 官方枚举**（`medium→p4`、`slow→p5`）；降级到 CPU 编码器时按**请求的编码器**换算、档位保持等效（`h264_nvenc` 的 p5 → `libx264` 的 medium、`av1_nvenc` 的 p5 → `libsvtav1` 的 8）。`libsvtav1` 固定整数档 8。概览块显示的就是实际下发的值 |
@@ -392,16 +392,20 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 
 ### `convert_crf.py` — 质量换算表（被上面两个脚本依赖）
 
-单一事实来源：以 **libx264 CRF** 为轴，登记各编码器的线性换算系数 `value = a × x264_crf + b` 与合法区间。
+单一事实来源：以 **libx264 CRF** 为轴，登记各编码器的线性换算系数 `value = a × x264_crf + b` 与合法区间（`QUALITY_MAP`）。
 
 ```python
 from convert_crf import from_x264_crf, to_x264_crf, convert_quality
+# 新增（2026-09-28）：QP 尺度层 + constqp 专用换算
+from convert_crf import to_constqp_qp, from_constqp_qp, qp_range
 
 from_x264_crf('libvpx-vp9', 21)              # → 27
 convert_quality('h264_nvenc', 23, 'libx264')  # → 18
+to_constqp_qp('av1_nvenc', 21)                # → 84（基准 21 × QP 尺度 4）
+qp_range('av1_nvenc')                         # → (0, 255)
 ```
 
-改动换算系数只需改这一个文件，两个裁剪脚本自动跟随。详见 [质量参数指南](#质量参数指南)。
+改动换算系数只需改这一个文件，两个裁剪脚本自动跟随。**两份 `convert_crf.py`（本仓 + `Video_Enhancement/src/utils/`）必须逐字同步**，判据 ⑨ 组会断言。详见 [质量参数指南](#质量参数指南)。
 
 ---
 
@@ -1415,12 +1419,17 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
 | `h264_nvenc` | 1.0 | 5 | 0–51 | 26 |
 | `hevc_nvenc` | 1.0 | 7.5 | 0–51 | 28 |
 | `av1_nvenc` | 1.0 | 6 | 0–63 | 27 |
-| `h264_qsv` / `hevc_qsv` | 1.0 | 3.5 / 4.5 | 1–51 | 24 / 25 |
+| `h264_qsv` / `hevc_qsv` / `av1_qsv` | — | — | — | **无 `-cq`/`-crf`/`-qp`** |
+| `*_videotoolbox` | — | — | — | **质量轴为 `-q:v`（非 `-cq`）** |
 
 > `libx265` / `libvpx-vp9` / `libsvtav1` 的 a、b 是 2026-09-28 用真实素材
 > （`input_videos/new5_raw.mp4`，1080p→720p，**等体积**标定）重算的；`libx265`
 > 在常用区的线性残差 ≤0.11 档、vp9 ≤0.49、svtav1 ≤0.73。⚠ 等体积 ≠ 等质量，
 > 且标定素材单一，换素材应复核（`probe/calibrate_soft_offsets.py` 可复现）。
+>
+> **QSV / VideoToolbox**：2026-09-28 实测本机 `h264_qsv` / `hevc_qsv` / `av1_qsv` 无 `-cq`/`-crf`/`-qp`，
+> `-preset` 仅收 `veryfast..veryslow`（整数 0~7）⇒ 移出 CQ 集，preset 走 x264 档名映射。
+> `*_videotoolbox` 的质量轴是 `-q:v`（不是 `-cq`），也移出 CQ 集。AMF 保留在 CQ 集（待上机复核）。
 
 **降级时的换算**（LLM 常说的"NVENC cq 23 ≈ x264 crf 18"就是这张表算出来的）：
 
@@ -1432,6 +1441,8 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
 | `hevc_nvenc constqp qp 18` → `libx265` | `-crf 18`（`-qp` 是**基准轴真实 QP**，不再按 CQ 轴回算） |
 | `hevc_nvenc constqp qp 0`（无损）→ `libx265` | `-crf 0` + `-x265-params lossless=1` |
 | `--crf 21` 落到 `hevc_nvenc`（反方向） | `-cq 28` |
+| `h264_qsv` / `hevc_qsv` / `av1_qsv`（无质量轴） | 给质量参数**告警**，不换算、不下发 |
+| `*_videotoolbox`（质量轴 `-q:v`） | 给质量参数**告警**，不换算、不下发 |
 
 > 注：旧版 README 里的 `crf = cq + 4 / +1` 是**方向相反**的硬编码偏移，已被本表取代。
 
@@ -1442,6 +1453,7 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
   `--crf`→只认 `-cq`/`-qp` 的硬件编码器），**不是静默丢弃、回落默认值**
 - 同时指定 `--crf` 和 `--cq` 时，按实际落用的编码器自动选用对应参数
 - 任一质量参数取 `0` 一律按**0 档**处理（见上；CPU 编码器上是真无损）
+- **`--qp` 的刻度按编码器分家**（2026-09-28 落地）：H.264/HEVC NVENC = 基准轴（0~51，同 x264 QP）；**AV1 NVENC = 0~255 qindex（×4）**；VAAPI = 0~52；`librav1e` = 0~255（×4）；`libsvtav1` = 0~63（= crf 刻度）。**constqp 下必须走 `to_constqp_qp()` 回基准轴**，CLI 量程用 `qp_range(codec)`。
 
 ### 码率控制与 lookahead（`--rc-mode` / `--qp` / `--lookahead` / `--bitrate`）
 
@@ -1899,8 +1911,8 @@ SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（五格，不�
   H.264/HEVC 0~51），constqp 走 `to_constqp_qp()` 回基准轴、CLI 量程 `qp_range(codec)`；
   默认质量统一 `DEFAULT_REF=21`；实测 **B 组 `-cq` 偏移（h264 26→1.17×、hevc 28→0.76×）
   与 C 组 constqp `-qp 21` 都落在容忍带 ⇒ 表与 V1 均无需改**；av1 在 T4 必 SKIP（编不了），
-  `-qp` ×4 尺度待 L40/Ada；报告在 `verification_report/`；
-  **L40/Ada 交接已备好**：探针 `--expect-av1`（本卡不能编 AV1 即 exit 2，防把 SKIP 当已验）
+  **`-qp` ×3 尺度已在 L40 实测确认（crf_ref 21 → qp 63）**；报告在 `verification_report`/;
+  **L40/Ada 交接已完成：`B-av1-结论`（`-cq 27` PASS，不改表）/ `C-av1-结论`（`×3(qp=63)` PASS，`_QP_SCALE` 已修正为 3），步骤见方案 §4.10
   + B/C 组 `-结论` 行，步骤见方案 §4.10
 - [按主题拆分同一文件里的两条改动线（`test/split_diff_by_theme.py`）](memory/project_commit_split_tool.md)
   —— 分提交时的 hunk 手术固化成规则驱动工具（判定顺序 **整块覆盖 → 逐行规则 → 关键词 →

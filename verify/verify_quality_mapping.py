@@ -130,8 +130,8 @@ chk("[2] cq-ref 23 + constqp → hevc_nvenc 的 qp 18",
     qq(H, 'hevc_nvenc', src='hevc_nvenc', qref=23, rc='constqp'), (None, None, 18))
 chk("[2] h264_nvenc 的 crf-ref 21 + constqp → -qp 21（无 .5 舍入）",
     qq(H, 'h264_nvenc', src='h264_nvenc', cref=21, rc='constqp'), (None, None, 21))
-chk("[2] av1_nvenc 的 crf-ref 21 + constqp → -qp 84（AV1 qindex ≈ 4×QP）",
-    qq(H, 'av1_nvenc', src='av1_nvenc', cref=21, rc='constqp'), (None, None, 84))
+chk("[2] av1_nvenc 的 crf-ref 21 + constqp → -qp 63（AV1 qindex ≈ 3×QP，L40 扩扫最佳）",
+    qq(H, 'av1_nvenc', src='av1_nvenc', cref=21, rc='constqp'), (None, None, 63))
 chk("[2] 非 constqp 时 -ref 仍走 -cq",
     qq(H, 'hevc_nvenc', src='hevc_nvenc', cref=21), (None, 28, None))
 for label, extra in (('constqp 无质量输入', ['--rc-mode', 'constqp']),
@@ -219,8 +219,8 @@ chk("[5] 端到端：--codec libx264 --cq 4 → -crf 1",
 print('── ⑥ 边界：上限饱和 / .5 舍入锁定（防漂移）──')
 chk("[6] hevc_nvenc 的 crf 51 + constqp → -qp 44（CQ 值先被 hi=51 截，再回基准）",
     qq(H, 'hevc_nvenc', cref=51, src='hevc_nvenc', rc='constqp'), (None, None, 44))
-chk("[6] av1_nvenc 的 crf 51 + constqp → -qp 204（CQ 值截到 63，再 ×4）",
-    qq(H, 'av1_nvenc', cref=51, src='av1_nvenc', rc='constqp'), (None, None, 204))
+chk("[6] av1_nvenc 的 crf 51 + constqp → -qp 153（CQ 值 57，基准 51 ×3）",
+    qq(H, 'av1_nvenc', cref=51, src='av1_nvenc', rc='constqp'), (None, None, 153))
 chk("[6] libx265 的 cq 18（hevc 量纲）→ 换算值（新表 0.9155x+1.6385）",
     qq(H, 'libx265', cq=18, src='hevc_nvenc'), (11, None, None))
 chk("[6] libx265 的 cq 23（hevc 量纲）→ 换算值",
@@ -642,20 +642,20 @@ chk_in("[10] --rc-mode 的模式名告警保留", '-rc 是 NVENC 专属选项', 
 # ═══════════════════════════════════════════════════════════════════
 print('── ⑪ V1/V2/V5/V7/V8/V10/V11 正向断言 ──')
 
-print('  [V1] constqp 轴：-qp 回基准轴（含 AV1 的 ×4 QP 尺度）')
-chk("[11] qp_scale：AV1 族 4、其余 1",
+print('  [V1] constqp 轴：-qp 回基准轴（含 AV1 的 ×3 QP 尺度，L40 扩扫确认）')
+chk("[11] qp_scale：AV1 族 3、其余 1",
     [H.qp_scale(c) for c in ('av1_nvenc', 'librav1e', 'h264_nvenc', 'libx265')],
-    [4, 4, 1, 1])
+    [3, 4, 1, 1])
 chk("[11] qp_limits('av1_nvenc') == (0,255)，≠ CQ 轴规格量程 (0,63)（运行时 ffmpeg 6.1.1 报 0~51）",
     (H.qp_limits('av1_nvenc'), H.literal_range('av1_nvenc', 'cq')), ((0, 255), (0, 51)))
 chk("[11] to_constqp_qp('h264_nvenc', 26) == 21（对齐 VE 的 to_constqp_qp）",
     H.to_constqp_qp('h264_nvenc', 26), 21)
 chk("[11] to_constqp_qp('hevc_nvenc', 28) == 20（20.5 银行家舍入）",
     H.to_constqp_qp('hevc_nvenc', 28), 20)
-chk("[11] to_constqp_qp('av1_nvenc', 27) == 84（(27−6)=21 基准 ×4）",
-    H.to_constqp_qp('av1_nvenc', 27), 84)
-chk("[11] from_constqp_qp('av1_nvenc', 84) == 21（反向自洽）",
-    H.from_constqp_qp('av1_nvenc', 84), 21.0)
+chk("[11] to_constqp_qp('av1_nvenc', 27) == 63（(27−6)=21 基准 ×3，L40 扩扫最佳）",
+    H.to_constqp_qp('av1_nvenc', 27), 63)
+chk("[11] from_constqp_qp('av1_nvenc', 63) == 21（反向自洽）",
+    H.from_constqp_qp('av1_nvenc', 63), 21.0)
 chk("[11] 两脚本 to_constqp_qp 逐点相等",
     [H.to_constqp_qp(c, v) for c in ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'librav1e')
      for v in (0, 18, 26, 40)],

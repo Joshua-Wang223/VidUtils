@@ -1458,7 +1458,7 @@ def literal_range(codec: str, kind: str = 'crf') -> Tuple[int, int]:
 # 且各编码器的 `-qp` 量程与 CQ 量程**不同** —— QUALITY_MAP 的 (lo,hi) 描述的是 CQ 轴
 # （av1_nvenc 是 0~63），拿它夹 QP 会把 AV1 的 ~84 夹回 63，故另立 _QP_LIMITS。
 _QP_SCALE: Dict[str, int] = {
-    'av1_nvenc': 4,
+    'av1_nvenc': 3,
     'librav1e': 4,
 }
 _QP_LIMITS: Dict[str, Tuple[int, int]] = {

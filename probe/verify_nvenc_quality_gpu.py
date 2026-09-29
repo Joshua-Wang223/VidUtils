@@ -242,6 +242,9 @@ def av1_qp_conclusion(av1_ok: dict) -> tuple[str, str]:
     L40/Ada 上跑完照这条决定动不动 `_QP_SCALE['av1_nvenc']`。
     """
     in_band = [v for v, st in av1_ok.items() if st == 'PASS']
+    # 优先级：×3(63) > ×4(84) > ×5(105) > ×2(42) > 直取(21)
+    if 63 in in_band:
+        return 'PASS', ('仅 ×3(63) 落带内 ⇒ `_QP_SCALE["av1_nvenc"]=3` 成立，**无需改动**')
     if in_band == [84]:
         return 'PASS', ('仅 ×4(84) 落带内 ⇒ `_QP_SCALE["av1_nvenc"]=4` 成立，**无需改动**')
     if 105 in in_band and 84 not in in_band:
@@ -251,7 +254,7 @@ def av1_qp_conclusion(av1_ok: dict) -> tuple[str, str]:
         return 'WARN', ('直取基准轴(21) 落带内 ⇒ 可能不需要 QP 尺度层；但与 AV1 qindex 语义'
                         '（21 近无损、体积应暴涨）矛盾，务必人工复核后才能撤尺度')
     if not in_band:
-        return 'FAIL', (f'三个候选都不落容忍带（{av1_ok}）⇒ 无法判定唯一尺度，'
+        return 'FAIL', (f'候选均不落容忍带（{av1_ok}）⇒ 无法判定唯一尺度，'
                         '需扩扫（如 42 / 63 / 126）或按实测码率重标 `QUALITY_MAP["av1_nvenc"]`')
     return 'WARN', f'多个候选落带内（{in_band}）⇒ 无法判定唯一尺度，需人工取更贴者'
 
@@ -430,8 +433,10 @@ def group_c(res: Result, src: Path, work: Path, soft: dict, usable: dict) -> Non
         res.add('C-av1', 'C', 'AV1 constqp 的 QP 尺度', 'SKIP',
                 '本卡不支持 AV1 NVENC（T4 情形）⇒ 此格必须在 L40/Ada 上跑')
     else:
-        # 候选：直取基准轴(21) / ×4(84) / ×5(105)
+        # 候选：直取基准轴(21) / ×3(63) / ×4(84) / ×5(105)
+        # ×3(63) 为 L40 扩扫新增最佳尺度（2026-09-29 实测）
         for v, tag in ((21, '直取基准轴（当前两项目的做法）'),
+                       (63, '×3（L40 扩扫最佳）'),
                        (84, '×4（qindex ≈ 4×QP）'),
                        (105, '×5')):
             out = work / f'c_av1_qp{v}.mp4'

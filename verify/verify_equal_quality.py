@@ -3,10 +3,12 @@
 """等质量换算表（QUALITY_MAP）回归判据。
 
 对每条已落表（软编）编码器 × 真实素材：用**等质量表**算出目标参数 → 实测重编码 →
-与同一 libx264 锚点比质量。判据（口径对齐 VE v2 §4.1 唯一来源）：
-  * 主门禁：|ΔVMAF|      ≤ 1.0
-  * 平行门禁：|ΔPSNR|    ≤ 0.3 dB（独立 psnr 滤镜）
-  * 平行门禁：|ΔPSNR-HVS| ≤ 0.5 dB（libvmaf feature）
+与同一 libx264 锚点比质量。判据（口径对齐 VE v2 §4.1「唯一来源 / 同轴」原则）：
+  * 主门禁（**唯一 FAIL 依据**）：|ΔVMAF| ≤ 1.0
+  * 平行**参考**指标（**soft，只 WARN 不判红**）：
+      - |ΔPSNR|     ≤ 0.3 dB（独立 psnr 滤镜）
+      - |ΔPSNR-HVS| ≤ 0.5 dB（libvmaf feature）
+    ⚠ 等质量表以 **VMAF** 定标 ⇒ 同 VMAF **不蕴含**同 PSNR，拿紧 PSNR 判红必然假阳性。
 
 无 GPU：硬编条目不在 QUALITY_MAP 内 ⇒ 自然 SKIP；若**全部** SKIP 则退出码 2
 （防"静默通过"）。
@@ -25,9 +27,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-TOL_VMAF = 1.0
-TOL_PSNR = 0.3
-TOL_HVS = 0.5
+TOL_VMAF = 1.0   # 主门禁（唯一 FAIL 依据）：等质量表以 VMAF 定标，故只用 VMAF 判红
+TOL_PSNR = 0.3   # 参考阈值（soft）：跨轴指标，超界只 WARN（见 §4.1「同轴」原则）
+TOL_HVS = 0.5    # 参考阈值（soft）：同上
 
 SOFT = ('libx265', 'libvpx-vp9', 'libaom-av1', 'libsvtav1', 'librav1e')
 DEFAULT_SRC = ROOT.parent / 'input_videos' / 'new5_raw.mp4'
@@ -91,7 +93,7 @@ def main():
           f'psnr={a["psnr"]:.3f} hvs={a["psnr_hvs"]:.3f}')
 
     CRF.set_quality_mode('quality')
-    fails, rows = [], []
+    fails, warns, rows = [], [], []
     try:
         for codec in tested:
             p = CRF.from_x264_crf(codec, args.crf)
@@ -105,23 +107,34 @@ def main():
             dv = (t['vmaf'] - a['vmaf']) if (t['vmaf'] is not None and a['vmaf'] is not None) else None
             dp = (t['psnr'] - a['psnr']) if (t['psnr'] is not None and a['psnr'] is not None) else None
             dh = (t['psnr_hvs'] - a['psnr_hvs']) if (t['psnr_hvs'] is not None and a['psnr_hvs'] is not None) else None
+            # 主门禁：VMAF（唯一 FAIL 依据）
             ok = (dv is not None and abs(dv) <= TOL_VMAF)
             if not ok:
                 fails.append(f'{codec}: |ΔVMAF|={abs(dv):.2f} > {TOL_VMAF}')
+            # 参考指标（soft）：跨轴，超界只 WARN，不进入 fails、不影响退出码
+            w = (dp is not None and abs(dp) > TOL_PSNR) or (dh is not None and abs(dh) > TOL_HVS)
+            if dp is not None and abs(dp) > TOL_PSNR:
+                warns.append(f'{codec}: |ΔPSNR|={abs(dp):.2f} > {TOL_PSNR}（参考，不判红）')
+            if dh is not None and abs(dh) > TOL_HVS:
+                warns.append(f'{codec}: |ΔPSNR-HVS|={abs(dh):.2f} > {TOL_HVS}（参考，不判红）')
             rows.append({'codec': codec, 'param': p, 'vmaf': t['vmaf'],
                          'd_vmaf': dv, 'd_psnr': dp, 'd_psnr_hvs': dh, 'ok': bool(ok)})
-            flag = '✓' if ok else '✗'
+            flag = ('✓' if ok else '✗') + (' ⚠' if w else '')
             print(f'  {flag} {codec:11} q={p:>4}  vmaf={t["vmaf"]:.3f}  '
                   f'ΔVMAF={dv:+.3f}  ΔPSNR={dp:+.3f}  ΔPSNR-HVS={dh:+.3f}  '
-                  f'(平行门限 {TOL_PSNR}/{TOL_HVS})')
+                  f'(参考门限 {TOL_PSNR}/{TOL_HVS}，不判红)')
     finally:
         CRF.set_quality_mode('size')
         if not args.keep:
             for f in work.glob('*.mp4'):
                 f.unlink(missing_ok=True)
 
-    print(f'\n结果: {sum(r["ok"] for r in rows)}/{len(rows)} 达标'
+    print(f'\n结果: {sum(r["ok"] for r in rows)}/{len(rows)} 达标（主门禁 ΔVMAF）'
           + (f'，{len(skipped)} 项 SKIP' if skipped else ''))
+    if warns:
+        print(f'  ⚠ 参考指标超界 {len(warns)} 项（不影响退出码）:')
+        for x in warns:
+            print(f'    · {x}')
     if fails:
         for f in fails:
             print(f'  ✗ {f}')

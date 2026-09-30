@@ -21,6 +21,10 @@
 >   - **C-av1-结论** (QP 尺度)：**PASS** —— 扩扫 42/63/72/84/105/108，**×3(qp=63) 落带内**，将 `_QP_SCALE['av1_nvenc']` 从 4 → 3
 >   - **C-h264/hevc** (`-qp 21`)：**PASS**，constqp 回基准轴正确
 > **仍未覆盖的只有**：AMF 能力表、VideoToolbox `-q:v` —— 待 AMD/macOS 机器复核（见 §4.8）。
+> **等质量换算表已落地（2026-09-30，§4.12）**：新增 `QUALITY_MAP`（**VMAF 定标**），原等体积表
+> 改名 **`SIZE_MAP`**，`--quality-mode size|quality`（**默认 `quality`**）。**非 GPU 部分已落地**
+> （5 软编 / 单素材 `new5_raw`）；**硬编待上机（M5，需 T4/L40 等）**，未覆盖编码器自动回退 `SIZE_MAP`。
+> 待办按**CPU / GPU** 分档列于 §4.12 文末。
 
 ---
 
@@ -628,7 +632,7 @@ overview_lockstep / pixfmt_bitdepth）rc=0。
 > 使用」并标注该记录的档位口径待等质量标定复核。**不改数值**，⑨ 组 `[9-rav1e]` 仍 66/66。
 
 
-### 4.12 等质量换算表 `QUALITY_MAP`（2026-09-30，M1~M4 非 GPU 部分）
+### 4.12 等质量换算表 `QUALITY_MAP`（2026-09-30；**非 GPU 部分已落地**，剩余见文末 CPU/GPU 待办）
 
 **背景**：现有 `QUALITY_MAP` 是**等体积**（equal file size）口径。VE 侧逐锚点实测证明
 **等体积 ≠ 等质量**：`librav1e` 等体积点在 crf 18~30 的 ΔPSNR 为 +0.59 / −1.21 / −2.57 /
@@ -668,15 +672,44 @@ overview_lockstep / pixfmt_bitdepth）rc=0。
 - 与等体积表对比（crf21）：vp9 28→**29**、aom 21→**26**、svtav1 24→**30**、rav1e 66→**73**、
   x265 21→**21**。⇒ 等体积表在非默认点确有画质偏差（VE 证据 A/B 的量化确认）。
 
-**判据**：`verify/verify_equal_quality.py`（主门禁 `|ΔVMAF| ≤ 1.0`，平行
-`|ΔPSNR| ≤ 0.3 dB`、`|ΔPSNR-HVS| ≤ 0.5 dB`；无 GPU 时硬编 SKIP，全 SKIP 退出码 2）；
+**判据**：`verify/verify_equal_quality.py`（**主门禁 `|ΔVMAF| ≤ 1.0`（唯一判红）**；
+`|ΔPSNR| ≤ 0.3 dB`、`|ΔPSNR-HVS| ≤ 0.5 dB` 为**交叉参考（soft WARN，不判红）**；
+无 GPU 时硬编 SKIP，全 SKIP 退出码 2）；
 `verify_quality_mapping.py` ⑨ 组扩展 `SIZE_MAP`/`QUALITY_MAP` 跨项目逐条相等 + 两口径语义
 （⑨ 组计数 13→**14**，判据内已**显式钉 `size`** 以保证既有等体积期望可复现）。
 
-**已知局限 / 待办**：
-- 首版**仅软件编码器**；NVENC / QSV / AMF / VideoToolbox 需上机标定（回退等体积表）。
-- **constqp/QP 轴等质量表**（VE D2b）未做 —— 该轴主要是硬编（NVENC）关切，随 M5 上机。
-- 屏幕内容/文字、暗场/高噪两类 1080p 素材**缺失**，未纳入本版标定。
+**实施状态（2026-09-30，v3 同步）**：本节的**非 GPU 部分**已全部落地（HEAD `6ddc46b`）；
+首版为**单素材** `new5_raw.mp4`（6s / 720p）、5 个软编，`max|ΔVMAF| ≤ 1.0`（判据 5/5）。
+两仓 `SIZE_MAP` / `QUALITY_MAP` **实测逐条相等**（本仓核对 `True`）。
+⚠ **⑨ 组 14/14 与 `verify_equal_quality.py` 须在「有 `ffmpeg` + `temp/fixture_1080p.mp4`」的机器复跑**
+（本 checkout 无 `ffmpeg`、缺 fixture，⑦ 组即崩，门禁未能就地复现）。
+
+**待办 / 已知局限（按硬件分档，2026-09-30）**：
+
+*仅需 CPU*（须有 `ffmpeg`；判据另须 `temp/fixture_1080p.mp4`）：
+- ~~**平行门禁未真正判红**~~ **已定案（2026-09-30）**：**只有 `|ΔVMAF|` 判红**；
+  `ΔPSNR`/`ΔPSNR-HVS` 降级为 **soft 参考**（超界只 WARN、**不改退出码**）—— 等质量表以 VMAF 定标，
+  紧 PSNR 判红属**跨轴**假阳性。已落地于 `verify/verify_equal_quality.py`（**本仓 + VE 两副本同步**）。
+- **`rav1e -speed` 跨仓口径未统一**（**前置**）：VE 默认 native（`RAV1E_SPEED_DEFAULT=0`）vs
+  本仓固定 `-speed 10`（`_RAV1E_SPEED=10`），却共用同一 `librav1e` 表值 ⇒ 须两仓选同档并同步换表
+  （rav1e 为软编，**纯 CPU**）。见 §4.11 注与立项「待办 A3」。
+- **M2**：多素材（补 屏幕内容/文字、暗场/高噪、高细节纹理）+ 留一交叉验证（5 软编，纯 CPU）。
+- **锚点/拟合形式**：首版 5 锚点（`ANCHOR_CRFS=18/21/24/27/30`）+ **单直线**（`fit_line`）；
+  立项原稿曾写「7 锚点 + 分段」= **文档滞后**，已订正（是否补分段由残差上界定）。
+- **标定侧 5 指标取齐**：标定 `measure()` 默认 `with_filters=False`，只记 VMAF + PSNR-HVS；
+  PSNR/SSIM/XPSNR 须在标定侧一并采集。
+- ffmpeg 二进制指纹入档；`calibrate_equal_quality.py` 默认素材含 576p `word_world_2` 的池化陷阱。
 - 低分辨率动画素材（576p/360p）上采样到 720p 会被缩放主导，**不参与池化斜率**。
-- `librav1e` 表值的档位记录（原生档 vs `-speed 10`）**待复核**（见 §4.11 注）。
+
+*需 GPU（T4/L40 等，即立项 M5）*：
+- NVENC 等质量标定（`h264_nvenc` / `hevc_nvenc`）→ **T4 或 L40**；**`av1_nvenc` 须 L40（Ada）**（T4 无 AV1 编码器）。
+- **constqp/QP 轴等质量表**（VE `D2b`，`to_constqp_qp`）→ **T4/L40**（本仓无此路径，仅 VE 需要）。
+- QSV 能力表 + 两仓口径统一（`-cq:v` vs `-global_quality/-q`）→ **Intel 核显机**。
+- AMF 能力表 → **AMD 机**；VideoToolbox `-q:v` → **macOS**。
+- 硬编侧上机验收（`verify_equal_quality.py` 硬编条目现 SKIP）→ 对应 GPU。
+
+*无需硬件（人工）*：
+- **M3** 主观 AB 测试（≥3 人、双盲、随机序、ITU-R BT.500-13）。
+
+→ 汇总见立项 `Plan/PROMPT_等质量换算立项.md` 的「待办清单（含 CPU/GPU 划分）」与 **M5**。
 

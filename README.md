@@ -409,7 +409,7 @@ qp_range('av1_nvenc')                         # → (0, 255)
 
 > **两张表**（2026-09-30 改名，避免望文生义）：
 > * `SIZE_MAP` —— **等体积**口径（同文件大小；**原名 `QUALITY_MAP`**）
-> * `QUALITY_MAP` —— **等质量**口径（同 VMAF；**原名 `QUALITY_MAP_QUALITY`**）
+> * `QUALITY_MAP` —— **等质量**口径（同 VMAF；**新增表，占用旧名**，立项稿曾称 `QUALITY_MAP_QUALITY`）
 >
 > 用 `--quality-mode size|quality`（**默认 `quality`**）切换；`QUALITY_MAP` 未覆盖的编码器
 > （如硬编，待上机标定）自动回退到 `SIZE_MAP`。
@@ -1490,8 +1490,9 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
 - 等质量表首版**只覆盖软件编码器**（libx265 / libvpx-vp9 / libaom-av1 / libsvtav1 / librav1e）；
   硬编（NVENC / QSV / AMF / VideoToolbox）**回退等体积表**，待上机标定（M5）。
 - ⚠ `librav1e` 表值只对已声明的 `-speed` 档成立（本仓固定 `-speed 10`）。
-- 回归判据：`verify/verify_equal_quality.py`（主门禁 `|ΔVMAF| ≤ 1.0`；
-  平行 `|ΔPSNR| ≤ 0.3 dB`、`|ΔPSNR-HVS| ≤ 0.5 dB`）。
+- 回归判据：`verify/verify_equal_quality.py`（**主门禁 `|ΔVMAF| ≤ 1.0`，唯一判红**；
+  `|ΔPSNR| ≤ 0.3 dB`、`|ΔPSNR-HVS| ≤ 0.5 dB` 为**交叉参考，soft WARN 不判红** —— 等质量表以
+  VMAF 定标，同 VMAF 不蕴含同 PSNR，紧 PSNR 判红属跨轴假阳性，2026-09-30 定案）。
 
 > ⚠ **标定口径与已知局限（首版）**：单素材 `new5_raw.mp4`（6s / 720p prep）；
 > `libvmaf` **必须 `n_subsample=1`**——`n_subsample>1` 会**偏置 VMAF**（实测同文件

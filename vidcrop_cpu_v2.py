@@ -1184,13 +1184,27 @@ def crf_to_cq(crf: int, target_codec: str, src_codec: str = "libx264") -> int:
 
 def crf_to_rav1e_qp(crf: int) -> int:
     """
-    librav1e 没有 -crf（实测传 -crf 只会被 ffmpeg 静默忽略并告警，质量退回默认值），
-    只有 0~255 的 -qp。按实测标定换算：
-      qp = (crf - 5) × 4
-    标定数据（ffmpeg 6.1，640x480 testsrc2 2s，输出体积互差 < 5%）：
-      libaom crf 20/25/30/35  <- rav1e qp 60/80/100/120
+    基准轴（libx264 CRF）→ librav1e 的 ``-qp``（0~255）。
+
+    **2026-09-30 改为直接查表**（原先是"经 libaom 中转"的链式推导）：
+    旧实现 ``qp = (libaom_crf − 5) × 4`` 依赖 ``QUALITY_MAP['libaom-av1']``，
+    一旦 libaom 行被重标（现为 ``2.007·x264 − 21.35``），同链给出的值就与
+    早先的实测标定（qp 80）自相矛盾。现改为直接读 ``QUALITY_MAP['librav1e']``
+    的**等体积**标定值，与 Video_Enhancement 侧口径一致、单一真源。
+
+    ⚠ ``-speed`` 会整体平移 rav1e 的码率曲线，故本值**只对已声明的 speed 档成立**。
+      本仓固定下发 ``_RAV1E_SPEED``（默认 10），表值与之配套；
+      若改 speed 必须同步换 ``QUALITY_MAP['librav1e']``（见 VE quality_map 的
+      ``_EQVOL_SPEED_OVERRIDE``，那里两档都给了标定值）。
     """
-    return max(0, min(255, (int(crf) - 5) * 4))
+    v = from_x264_crf('librav1e', crf)
+    if v is None:
+        v = from_x264_crf('librav1e', DEFAULT_REF) or 0.0
+    return max(0, min(255, int(round(v))))
+
+
+#: librav1e 固定下发的 ``-speed``（实测见 VE 方案 §6.11.1：快 4.6×，体积 ×1.40）
+_RAV1E_SPEED = 10
 
 
 def _resolve_quality_params(
@@ -1284,10 +1298,11 @@ def _resolve_quality_params(
         return (None, default_quality_for(codec), None) if encoder_supports_cq(codec) \
             else (default_quality_for(codec), None, None)
 
-    # ── librav1e：只有 -qp（0~255，≈4×QP），标定以 AV1(libaom) CRF 为输入 ──────
-    # 移出 CRF_SUPPORTED_CODECS 后（V8），无论从哪条路径进来都先归一到 **libaom-av1
-    # CRF**，再由命令构建处套 crf_to_rav1e_qp()。这样消除了"字面量按 libaom 刻度、
-    # -ref 按基准轴"的双链分歧：`--crf 21` 与 `--crf-ref 21` 都得到 -qp 80。
+    # ── librav1e：只有 -qp（0~255）──────────────────────────────────────────
+    # 移出 CRF_SUPPORTED_CODECS 后（V8），无论从哪条路径进来都先归一到**基准轴**，
+    # 再由 crf_to_rav1e_qp() 查 QUALITY_MAP['librav1e'] 的等体积标定值得 -qp。
+    # 这样消除了"字面量按 libaom 刻度、-ref 按基准轴"的双链分歧：
+    # `--crf 21` 与 `--crf-ref 21` 都得到同一个 -qp。
     if codec == "librav1e":
         if qp is not None:
             _ref = from_constqp_qp(_src, qp)
@@ -1303,13 +1318,14 @@ def _resolve_quality_params(
             _ref = float(DEFAULT_REF)
         if _ref is None:
             _ref = float(DEFAULT_REF)
-        _v = from_x264_crf("libaom-av1", _ref)          # 基准轴 → AV1 CRF 轴
-        if _v is None:
-            print("  警告：librav1e 无法确定等效 CRF，改用默认质量。")
-            return None, None, None
-        _out = max(0, int(round(_v)))
-        print(f"  提示：librav1e 无 -crf，已按基准轴换算为 -qp {crf_to_rav1e_qp(_out)}"
-              f"（等效视觉质量）。")
+        # 2026-09-30：直接查 QUALITY_MAP['librav1e']（等体积口径），
+        # 不再经 libaom 中转 —— 后者会随 libaom 行重标而漂移（详见 crf_to_rav1e_qp）。
+        # 返回**基准轴**值：换算由下发处的 crf_to_rav1e_qp() 统一做一次，
+        # 避免"这里换算 + 那里再换算"造成双重换算。
+        _out = int(round(_ref))
+        _qp = crf_to_rav1e_qp(_out)
+        print(f"  提示：librav1e 无 -crf，已按基准轴换算为 -qp {_qp}"
+              f"（等体积口径；下发 -speed {_RAV1E_SPEED}）。")
         return _out, None, None
 
     # ── 方式 3：--qp（constqp 的恒定 QP）─────────────────────────────────
@@ -1711,7 +1727,7 @@ def build_encoder_options_v2(
     elif crf is not None and c == "librav1e":
         # rav1e 不认 -crf（会被静默忽略），换算成等效 -qp。它已移出
         # CRF_SUPPORTED_CODECS，故必须独立判断（V8）。
-        opts += ["-qp", str(crf_to_rav1e_qp(crf))]
+        opts += ["-qp", str(crf_to_rav1e_qp(crf)), "-speed", str(_RAV1E_SPEED)]
     elif crf is not None and encoder_supports_crf(codec):
         if c in ("libvpx", "libvpx-vp9") and not bitrate:
             # VP8/VP9 的 CRF 必须配合 -b:v 0 才是纯恒定质量，否则退化成
@@ -4655,8 +4671,8 @@ def main() -> int:
         elif encoder_supports_cq(args.codec):
             quality_parts.append(f"CQ: {default_quality_for(args.codec)}")
         elif args.codec == "librav1e":
-            # librav1e 只有 -qp，值由 crf_to_rav1e_qp 从 AV1 CRF 轴换算而来。
-            _dcrf = args.crf if args.crf is not None else from_x264_crf("libaom-av1", DEFAULT_REF)
+            # librav1e 只有 -qp，由 crf_to_rav1e_qp 按基准轴查表得出（等体积口径）。
+            _dcrf = args.crf if args.crf is not None else DEFAULT_REF
             if _dcrf is not None:
                 quality_parts.append(f"QP: {crf_to_rav1e_qp(int(round(_dcrf)))}")
         elif encoder_supports_crf(args.codec):

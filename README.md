@@ -1661,6 +1661,8 @@ vidutils/
 │   ├── probe_lossless_qp0.sh            # 「-qp 0 / -crf 0 到底是不是数学无损」（恒等裁剪 + 逐帧哈希；本机可 LOCALCPU=1 自证）
 │   ├── t4_acceptance.py                 # T4 上机验收（落点 / 运行期 / 无损三组；--local 本机降级自证、--selftest 验装置）
 │   ├── verify_nvenc_quality_gpu.py      # NVENC 质量轴上机验收（B 组 -cq 偏移 / C 组 constqp -qp 尺度；--quick 只跑 A 组逻辑、--expect-av1 要求本卡能编 AV1 否则 exit 2）
+│   ├── calibrate_soft_offsets.py        # 软编等效表「等体积」标定（⚠ prep.mp4 按文件名复用，换素材前须先删，否则会静默沿用上一条素材）
+│   ├── calibrate_soft_offsets_nocache.py # 同上，但每次运行独立工作目录 + 打印 prep 的 md5（可审计）；--dense 把 libaom 扫描加密到 3 档间隔
 │   └── enum_cmds.py                     # 无 GPU 时 mock 远程能力、枚举脚本真正下发的命令
 ├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
 ├── Plan/                     # 立项任务书与过程归档（含 vidls 对话记录 .txt）

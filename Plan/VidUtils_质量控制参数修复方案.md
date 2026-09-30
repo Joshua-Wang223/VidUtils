@@ -36,7 +36,7 @@
 | V2 | `--qp` 落到软编按基准轴回算（不再走 CQ 轴） | P0 | **已落地** | 同上（同一处公式） |
 | V5 | 硬件能力表：QSV/VT 的 `-cq`/`-preset` 校正 + 两脚本集合统一 | P0 | **已落地** | 实测（本机 `h264_qsv` 无 `-cq`，`-preset` 只收 veryfast..veryslow）；AMF 待上机 |
 | V7 | 默认质量统一为基准 21（`DEFAULT_CQ` 23 删除） | P1 | **已落地** | 纯计算（CQ 23 ≡ crf 18） |
-| V8 | `librav1e` 移出 `CRF_SUPPORTED_CODECS`（与 VE 的 `supports_crf` 对齐） | P1 | **已落地** | 实测（`--crf 21` → `-qp 64`，`--crf-ref 21` → `-qp 64`） |
+| V8 | `librav1e` 移出 `CRF_SUPPORTED_CODECS`（与 VE 的 `supports_crf` 对齐） | P1 | **已落地**；**2026-09-30 改为直接查表** | 实测（`--crf 21` → `-qp 66`，`--crf-ref 21` → `-qp 66`，并下发 `-speed 10`）。旧链式经 libaom 中转得 64，会随 libaom 行重标而漂移 ⇒ 改查 `QUALITY_MAP['librav1e']` 的等体积标定值，见 §4.11 |
 | V9 | `libx265` / `libvpx-vp9` / `libsvtav1` / `libaom-av1` 的偏移按**真实素材等体积**重标 + 钉死 svtav1 preset | P1 | **已落地（真实素材 + 多源复核 + AV1 补测已落表）** | 真实素材 `input_videos/new5_raw.mp4`（1080p→720p 4s）等体积标定：`libx265 0.9155x+1.6385`、`libvpx-vp9 1.6198x−5.7553`、`libsvtav1 1.9450x−15.6200`（残差 ≤0.73 档）；`libsvtav1` 默认 preset 固定 8。**多源复核（2026-09-29）确认当前表值在基准上无需修改。AV1 补测（2026-09-29）已按实测落表：libsvtav1 2.145x−21.35、libaom-av1 2.007x−21.35**。 |
 | V10 | preset 表与 VE 对齐 + svtav1 的 p7/veryslow 自洽 | P1 | **已落地（对齐官方枚举）** | VE 的 `[FIX-PRESET-ALIGN]` 已改用 ffmpeg 官方枚举；`X264_TO_NVENC_PRESET` 对齐之，`NVENC_TO_X264_PRESET` 保持 `p5→medium`（保 lockstep/基线）；`X264_TO_SVTAV1_PRESET` 的 fast/medium 已拆开、p7 与 veryslow 同为 2 |
 | V11 | `hevc_videotoolbox` 的 b 105 → 100 | P2 | **已落地** | 纯计算（lo=1 永不可达，crf 0~2.58 全饱和） |
@@ -201,7 +201,7 @@ Video_Enhancement 的真实素材实测（`-qp 21` 相对 libx264 crf21 = 1.40×
 **修复前**：`--crf 21` → `-qp 64`（按 libaom 刻度）而 `--crf-ref 21` → `-qp 80`（按基准轴）。
 
 **已实现**：`librav1e` 移出 `CRF_SUPPORTED_CODECS`（与 VE 的 `supports_crf()` 对齐）；
-`_resolve_quality_params()` 新增 librav1e 专用分支，**任何输入都先归一到 libaom-av1 CRF 轴**，
+`_resolve_quality_params()` 新增 librav1e 专用分支，**任何输入都先归一到基准轴**，
 再由命令构建处套 `crf_to_rav1e_qp()`；下发侧独立判断 `codec == 'librav1e'`（不再依赖
 `encoder_supports_crf`）。
 
@@ -588,3 +588,37 @@ python3 probe/verify_nvenc_quality_gpu.py --expect-av1 \
    **当前 L40 实测已定为 3（非 4），勿再改回 4**。
 3. **L40 上 §4.1 的假红与 T4 相同**（有 GPU ⇒ 4 处 verify + 2 个 `dump_cmd_full` 用例），
    不是新回归 —— 见§4.1  的表。
+
+
+### 4.11 rav1e：改为直接查表 + 固定下发 `-speed 10`（2026-09-30）
+
+**起因**：VE 侧 2026-09-29 把 `QUALITY_MAP['libaom-av1']` 重标为 `2.007·x264 − 21.35`，
+本仓 `crf_to_rav1e_qp()` 的**链式**推导 `qp = (libaom_crf − 5) × 4` 因此从 80 漂到 63，
+与早先实测标定自相矛盾 —— 这类"经中间编码器中转"的换算会随任一环节重标而失效。
+
+**改动**（两脚本同步）：
+
+| 项 | 旧 | 新 |
+|---|---|---|
+| `crf_to_rav1e_qp()` | `(libaom_crf − 5) × 4` | 查 `QUALITY_MAP['librav1e']` 的**等体积**标定值 |
+| `_resolve_quality_params` rav1e 分支 | 先归一到 libaom CRF 轴 | 直接归一到**基准轴**（换算交由下发处统一做一次） |
+| 下发 | `-qp N` | `-qp N` **`-speed 10`** |
+| `--crf 21` / `--crf-ref 21` | `-qp 64` | **`-qp 66`** |
+
+⚠ **修掉一个双重换算 bug**：分支一度把已换算好的 qp 塞进"crf 槽"返回，
+下发处又调一次 `crf_to_rav1e_qp()` ⇒ `-qp 66` 被当成基准轴再换算成 **255**（夹到上限）。
+现改为分支返回**基准轴值**、换算只在下发处做一次；dry-run 逐字核对两脚本一致。
+
+**`-speed 10` 的依据与代价**（实测见 VE 方案 §6.11）：
+`-speed` 会**整体平移** rav1e 码率曲线（同 qp 下体积 ×1.40），故表值只对已声明的 speed 档成立。
+本仓固定 10 并按该档配套表值；**质量地板**方面 VE 已实测：`-speed 10` 等体积解
+`ΔPSNR ≈ −2.7 dB`（超 AC7 的 −1.5 地板），等质量解则体积 +30% —— 即
+**「等体积」与「等质量」在 speed 10 下无法兼得**。本仓表按**等体积**口径
+（与其余 6 个编码器语义一致）；**等质量换算另立项目**。
+
+**回归**：`verify_quality_mapping.py` ⑨ 组 **13/13**（`[9-rav1e]` 66/66 一致）、
+⑪ 组新增「必须下发 `-speed 10`」正向断言（已做**反向验证**：改错期望即红）；
+`dump_cmd_full.sh` **20/20** 逐字相同；`dump_enc_options.sh` /
+`dump_filter_chains.sh` / `dump_cmd_default.sh` / `check_readme_refs.sh` 全绿；
+另 5 套 verify（rc_lookahead / borrow_enhancement / cli_parsing /
+overview_lockstep / pixfmt_bitdepth）rc=0。

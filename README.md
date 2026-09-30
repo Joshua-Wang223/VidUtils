@@ -392,7 +392,7 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 
 ### `convert_crf.py` — 质量换算表（被上面两个脚本依赖）
 
-单一事实来源：以 **libx264 CRF** 为轴，登记各编码器的线性换算系数 `value = a × x264_crf + b` 与合法区间（`QUALITY_MAP`）。
+单一事实来源：以 **libx264 CRF** 为轴，登记各编码器的线性换算系数 `value = a × x264_crf + b` 与合法区间（`SIZE_MAP` = 等体积、`QUALITY_MAP` = 等质量）。
 
 ```python
 from convert_crf import from_x264_crf, to_x264_crf, convert_quality
@@ -405,7 +405,14 @@ to_constqp_qp('av1_nvenc', 21)                # → 84（基准 21 × QP 尺度 
 qp_range('av1_nvenc')                         # → (0, 255)
 ```
 
-改动换算系数只需改这一个文件，两个裁剪脚本自动跟随。**两份 `convert_crf.py`（本仓 + `Video_Enhancement/src/utils/`）必须逐字同步**，判据 ⑨ 组会断言。详见 [质量参数指南](#质量参数指南)。
+改动换算系数只需改这一个文件，两个裁剪脚本自动跟随。**两份 `convert_crf.py`（本仓 + `Video_Enhancement/src/utils/`）的 `SIZE_MAP` / `QUALITY_MAP` 字典值必须逐条相等**（注释可各随其仓），判据 ⑨ 组会断言。详见 [质量参数指南](#质量参数指南)。
+
+> **两张表**（2026-09-30 改名，避免望文生义）：
+> * `SIZE_MAP` —— **等体积**口径（同文件大小；**原名 `QUALITY_MAP`**）
+> * `QUALITY_MAP` —— **等质量**口径（同 VMAF；**原名 `QUALITY_MAP_QUALITY`**）
+>
+> 用 `--quality-mode size|quality`（**默认 `quality`**）切换；`QUALITY_MAP` 未覆盖的编码器
+> （如硬编，待上机标定）自动回退到 `SIZE_MAP`。
 
 ---
 
@@ -1411,21 +1418,21 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
 | 编码器 | a | b | 区间 | `--crf-ref 21` 的结果 |
 |---|---|---|---|---|
 | `libx264` | 1.0 | 0 | 0–51 | 21 |
-| `libx265` | 0.9155 | 1.6385 | 0–51 | 21 |
-| `libvpx-vp9` | 1.6198 | −5.7553 | 0–63 | 28 |
-| `libaom-av1` | 1.0 | 4 | 0–63 | 25 |
-| `libsvtav1` | 1.9450 | −15.62 | 0–63 | 25 |
-| `librav1e` | 4.0 | −4 | 0–255 | 80（`-qp`） |
+| `libx265` | 0.9272 | 1.3360 | 0–51 | 21 |
+| `libvpx-vp9` | 1.6381 | −6.2289 | 0–63 | 28 |
+| `libaom-av1` | 2.007 | −21.35 | 0–63 | 21 |
+| `libsvtav1` | 2.145 | −21.35 | 0–63 | 24 |
+| `librav1e` | 7.0032 | −80.993 | 0–255 | 66（`-qp`） |
 | `h264_nvenc` | 1.0 | 5 | 0–51 | 26 |
 | `hevc_nvenc` | 1.0 | 7.5 | 0–51 | 28 |
 | `av1_nvenc` | 1.0 | 6 | 0–63 | 27 |
 | `h264_qsv` / `hevc_qsv` / `av1_qsv` | — | — | — | **无 `-cq`/`-crf`/`-qp`** |
 | `*_videotoolbox` | — | — | — | **质量轴为 `-q:v`（非 `-cq`）** |
 
-> `libx265` / `libvpx-vp9` / `libsvtav1` 的 a、b 是 2026-09-28 用真实素材
-> （`input_videos/new5_raw.mp4`，1080p→720p，**等体积**标定）重算的；`libx265`
-> 在常用区的线性残差 ≤0.11 档、vp9 ≤0.49、svtav1 ≤0.73。⚠ 等体积 ≠ 等质量，
-> 且标定素材单一，换素材应复核（`probe/calibrate_soft_offsets.py` 可复现）。
+> `libx265` / `libvpx-vp9` / `libaom-av1` / `libsvtav1` / `librav1e` 的 a、b 是
+> 2026-09-29（V9）用真实素材（`input_videos/new5_raw.mp4`，1080p→720p，**等体积**标定）
+> 重算的；线性残差 ≤0.11 / ≤0.49 / ≤0.58 / ≤0.76 档。⚠ **等体积 ≠ 等质量**，且标定
+> 素材单一，换素材应复核（`probe/calibrate_soft_offsets_nocache.py` 可复现）。
 >
 > **QSV / VideoToolbox**：2026-09-28 实测本机 `h264_qsv` / `hevc_qsv` / `av1_qsv` 无 `-cq`/`-crf`/`-qp`，
 > `-preset` 仅收 `veryfast..veryslow`（整数 0~7）⇒ 移出 CQ 集，preset 走 x264 档名映射。
@@ -1454,6 +1461,47 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
 - 同时指定 `--crf` 和 `--cq` 时，按实际落用的编码器自动选用对应参数
 - 任一质量参数取 `0` 一律按**0 档**处理（见上；CPU 编码器上是真无损）
 - **`--qp` 的刻度按编码器分家**（2026-09-28 落地）：H.264/HEVC NVENC = 基准轴（0~51，同 x264 QP）；**AV1 NVENC = 0~255 qindex（×4）**；VAAPI = 0~52；`librav1e` = 0~255（×4）；`libsvtav1` = 0~63（= crf 刻度）。**constqp 下必须走 `to_constqp_qp()` 回基准轴**，CLI 量程用 `qp_range(codec)`。
+
+### 等质量换算表（`QUALITY_MAP`，`--quality-mode quality`）
+
+`SIZE_MAP` 按**等体积**标定（同文件大小）；`QUALITY_MAP` 按**等质量**标定
+（同 VMAF，2026-09-30 起，标定脚本 `probe/calibrate_equal_quality.py`）。
+⚠ 两表名已互换语序（原名 `QUALITY_MAP` = 等体积、`QUALITY_MAP_QUALITY` = 等质量）。
+
+| 口径 | 标定判据 | 适用场景 | 开关 |
+|---|---|---|---|
+| **等质量（默认）** | **VMAF** 等值 → 最小二乘 | 画质优先、存储/带宽次要 | `--quality-mode quality` |
+| 等体积 | `log(体积)` 等值 → 最小二乘 | 码率 / 文件大小受限 | `--quality-mode size` |
+
+`QUALITY_MAP`（等质量，首版，2026-09-30）：
+
+| 编码器 | a | b | 区间 | `--crf-ref 21` |
+|---|---|---|---|---|
+| `libx265` | 1.0709 | −1.6473 | 0–51 | 21 |
+| `libvpx-vp9` | 1.8988 | −10.7972 | 0–63 | 29 |
+| `libaom-av1` | 2.2677 | −21.5776 | 0–63 | 26 |
+| `libsvtav1` | 2.5168 | −23.2732 | 0–63 | 30 |
+| `librav1e` | 7.6674 | −87.5783 | 0–255 | 73（`-qp`） |
+
+> 逐锚点 `max|ΔVMAF|` ≤ 1.0（x265 .47 / vp9 .27 / aom .18 / svtav1 .27 / rav1e 1.00）。
+
+- **指标唯一来源**（对齐 VE v2 §4.1，不可混用）：VMAF（主，libvmaf）、PSNR-HVS（仅 libvmaf
+  `feature=name=psnr_hvs`）、PSNR / SSIM / XPSNR（**独立滤镜**）；参考取 720p prep，与等体积表同口径。
+- 等质量表首版**只覆盖软件编码器**（libx265 / libvpx-vp9 / libaom-av1 / libsvtav1 / librav1e）；
+  硬编（NVENC / QSV / AMF / VideoToolbox）**回退等体积表**，待上机标定（M5）。
+- ⚠ `librav1e` 表值只对已声明的 `-speed` 档成立（本仓固定 `-speed 10`）。
+- 回归判据：`verify/verify_equal_quality.py`（主门禁 `|ΔVMAF| ≤ 1.0`；
+  平行 `|ΔPSNR| ≤ 0.3 dB`、`|ΔPSNR-HVS| ≤ 0.5 dB`）。
+
+> ⚠ **标定口径与已知局限（首版）**：单素材 `new5_raw.mp4`（6s / 720p prep）；
+> `libvmaf` **必须 `n_subsample=1`**——`n_subsample>1` 会**偏置 VMAF**（实测同文件
+> vp9 crf35：subsample1=96.62 vs subsample8=98.56，差 1.9~3.0，且偏置随编码器而异），
+> 会让「等 VMAF 匹配」被污染。**标定与判据必须同口径、同时长**。
+> M2 需多素材 + 留一交叉验证。
+
+```bash
+--codec libx265 --crf-ref 21 --quality-mode quality   # 按等质量表换算
+```
 
 ### 码率控制与 lookahead（`--rc-mode` / `--qp` / `--lookahead` / `--bitrate`）
 
@@ -1694,6 +1742,7 @@ python verify/verify_cuda_scale.py        # CUDA 缩放链 + 策略生成
 python verify/verify_scale_algo.py        # --scale-algo 解析
 python verify/verify_pixfmt_bitdepth.py   # --pix-fmt × --bit-depth 的「能落地者赢」
 python verify/verify_quality_mapping.py   # 质量参数单点换算：--qp 降级 / -ref→constqp 的 qp / --crf→-cq / 0 值无损 / 下界钳 1
+python verify/verify_equal_quality.py     # 等质量表回归（主门禁 ΔVMAF ≤ 1.0；真实素材重编码，较慢）
 python verify/verify_cli_parsing.py       # --extra-args 的两种写法（含文档里的 `--` 形式）+ 输出尺寸偶数校验的两脚本一致性
 python verify/verify_overview_lockstep.py # 两个概览块的字段序列对齐 + 显示量纲必须与命令一致（`--selftest` 自检判词装置）
 python verify/verify_cuda_decode_codec.py # 按源编解码器的硬解确认（AV1）
@@ -2091,7 +2140,7 @@ x265 是 **20**、x264 由自身决定；`-rc` 的默认是"不覆盖 preset"。
 2. **提新功能**：优先对齐[路线图](#路线图roadmap)中已规划的模块；新模块请先发 Issue 讨论接口设计，以保持参数风格统一。
 3. **代码风格**：遵循 PEP 8，函数级中文 docstring，关键分支要有 inline 注释说明"为什么这样写"而不仅是"在做什么"。
 4. **测试**：对新增参数分支至少覆盖 happy path + 一个边界 / 失败 case。
-5. **质量换算**：新增编码器请只改 `convert_crf.py` 的 `QUALITY_MAP`，不要在脚本里硬编码偏移。
+5. **质量换算**：新增编码器请只改 `convert_crf.py` 的 `SIZE_MAP` / `QUALITY_MAP`，不要在脚本里硬编码偏移。
 
 ---
 

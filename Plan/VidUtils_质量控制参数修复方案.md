@@ -622,3 +622,61 @@ python3 probe/verify_nvenc_quality_gpu.py --expect-av1 \
 `dump_filter_chains.sh` / `dump_cmd_default.sh` / `check_readme_refs.sh` 全绿；
 另 5 套 verify（rc_lookahead / borrow_enhancement / cli_parsing /
 overview_lockstep / pixfmt_bitdepth）rc=0。
+
+> ⚠ **档位注释订正（2026-09-30）**：本节的表值配套 `-speed 10`，但 `convert_crf.py`
+> 的 rav1e 顶部注释曾写「原生档（不下发 -speed）」，与代码矛盾。已订正为「按 `-speed 10`
+> 使用」并标注该记录的档位口径待等质量标定复核。**不改数值**，⑨ 组 `[9-rav1e]` 仍 66/66。
+
+
+### 4.12 等质量换算表 `QUALITY_MAP`（2026-09-30，M1~M4 非 GPU 部分）
+
+**背景**：现有 `QUALITY_MAP` 是**等体积**（equal file size）口径。VE 侧逐锚点实测证明
+**等体积 ≠ 等质量**：`librav1e` 等体积点在 crf 18~30 的 ΔPSNR 为 +0.59 / −1.21 / −2.57 /
+−4.17 / **−5.79 dB**；`libsvtav1` 同形态（crf30 −5.34 dB）。缺陷属**线性等体积模型**本身，
+非 rav1e 特例（见 `Video_Enhancement/Plan/PROMPT_等质量换算立项.md` v2 §0.1）。
+
+**新增**：`QUALITY_MAP`（**等质量**，以 **VMAF** 定标），原等体积表**改名 `SIZE_MAP`**
+（原名 QUALITY_MAP，改名以免望文生义）；两表**并存不覆盖**；
+`--quality-mode size|quality`（**默认 `quality`**）切换。
+
+**零侵入接入**：`convert_crf.py` 新增 `_ACTIVE_MAP` / `set_quality_mode()` / `get_quality_map()`，
+`from_x264_crf` / `to_x264_crf` / `convert_quality` / `convert_crf` 改读 `get_quality_map()`；
+两脚本只加 CLI 开关 + `literal_range()` 改读 `get_quality_map()`。
+**`_resolve_quality_params()` 与全部高层 helper 零改动**。等质量表未覆盖的编码器自动回退等体积表。
+
+**标定口径**（脚本 `probe/calibrate_equal_quality.py`，纯 CPU）：
+- 素材：`new5_raw.mp4`（实拍人物，6s，1280×720 prep，与等体积表同口径）。⚠ **首版单素材**。
+- 锚点 libx264 CRF 18/21/24/27/30；目标编码器扫参数 → 在 `(参数, VMAF)` 曲线取**等 VMAF** 点。
+- 跨素材聚合：斜率 `a` = 池化最小二乘；截距 `b` = 各素材中位数。⚠ `librav1e` 按 **`-speed 10`**。
+- ⚠ **`libvmaf` 必须 `n_subsample=1`**：`>1` 会**偏置 VMAF**（同文件 vp9 crf35：
+  subsample1=96.62 vs subsample8=98.56，差 1.9~3.0，且偏置随编码器而异），
+  会污染「等 VMAF 匹配」。首版曾误用 subsample=8，独立判据 2/5 红（vp9 −1.85 / aom +1.06），
+  **已按 subsample=1 重标**；标定与判据必须同参、同时长。
+
+**首版落表值 + 实测**（`QUALITY_MAP`，2026-09-30）：
+
+| 编码器 | a | b | 区间 | `--crf-ref 21` | `max|ΔVMAF|` |
+|---|---|---|---|---|---|
+| `libx265` | 1.0709 | −1.6473 | 0–51 | 21 | 0.47 |
+| `libvpx-vp9` | 1.8988 | −10.7972 | 0–63 | 29 | 0.27 |
+| `libaom-av1` | 2.2677 | −21.5776 | 0–63 | 26 | 0.18 |
+| `libsvtav1` | 2.5168 | −23.2732 | 0–63 | 30 | 0.27 |
+| `librav1e` | 7.6674 | −87.5783 | 0–255 | 73（`-qp`） | 1.00 |
+
+- 独立判据 `verify/verify_equal_quality.py`（6s，subsample=1）：**5/5 达标**，
+  `ΔVMAF` 全部 ≤ **0.29**。
+- 与等体积表对比（crf21）：vp9 28→**29**、aom 21→**26**、svtav1 24→**30**、rav1e 66→**73**、
+  x265 21→**21**。⇒ 等体积表在非默认点确有画质偏差（VE 证据 A/B 的量化确认）。
+
+**判据**：`verify/verify_equal_quality.py`（主门禁 `|ΔVMAF| ≤ 1.0`，平行
+`|ΔPSNR| ≤ 0.3 dB`、`|ΔPSNR-HVS| ≤ 0.5 dB`；无 GPU 时硬编 SKIP，全 SKIP 退出码 2）；
+`verify_quality_mapping.py` ⑨ 组扩展 `SIZE_MAP`/`QUALITY_MAP` 跨项目逐条相等 + 两口径语义
+（⑨ 组计数 13→**14**，判据内已**显式钉 `size`** 以保证既有等体积期望可复现）。
+
+**已知局限 / 待办**：
+- 首版**仅软件编码器**；NVENC / QSV / AMF / VideoToolbox 需上机标定（回退等体积表）。
+- **constqp/QP 轴等质量表**（VE D2b）未做 —— 该轴主要是硬编（NVENC）关切，随 M5 上机。
+- 屏幕内容/文字、暗场/高噪两类 1080p 素材**缺失**，未纳入本版标定。
+- 低分辨率动画素材（576p/360p）上采样到 720p 会被缩放主导，**不参与池化斜率**。
+- `librav1e` 表值的档位记录（原生档 vs `-speed 10`）**待复核**（见 §4.11 注）。
+

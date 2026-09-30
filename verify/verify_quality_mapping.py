@@ -30,6 +30,11 @@ sys.path.insert(0, str(ROOT))
 import vidcrop_hwaccel as H                                   # noqa: E402
 import vidcrop_cpu_v2 as C                                    # noqa: E402
 
+# 本判据的既有期望值全部按**等体积（size）**口径写成；而 convert_crf 的默认口径已改为
+# 'quality'（2026-09-30），故这里显式钉住 size，避免默认口径改动把判据染红。
+# （等质量口径的专项断言在 ⑨-eqq 组内临时切到 'quality' 再切回。）
+H.set_quality_mode('size')
+
 WORK = ROOT / 'temp' / 'verify_quality'
 SRC_444 = WORK / 'src_444.mp4'          # yuv444p 8bit：D3 的判据素材
 SRC = ROOT / 'temp' / 'fixture_1080p.mp4'
@@ -70,6 +75,8 @@ def run(script, args, cpu_only=False):
     base = [sys.executable, str(ROOT / script)]
     if cpu_only:
         base += ['--decode', 'cpu', '--scale-algo', 'libswscale-lanczos']
+    # 既有期望值按**等体积**口径写成；脚本默认已是 'quality'，故显式钉 size 保证可复现。
+    base += ['--quality-mode', 'size']
     p = subprocess.run(base + args, capture_output=True, text=True,
                        encoding='utf-8', errors='replace')
     return p.returncode, (p.stdout or '') + (p.stderr or '')
@@ -386,14 +393,51 @@ note('[9-CQ]', '两脚本 CQ_SUPPORTED_CODECS 相等（孪生约定）',
      expect_label='期望')
 
 if VE_QM is not None:
-    chk("[9] QUALITY_MAP 与 Video_Enhancement 的 convert_crf 逐条相等",
-        VU_CRF.QUALITY_MAP, VE_QM.QUALITY_MAP)
-    # 抽样比对换算函数（防"表相同、函数不同"）
+    chk("[9] SIZE_MAP（等体积）与 Video_Enhancement 的 convert_crf 逐条相等",
+        VU_CRF.SIZE_MAP, getattr(VE_QM, 'SIZE_MAP', None))
+    chk("[9] QUALITY_MAP（等质量）与 Video_Enhancement 的 convert_crf 逐条相等",
+        VU_CRF.QUALITY_MAP, getattr(VE_QM, 'QUALITY_MAP', None))
+    # 抽样比对换算函数（防"表相同、函数不同"）——两口径各比一遍
     _rt = [(c, r) for c in ('libx264', 'libx265', 'hevc_nvenc', 'libvpx-vp9', 'librav1e')
            for r in (0, 21, 35, 51)]
-    chk("[9] from_x264_crf 与 VE 逐点相等",
+    VU_CRF.set_quality_mode('size')
+    if hasattr(VE_QM, 'set_quality_mode'):
+        VE_QM.set_quality_mode('size')
+    chk("[9] size 模式下 from_x264_crf 与 VE 逐点相等",
         [H.from_x264_crf(c, r) for c, r in _rt],
         [VE_QM.from_x264_crf(c, r) for c, r in _rt])
+    VU_CRF.set_quality_mode('quality')
+    if hasattr(VE_QM, 'set_quality_mode'):
+        VE_QM.set_quality_mode('quality')
+    chk("[9] quality 模式下 from_x264_crf 与 VE 逐点相等",
+        [H.from_x264_crf(c, r) for c, r in _rt],
+        [VE_QM.from_x264_crf(c, r) for c, r in _rt])
+    # 默认口径 = quality（用全新加载的模块验证，避免受上面 set_quality_mode 影响）
+    _fs = importlib.util.spec_from_file_location('vu_crf_fresh', ROOT / 'convert_crf.py')
+    _fm = importlib.util.module_from_spec(_fs)
+    _fs.loader.exec_module(_fm)
+    chk("[9] convert_crf 默认口径 = quality",
+        getattr(_fm, 'get_quality_mode', lambda: None)(), 'quality')
+
+    # ── ⑨-eqq：两种口径的差异 + 切回 size 零回归（表的跨项目相等已在上面断言）──
+    VU_CRF.set_quality_mode('size')
+    if hasattr(VE_QM, 'set_quality_mode'):
+        VE_QM.set_quality_mode('size')
+    _soft = ('libx265', 'libvpx-vp9', 'libaom-av1', 'libsvtav1', 'librav1e')
+    _base = [H.from_x264_crf(c, r) for c, r in _rt]
+    _s21 = {c: VU_CRF.from_x264_crf(c, 21) for c in _soft}
+    VU_CRF.set_quality_mode('quality')
+    if hasattr(VE_QM, 'set_quality_mode'):
+        VE_QM.set_quality_mode('quality')
+    _q21 = {c: VU_CRF.from_x264_crf(c, 21) for c in _soft}
+    VU_CRF.set_quality_mode('size')
+    if hasattr(VE_QM, 'set_quality_mode'):
+        VE_QM.set_quality_mode('size')
+    chk("[9] 切回 size 模式后换算逐字不变（旧行为零回归）",
+        [H.from_x264_crf(c, r) for c, r in _rt], _base)
+    note('[9-eqq]', '两口径在 crf21 的差异（size→quality）', True,
+         '; '.join(f'{c}:{_s21[c]:.2f}→{_q21[c]:.2f}' for c in _soft),
+         '—', 'QUALITY_MAP 未覆盖的编码器回退 SIZE_MAP，故未标定项两值相同')
 
 # ── ⑨-3 constqp 轴：QP 到底是 CQ 刻度还是基准轴？───────────────────────
 # [V1 已修复] -qp 回基准轴（不再拿 CQ 轴值直发）；AV1 另加 ×4 的 QP 尺度层。
@@ -520,7 +564,7 @@ note('[9-hw:vaapi]', 'h264_vaapi 收到 --cq 时不静默丢弃',
      '现在走 _QP_ONLY_CODECS → -qp，详见 ⑩ 组')
 
 # ── ⑨-9 / ⑨-10 换算表自身的数值问题（纯计算）────────────────────────────
-_vp9 = VU_CRF.QUALITY_MAP['libvpx-vp9']
+_vp9 = VU_CRF.SIZE_MAP['libvpx-vp9']
 _lo_sat = sum(1 for r in range(0, 52) if H.from_x264_crf('libvpx-vp9', r) <= _vp9[2])
 _hi_sat = sum(1 for r in range(0, 52) if H.from_x264_crf('libvpx-vp9', r) >= _vp9[3])
 _common_sat = sum(1 for r in range(18, 29)
@@ -535,7 +579,7 @@ note('[9-vp9]', 'libvpx-vp9 的等效表在常用区不饱和、零点合理',
      '零点从 crf≈7.3 移到 ≈3.6（旧表 (1.98,−14.46) 是常用点巧合、两端大面积饱和）。'
      '⚠ a≠1 的线性表在两端仍会饱和，这是固有性质',
      expect_label='期望')
-_hvt = VU_CRF.QUALITY_MAP['hevc_videotoolbox']
+_hvt = VU_CRF.SIZE_MAP['hevc_videotoolbox']
 _reachable = {H.from_x264_crf('hevc_videotoolbox', r) for r in range(0, 52)}
 _vt_hi_sat = sum(1 for r in range(0, 52)
                  if H.from_x264_crf('hevc_videotoolbox', r) >= _hvt[3])
@@ -558,8 +602,8 @@ print('── ⑩ V3/V4/V6：量程与 QP-only 编码器 ──')
 
 print('  [V3] av1_nvenc 的 CQ 量程')
 # 规格检查：静态表 QUALITY_MAP 应符合 NVIDIA 规格（0~63）
-_av1_hi = H.QUALITY_MAP.get('av1_nvenc', (0,0,0,0))[3]
-chk("[10] QUALITY_MAP['av1_nvenc'] hi == 63（NVIDIA 规格 0~63）", _av1_hi, 63)
+_av1_hi = H.SIZE_MAP.get('av1_nvenc', (0,0,0,0))[3]
+chk("[10] SIZE_MAP['av1_nvenc'] hi == 63（NVIDIA 规格 0~63）", _av1_hi, 63)
 # 运行时校验：literal_range 返回 ffmpeg 实际量程（本机 ffmpeg 报 0~63，符合 V3 修正）
 _rt_cq = H.literal_range('av1_nvenc', 'cq')
 chk("[10] literal_range('av1_nvenc','cq') 返回 ffmpeg 实际量程", _rt_cq, (0, 63))
@@ -743,7 +787,7 @@ chk("[11] svtav1：fast≠medium，且 p7==veryslow",
 chk("[11] libsvtav1 默认 preset 固定为 8（不随核数漂移）", H.default_preset_for('libsvtav1'), '8')
 
 print('  [V11] hevc_videotoolbox 量程')
-chk("[11] hevc_videotoolbox b == 100", VU_CRF.QUALITY_MAP['hevc_videotoolbox'][1], 100.0)
+chk("[11] hevc_videotoolbox b == 100", VU_CRF.SIZE_MAP['hevc_videotoolbox'][1], 100.0)
 
 if knowns:
     _bad = [cid for cid, ok in knowns if not ok]

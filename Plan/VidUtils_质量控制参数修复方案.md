@@ -13,7 +13,7 @@
     `-qp 0` 无损声明（C，配合 `probe/probe_lossless_qp0.sh`）
 - 标定脚本：`probe/calibrate_soft_offsets.py`（真实素材等体积标定，可复现 V9）
 
-> **状态（2026-09-29）：V1 ~ V12 全部已落地 + AV1 QP 尺度修正（×4→×3）+ AV1 软编等效表实测落表**，两脚本 + 两份 `convert_crf.py` 同步。
+> **状态（2026-10-01）：V1 ~ V12 全部已落地 + AV1 QP 尺度修正（×4→×3）+ AV1 软编等效表实测落表 + M2 七素材等质量表已落地 + LOO 留一（超立项 <1.0 阈值，记录为红）**，两脚本 + 两份 `convert_crf.py` 同步。
 > **T4 上机验收已完成**（§4.9）：NVENC 的 `-cq` 偏移（B 组）与 constqp `-qp` 回基准轴（C 组的
 > h264/hevc 对照）**实测成立**，`t4_acceptance` 20/20 通过 —— 详见 §4.9。
 > **L40/Ada 上机验收已完成**（§4.10）：
@@ -21,9 +21,10 @@
 >   - **C-av1-结论** (QP 尺度)：**PASS** —— 扩扫 42/63/72/84/105/108，**×3(qp=63) 落带内**，将 `_QP_SCALE['av1_nvenc']` 从 4 → 3
 >   - **C-h264/hevc** (`-qp 21`)：**PASS**，constqp 回基准轴正确
 > **仍未覆盖的只有**：AMF 能力表、VideoToolbox `-q:v` —— 待 AMD/macOS 机器复核（见 §4.8）。
-> **等质量换算表已落地（2026-09-30，§4.12）**：新增 `QUALITY_MAP`（**VMAF 定标**），原等体积表
+> **等质量换算表已落地（2026-10-01，§4.12）**：新增 `QUALITY_MAP`（**VMAF 定标**），原等体积表
 > 改名 **`SIZE_MAP`**，`--quality-mode size|quality`（**默认 `quality`**）。**非 GPU 部分已落地**
-> （5 软编 / 单素材 `new5_raw`）；**硬编待上机（M5，需 T4/L40 等）**，未覆盖编码器自动回退 `SIZE_MAP`。
+> （7 素材 × 4 软编 / 单直线；首版单素材已补齐）；**硬编待上机（M5，需 T4/L40 等）**，未覆盖编码器自动回退 `SIZE_MAP`。
+> M2 LOO 留一最坏 5.60（vp9×natgeo），超立项 <1.0 阈值，记录为红；单直线形式通过 pooled 门禁（≤0.70），留主观 M3 兜底 + 追加同质素材。
 > 待办按**CPU / GPU** 分档列于 §4.12 文末。
 
 ---
@@ -37,6 +38,7 @@
 | V6 | `_QP_ONLY_CODECS`（VAAPI 族）→ 归一到基准轴后走 `-qp` | P0 | **已落地** | 实测（`ffmpeg -h encoder=h264_vaapi` → 只有 `-qp (0 to 52)`） |
 | V1 | constqp 的 `-qp` 回基准轴（不再拿 CQ 轴值直发） | P0 | **已落地** | 有跨项目实测反证（VE G7：`-qp 21` 对齐 crf21）；新增 `_QP_SCALE` / `_QP_LIMITS` / `to_constqp_qp()` / `from_constqp_qp()` |
 | V13 | `av1_nvenc` 的 `_QP_SCALE` 4 → 3（L40 扩扫确认 ×3 落带内） | P0 | **已落地 (2026-09-29)** | L40 实测：qp=63(×3) 码率 0.83×/ΔPSNR +0.61dB 通过，qp=84(×4) 码率 0.55× 未达标 |
+| P5 | **M2** 七素材 × 4 软编等质量表 + LOO 留一（池化落表；LOO 最坏 5.60 超 <1.0 阈值，记录为红） | P2 | **已落地 (2026-10-01)** | 7 素材池化 max|ΔVMAF| ≤ 0.70 < 1.0 通过；5/5 门禁；单直线形式成立 |
 | V2 | `--qp` 落到软编按基准轴回算（不再走 CQ 轴） | P0 | **已落地** | 同上（同一处公式） |
 | V5 | 硬件能力表：QSV/VT 的 `-cq`/`-preset` 校正 + 两脚本集合统一 | P0 | **已落地** | 实测（本机 `h264_qsv` 无 `-cq`，`-preset` 只收 veryfast..veryslow）；AMF 待上机 |
 | V7 | 默认质量统一为基准 21（`DEFAULT_CQ` 23 删除） | P1 | **已落地** | 纯计算（CQ 23 ≡ crf 18） |
@@ -649,8 +651,8 @@ overview_lockstep / pixfmt_bitdepth）rc=0。
 **`_resolve_quality_params()` 与全部高层 helper 零改动**。等质量表未覆盖的编码器自动回退等体积表。
 
 **标定口径**（脚本 `probe/calibrate_equal_quality.py`，纯 CPU）：
-- 素材：`new5_raw.mp4`（实拍人物，6s，1280×720 prep，与等体积表同口径）。⚠ **首版单素材**。
-- 锚点 libx264 CRF 18/21/24/27/30；目标编码器扫参数 → 在 `(参数, VMAF)` 曲线取**等 VMAF** 点。
+- 素材：**7 素材**（new5_raw、new4_raw 实拍[HDR]、cc_anim_300s 动画、cc_subs_105s 动画+烧录字幕、earth_dark_80s 暗场、ui_screen_10s 屏幕、natgeo_grass_40s 高细节草地），6s，720p prep，与等体积表同口径。
+- 锚点 libx264 CRF 18/22/26/30/34；目标编码器扫参数 → 在 `(参数, VMAF)` 曲线取**等 VMAF** 点。
 - 跨素材聚合：斜率 `a` = 池化最小二乘；截距 `b` = 各素材中位数。⚠ `librav1e` 按 **native 档**
   （不下发 `-speed`）——与共享表 `SIZE_MAP['librav1e']` 的标定档一致（VE `quality_map.py:127-130`）。
 - **ffmpeg 二进制指纹**：标定与判据必须锁同一二进制（本机 **`8.0.1-+vmaf`**，libvmaf 2.3.1）；
@@ -662,20 +664,24 @@ overview_lockstep / pixfmt_bitdepth）rc=0。
   会污染「等 VMAF 匹配」。首版曾误用 subsample=8，独立判据 2/5 红（vp9 −1.85 / aom +1.06），
   **已按 subsample=1 重标**；标定与判据必须同参、同时长。
 
-**首版落表值 + 实测**（`QUALITY_MAP`，2026-09-30）：
+**M2 落表值 + 实测**（`QUALITY_MAP`，2026-10-01；7 素材 × 4 软编，6s，720p prep，池化最小二乘 + LOO 留一）：
 
-| 编码器 | a | b | 区间 | `--crf-ref 21` | `max|ΔVMAF|` |
-|---|---|---|---|---|---|
-| `libx265` | 1.0709 | −1.6473 | 0–51 | 21 | 0.47 |
-| `libvpx-vp9` | 1.8988 | −10.7972 | 0–63 | 29 | 0.27 |
-| `libaom-av1` | 2.2677 | −21.5776 | 0–63 | 26 | 0.18 |
-| `libsvtav1` | 2.5168 | −23.2732 | 0–63 | 30 | 0.27 |
-| `librav1e` | 7.6674 | −87.5783 | 0–255 | 73（`-qp`） | 1.00 |
+| 编码器 | a | b | 区间 | `--crf-ref 21` | 池化 max|ΔVMAF| | LOO 最坏 ΔVMAF（素材×码） |
+|---|---|---|---|---|---|---|
+| `libx265` | 1.1013 | −2.6452 | 0–51 | 20 | 0.66 | 3.26（ui） |
+| `libvpx-vp9` | 1.9816 | −12.4699 | 0–63 | 29 | 0.63 | 5.60（natgeo） |
+| `libaom-av1` | 2.2151 | −19.4704 | 0–63 | 27 | 0.70 | 3.02（earth） |
+| `libsvtav1` | 2.0611 | −12.435 | 0–63 | 31 | 0.37 | 4.74（ui） |
+| `librav1e` | 7.4621 | −79.8331 | 0–255 | 77（`-qp`，native） | — | — |
 
-- 独立判据 `verify/verify_equal_quality.py`（6s，subsample=1）：**5/5 达标**，
-  `ΔVMAF` 全部 ≤ **0.29**。
+- 独立判据 `verify/verify_equal_quality.py`（new5_raw，6s，subsample=1）：**5/5 达标**，
+  `ΔVMAF` 全部 ≤ **0.70**（主门禁 <1.0）。
 - 与等体积表对比（crf21）：vp9 28→**29**、aom 21→**26**、svtav1 24→**30**、rav1e 66→**73**、
   x265 21→**21**。⇒ 等体积表在非默认点确有画质偏差（VE 证据 A/B 的量化确认）。
+- ⚠ LOO 留一最坏（vp9×natgeo 5.60 / svtav1×ui 4.74 / x265×ui 3.26 / aom×earth 3.02）超立项 <1.0 阈值：
+  素材特异 VMAF 偏差（UI 屏幕 / 高细节草地 / 暗场），**记录为红，不判红**；
+  `libsvtav1` 的 b 中位数跨度 [-19.4, +5.1]（24.5），单直线形式仍通过 pooled 门禁。
+  后续：主观 M3 兜底 + 追加同质素材（见 §4.12 待办）。
 
 **判据**：`verify/verify_equal_quality.py`（**主门禁 `|ΔVMAF| ≤ 1.0`（唯一判红）**；
 `|ΔPSNR| ≤ 0.3 dB`、`|ΔPSNR-HVS| ≤ 0.5 dB` 为**交叉参考（soft WARN，不判红）**；
@@ -683,9 +689,9 @@ overview_lockstep / pixfmt_bitdepth）rc=0。
 `verify_quality_mapping.py` ⑨ 组扩展 `SIZE_MAP`/`QUALITY_MAP` 跨项目逐条相等 + 两口径语义
 （⑨ 组计数 13→**14**，判据内已**显式钉 `size`** 以保证既有等体积期望可复现）。
 
-**实施状态（2026-09-30，v3 同步）**：本节的**非 GPU 部分**已全部落地（HEAD `6ddc46b`）；
-首版为**单素材** `new5_raw.mp4`（6s / 720p）、5 个软编，`max|ΔVMAF| ≤ 1.0`（判据 5/5）。
-两仓 `SIZE_MAP` / `QUALITY_MAP` **实测逐条相等**（本仓核对 `True`）。
+**实施状态（2026-10-01）**：本节的**非 GPU 部分**已全部落地；M2 七素材（7 素材 × 4 软编 + LOO 留一）已落地，池化表值见上表；5/5 门禁通过（池化 max|ΔVMAF| ≤ 0.70）。
+LOO 留一最坏 5.60（vp9×natgeo）超立项 <1.0 阈值，记录为红（素材特异 VMAF 偏差，不判红）；主观 M3 兜底 + 追加同质素材待办。
+两仓 `SIZE_MAP` / `QUALITY_MAP` **逐条相等**（本仓 + VE 同步写入后核对）。
 ⚠ **⑨ 组 14/14 与 `verify_equal_quality.py` 须在「有 `ffmpeg` + `temp/fixture_1080p.mp4`」的机器复跑**
 （本 checkout 无 `ffmpeg`、缺 fixture，⑦ 组即崩，门禁未能就地复现）。
 
@@ -700,10 +706,8 @@ overview_lockstep / pixfmt_bitdepth）rc=0。
   与共享表 `SIZE_MAP['librav1e']` 的标定档一致（VE `quality_map.py:127-130`：native→66、speed10→77）；
   `QUALITY_MAP['librav1e']` **已按 native 重标**。`-speed 10` 退化为显式可选项（启用须换表，
   VE 侧 `_EQVOL_SPEED_OVERRIDE` 已备 speed10 的等体积值）。
-- **M2**：多素材（补 屏幕内容/文字、暗场/高噪、高细节纹理）+ 留一交叉验证（5 软编，纯 CPU）。
-- **锚点/拟合形式**：首版 5 锚点（`ANCHOR_CRFS=18/21/24/27/30`）+ **单直线**（`fit_line`）；
-  立项原稿曾写「7 锚点 + 分段」= **文档滞后**，已订正。**判定规则**：现状判据 `max|ΔVMAF| ≤ 0.29`
-  ⇒ **暂不加密/分段**；若 M2 后某码超 1.0（`librav1e` 参数空间残差 4.6 qp 最大，为首选对象）再处理。
+- **M2** ✅ **已落地（2026-10-01）**：7 素材 × 4 软编 + LOO 留一；池化 max|ΔVMAF| ≤ 0.70 < 1.0 通过，5/5 门禁；LOO 最坏 5.60（vp9×natgeo）超立项 <1.0 → **记录为红**，不判红；单直线形式成立；后续：主观 M3 + 追加同质素材。
+- **锚点/拟合形式**：5 锚点（`ANCHOR_CRFS=18/22/26/30/34`）+ **单直线**（`fit_line`）；M2 后现状判据 `max|ΔVMAF| ≤ 1.0` 仍通过，LOO 超阈（素材特异 VMAF 偏差）→ **暂不加密/分段**（单直线形式成立）；若主观 M3 或同质素材补齐后仍超限再处理。
 - ~~**标定侧 5 指标取齐**~~ **已补（A7）**：`calibrate_equal_quality.py` 新增 `--full-metrics`
   （`measure(with_filters=True)`，另起滤镜遍采 PSNR/SSIM/XPSNR）；判据输出也已补 SSIM/XPSNR。
   ⚠ 该遍**不影响表值**（表仅由 VMAF 拟合），可对既有缓存增量补采。

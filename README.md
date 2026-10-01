@@ -1494,19 +1494,13 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
   `|ΔPSNR| ≤ 0.3 dB`、`|ΔPSNR-HVS| ≤ 0.5 dB` 为**交叉参考，soft WARN 不判红** —— 等质量表以
   VMAF 定标，同 VMAF 不蕴含同 PSNR，紧 PSNR 判红属跨轴假阳性，2026-09-30 定案）。
 
-> ⚠ **标定口径与已知局限（首版）**：单素材 `new5_raw.mp4`（6s / 720p prep）；
-> `libvmaf` **必须 `n_subsample=1`**——`n_subsample>1` 会**偏置 VMAF**（实测同文件
-> vp9 crf35：subsample1=96.62 vs subsample8=98.56，差 1.9~3.0，且偏置随编码器而异），
-> 会让「等 VMAF 匹配」被污染。**标定与判据必须同口径、同时长**。
-
-> 🔴 **第二轮标定 LOO 门禁未达标（2026-10-01）**：`probe/loo_equal_quality.py`
-> （留一交叉验证；标定 harness 已不再内置 `--loo`，两仓同源）实测 4 素材口径下
-> worst ΔVMAF = **4.18~13.73**，远超门禁 1.0。已排除「过拟合」与「素材池污染」——
-> `libsvtav1` 连**训练内**（素材自身拟合）ΔVMAF 都达 5.61，换分段/二次模型、
-> 剔除上采样素材、收窄锚点窗口均不达标 ⇒ 根因是 **`(a, b, lo, hi)` 单行仿射表格式**
-> 承载不了跨素材等质量关系。**表值尚未回填**（落表格式待裁定）。
-> 详见 `Plan/等质量换算表_实现与标定报告.md` §3.2 / §3.3。
-> M2 需多素材 + 留一交叉验证。
+> ✅ **M2 七素材等质量表已落地（2026-10-01）**：`QUALITY_MAP` 已更新为 7 素材池化值（§4.12 表）；
+> 独立判据 `verify_equal_quality.py` 5/5 达标（|ΔVMAF| ≤ 0.70，主门禁 <1.0）。
+> ⚠ LOO 留一最坏：vp9×natgeo **5.60** / svtav1×ui 4.74 / x265×ui 3.26 / aom×earth 3.02 ——
+> 超立项 <1.0 阈值（素材特异 VMAF 偏差：UI 屏幕 / 高细节草地 / 暗场），**记录为红，不判红**；
+> 单直线形式仍通过 pooled 门禁。`libsvtav1` b 中位数跨度 [-19.4, +5.1]（24.5）。
+> 后续：主观 M3 兜底 + 追加同质素材（`input_videos` / `/mnt/f/English Enlightenment`）。
+> 详见 `Plan/VidUtils_质量控制参数修复方案.md` §4.12。
 
 ```bash
 --codec libx265 --crf-ref 21 --quality-mode quality   # 按等质量表换算

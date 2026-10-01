@@ -1494,13 +1494,24 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
   `|ΔPSNR| ≤ 0.3 dB`、`|ΔPSNR-HVS| ≤ 0.5 dB` 为**交叉参考，soft WARN 不判红** —— 等质量表以
   VMAF 定标，同 VMAF 不蕴含同 PSNR，紧 PSNR 判红属跨轴假阳性，2026-09-30 定案）。
 
-> ✅ **M2 七素材等质量表已落地（2026-10-01）**：`QUALITY_MAP` 已更新为 7 素材池化值（§4.12 表）；
-> 独立判据 `verify_equal_quality.py` 5/5 达标（|ΔVMAF| ≤ 0.70，主门禁 <1.0）。
-> ⚠ LOO 留一最坏：vp9×natgeo **5.60** / svtav1×ui 4.74 / x265×ui 3.26 / aom×earth 3.02 ——
-> 超立项 <1.0 阈值（素材特异 VMAF 偏差：UI 屏幕 / 高细节草地 / 暗场），**记录为红，不判红**；
-> 单直线形式仍通过 pooled 门禁。`libsvtav1` b 中位数跨度 [-19.4, +5.1]（24.5）。
-> 后续：主观 M3 兜底 + 追加同质素材（`input_videos` / `/mnt/f/English Enlightenment`）。
-> 详见 `Plan/VidUtils_质量控制参数修复方案.md` §4.12。
+> ✅ **等质量表已落表（2026-10-01，戊方案）**：`QUALITY_MAP` 为 **9 素材**标定
+> （实拍/动画/烧录字幕/暗场/UI/高细节六类），720p prep、`n_subsample=1`，与 VE 侧逐条相等；
+> 独立判据 `verify_equal_quality.py` 5/5 达标。
+> 表值：x265 (1.0700,−1.8002) / vp9 (1.9531,−14.6476) / aom (2.2349,−20.0233) /
+> svtav1 (2.2371,−17.1879) / rav1e native (7.5726,−92.4768)；
+> `-speed 10` 档另存 `convert_crf._EQQUAL_SPEED_OVERRIDE` (7.4342,−89.2928)。
+>
+> 🔴 **跨素材精度边界（务必阅读后再改表）**：
+> LOO（`probe/loo_equal_quality.py`）**worst |ΔVMAF| = 4.13~7.86**，
+> **达不到立项原门禁 <1.0**；经仓主 2026-10-01 裁定**放宽至 ≤5.9**。
+> 根因为**结构性上限**，已排除过拟合（svtav1 训练内 Δ 就达 8.29~11.22）/
+> 素材不足（4→9 素材几无改善）/ 表格式（每素材专属表 LOO 4.02~13.77 更差）/
+> 锚点位置（素材间离散度随 crf **下降**：aom 51%→9%）四条。
+> ⚠ **`verify_equal_quality.py` 的绿灯不能为表值背书** —— 它跑单素材 in-sample
+> （new5_raw crf21，素材与锚点都在标定集内），结构上测不到跨素材问题。
+> ⚠ `librav1e` native 档仅 2 素材，LOO 未验证，补素材后应重标。
+> 详见 `Plan/PROMPT_等质量换算立项.md` 与对侧
+> `Plan/等质量换算表_实现与标定报告.md` §3.2 / §3.3。
 
 ```bash
 --codec libx265 --crf-ref 21 --quality-mode quality   # 按等质量表换算

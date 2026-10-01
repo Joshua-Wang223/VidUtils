@@ -61,7 +61,7 @@ DEFAULT_SRCS = [
     INPUT_VIDEOS / 'word_world_2.mp4',         # 720x576 门禁素材
 ]
 
-ANCHOR_CRFS = [18, 22, 26, 30, 34]
+ANCHOR_CRFS = [18, 21, 24, 27, 30]  # 与 M2 口径对齐
 
 # 目标编码器扫描点。低端必须够低，使目标 VMAF 能高于 x264 crf18（否则高端锚点插值落空）。
 SWEEP = {

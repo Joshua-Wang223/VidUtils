@@ -651,7 +651,12 @@ overview_lockstep / pixfmt_bitdepth）rc=0。
 **标定口径**（脚本 `probe/calibrate_equal_quality.py`，纯 CPU）：
 - 素材：`new5_raw.mp4`（实拍人物，6s，1280×720 prep，与等体积表同口径）。⚠ **首版单素材**。
 - 锚点 libx264 CRF 18/21/24/27/30；目标编码器扫参数 → 在 `(参数, VMAF)` 曲线取**等 VMAF** 点。
-- 跨素材聚合：斜率 `a` = 池化最小二乘；截距 `b` = 各素材中位数。⚠ `librav1e` 按 **`-speed 10`**。
+- 跨素材聚合：斜率 `a` = 池化最小二乘；截距 `b` = 各素材中位数。⚠ `librav1e` 按 **native 档**
+  （不下发 `-speed`）——与共享表 `SIZE_MAP['librav1e']` 的标定档一致（VE `quality_map.py:127-130`）。
+- **ffmpeg 二进制指纹**：标定与判据必须锁同一二进制（本机 **`8.0.1-+vmaf`**，libvmaf 2.3.1）；
+  标定报告已存 `ffmpeg` 字段与 `encoder_versions`。⚠ 换构建须重标。
+- ⚠ `DEFAULT_SRCS` 含 720×576 的 `word_world_2.mp4`（低于 720p 目标）⇒ 上采样会被缩放主导，
+  **不应参与池化斜率**；脚本会打印告警。
 - ⚠ **`libvmaf` 必须 `n_subsample=1`**：`>1` 会**偏置 VMAF**（同文件 vp9 crf35：
   subsample1=96.62 vs subsample8=98.56，差 1.9~3.0，且偏置随编码器而异），
   会污染「等 VMAF 匹配」。首版曾误用 subsample=8，独立判据 2/5 红（vp9 −1.85 / aom +1.06），
@@ -690,16 +695,21 @@ overview_lockstep / pixfmt_bitdepth）rc=0。
 - ~~**平行门禁未真正判红**~~ **已定案（2026-09-30）**：**只有 `|ΔVMAF|` 判红**；
   `ΔPSNR`/`ΔPSNR-HVS` 降级为 **soft 参考**（超界只 WARN、**不改退出码**）—— 等质量表以 VMAF 定标，
   紧 PSNR 判红属**跨轴**假阳性。已落地于 `verify/verify_equal_quality.py`（**本仓 + VE 两副本同步**）。
-- **`rav1e -speed` 跨仓口径未统一**（**前置**）：VE 默认 native（`RAV1E_SPEED_DEFAULT=0`）vs
-  本仓固定 `-speed 10`（`_RAV1E_SPEED=10`），却共用同一 `librav1e` 表值 ⇒ 须两仓选同档并同步换表
-  （rav1e 为软编，**纯 CPU**）。见 §4.11 注与立项「待办 A3」。
+- ~~**`rav1e -speed` 跨仓口径未统一**~~ **已统一（2026-09-30，A3 结案）**：
+  两仓**默认 native**（不下发 `-speed`，`_RAV1E_SPEED = 0` / `RAV1E_SPEED_DEFAULT = 0`），
+  与共享表 `SIZE_MAP['librav1e']` 的标定档一致（VE `quality_map.py:127-130`：native→66、speed10→77）；
+  `QUALITY_MAP['librav1e']` **已按 native 重标**。`-speed 10` 退化为显式可选项（启用须换表，
+  VE 侧 `_EQVOL_SPEED_OVERRIDE` 已备 speed10 的等体积值）。
 - **M2**：多素材（补 屏幕内容/文字、暗场/高噪、高细节纹理）+ 留一交叉验证（5 软编，纯 CPU）。
 - **锚点/拟合形式**：首版 5 锚点（`ANCHOR_CRFS=18/21/24/27/30`）+ **单直线**（`fit_line`）；
-  立项原稿曾写「7 锚点 + 分段」= **文档滞后**，已订正（是否补分段由残差上界定）。
-- **标定侧 5 指标取齐**：标定 `measure()` 默认 `with_filters=False`，只记 VMAF + PSNR-HVS；
-  PSNR/SSIM/XPSNR 须在标定侧一并采集。
-- ffmpeg 二进制指纹入档；`calibrate_equal_quality.py` 默认素材含 576p `word_world_2` 的池化陷阱。
-- 低分辨率动画素材（576p/360p）上采样到 720p 会被缩放主导，**不参与池化斜率**。
+  立项原稿曾写「7 锚点 + 分段」= **文档滞后**，已订正。**判定规则**：现状判据 `max|ΔVMAF| ≤ 0.29`
+  ⇒ **暂不加密/分段**；若 M2 后某码超 1.0（`librav1e` 参数空间残差 4.6 qp 最大，为首选对象）再处理。
+- ~~**标定侧 5 指标取齐**~~ **已补（A7）**：`calibrate_equal_quality.py` 新增 `--full-metrics`
+  （`measure(with_filters=True)`，另起滤镜遍采 PSNR/SSIM/XPSNR）；判据输出也已补 SSIM/XPSNR。
+  ⚠ 该遍**不影响表值**（表仅由 VMAF 拟合），可对既有缓存增量补采。
+- ~~ffmpeg 指纹入档 / 576p 池化陷阱~~ **已补（A8）**：本文档与标定报告记录 `ffmpeg 8.0.1-+vmaf`；
+  `calibrate_equal_quality.py` 对低于目标分辨率的源**打印告警**并在 `DEFAULT_SRCS` 注释标明
+  `word_world_2`（576p）**不应参与池化斜率**。
 
 *需 GPU（T4/L40 等，即立项 M5）*：
 - NVENC 等质量标定（`h264_nvenc` / `hevc_nvenc`）→ **T4 或 L40**；**`av1_nvenc` 须 L40（Ada）**（T4 无 AV1 编码器）。

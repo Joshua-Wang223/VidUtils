@@ -471,7 +471,7 @@ _ref = opt_of(run('vidcrop_cpu_v2.py',
 note('[9-rav1e]', '--crf 21 与 --crf-ref 21 在 librav1e 上同源',
      _lit == _ref, f'--crf→-qp {_lit} / --crf-ref→-qp {_ref}', '两者相同（均为 66）',
      '[V8 已修复] librav1e 移出 CRF_SUPPORTED_CODECS，字面量与 -ref 都先归一到基准轴，'
-     "再由 crf_to_rav1e_qp 查 QUALITY_MAP['librav1e'] 的**等体积**标定值得 66。"
+     "再由 crf_to_rav1e_qp 查 SIZE_MAP['librav1e'] 的**等体积（native 档）**标定值得 66。"
      '⚠ 2026-09-30 起 crf_to_rav1e_qp 不再经 libaom 中转（旧链式给 64，且会随 '
      'libaom 行重标而漂移），改为直接查表，两仓口径统一')
 
@@ -760,7 +760,7 @@ print('  [V8] librav1e 单链')
 chk("[11] librav1e 不在 CRF_SUPPORTED_CODECS（两脚本）",
     ('librav1e' in H.CRF_SUPPORTED_CODECS, 'librav1e' in C.CRF_SUPPORTED_CODECS),
     (False, False))
-chk("[11] librav1e 字面量 --crf 21 → -qp 66（查表口径）+ -speed 10",
+chk("[11] librav1e 字面量 --crf 21 → -qp 66（查表口径，native 档）",
     '-qp 66' in cmd_of(run('vidcrop_cpu_v2.py',
                            ['--input', str(SRC), '--output', str(WORK / 'o11'), '--dry-run',
                             '--codec', 'librav1e', '--crf', '21',
@@ -774,8 +774,8 @@ _r1e_cmd = cmd_of(run('vidcrop_cpu_v2.py',
                      ['--input', str(SRC), '--output', str(WORK / 'o11'), '--dry-run',
                       '--codec', 'librav1e', '--crf', '21',
                       '--output-width', '640', '--output-height', '360'])[1])
-chk("[11] librav1e 必须下发 -speed 10（否则退回 ≈0.011× 实时的原生档）",
-    '-speed 10' in _r1e_cmd, True)
+chk("[11] librav1e 默认不下发 -speed（native 档，与共享表标定档一致）",
+    '-speed' not in _r1e_cmd, True)
 
 print('  [V10] preset 表')
 chk("[11] 两脚本 X264_TO_NVENC_PRESET 相等", H.X264_TO_NVENC_PRESET, C.X264_TO_NVENC_PRESET)

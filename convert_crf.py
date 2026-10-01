@@ -127,7 +127,9 @@ QUALITY_MAP = {
     'libvpx-vp9':  (1.8988, -10.7972, 0, 63),
     'libaom-av1':  (2.2677, -21.5776, 0, 63),
     'libsvtav1':   (2.5168, -23.2732, 0, 63),
-    'librav1e':    (7.6674, -87.5783, 0, 255),
+    # ⚠ `librav1e` 按 **native 档**（不下发 `-speed`）标定——与 `SIZE_MAP['librav1e']` 的档位一致
+    #   （两仓默认 native；`-speed 10` 为显式可选，启用须换表）。native 拟合残差 3.3 qp（本表最大）。
+    'librav1e':    (7.4621, -79.8331, 0, 255),
 }
 
 # 当前生效表 + 口径（由 set_quality_mode 维护）；默认 'quality'

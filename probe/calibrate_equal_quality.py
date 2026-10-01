@@ -34,6 +34,9 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# ⚠ 默认素材含 `word_world_2.mp4`（720×576，**低于 720p 目标**）——它会被 lanczos **上采样**，
+#   VMAF 主要由缩放主导，**不应参与跨素材池化斜率**；本脚本会对其打印告警，
+#   多素材标定时请显式 `--src` 只给 ≥ 目标分辨率的素材，或按告警结果人工剔除该条。
 DEFAULT_SRCS = [
     ROOT.parent / 'input_videos' / 'new5_raw.mp4',
     ROOT.parent / 'input_videos' / 'new4_raw.mp4',
@@ -60,7 +63,7 @@ LOCK = {
     'libvpx-vp9': ['-b:v', '0', '-deadline', 'good', '-cpu-used', '2'],
     'libaom-av1': ['-b:v', '0', '-cpu-used', '6'],
     'libsvtav1':  ['-preset', '8'],
-    'librav1e':   ['-speed', '10'],   # 与 VidUtils 下发一致（_RAV1E_SPEED=10）
+    'librav1e':   [],                 # native 档（不下发 -speed，与两仓默认一致）
 }
 QUALITY_FLAG = {           # 质量参数的 CLI 名
     'libx264': '-crf', 'libx265': '-crf', 'libvpx-vp9': '-crf',
@@ -106,7 +109,10 @@ def make_prep(src, work, duration, width, height):
     """生成 720p yuv420p 中间素材（无缓存：先删后建）。HDR 源先 tonemap。"""
     prep = work / 'prep.mp4'
     prep.unlink(missing_ok=True)
-    _, _, _, _, _, pix_fmt, transfer = ffprobe_video(src)
+    _, _, _, sw, sh, pix_fmt, transfer = ffprobe_video(src)
+    if sw and sw < width:
+        print(f'  ⚠ 源 {src.name} 宽 {sw} < 目标 {width} ⇒ 上采样，VMAF 会被缩放主导，'
+              f'该素材不应参与跨素材池化斜率', file=sys.stderr)
     vf = f'scale={width}:{height}:flags=lanczos'
     hdr = transfer in ('smpte2084', 'arib-std-b67')
     if hdr:
@@ -202,6 +208,10 @@ def measure(dist, ref, nframes, tmp, with_filters=False, subsample=1):
     return m
 
 
+#: 是否在标定时一并采集 PSNR/SSIM/XPSNR（另起一遍独立滤镜；不影响 VMAF 拟合）
+FULL_METRICS = False
+
+
 # ── 插值与拟合 ──────────────────────────────────────────────────────────
 def interp(pts, target):
     """在 (param, value) 上按 value 线性插值出 param；要求 param 升序、value 单调。"""
@@ -266,7 +276,7 @@ def calibrate_one(work, ref, nframes, codecs, duration, src_name='src', cache=No
             else:
                 out = work / f'{codec}_{v}.mp4'
                 sz, dt = encode(ref, codec, v, out)
-                m = measure(out, ref, nframes, work)
+                m = measure(out, ref, nframes, work, with_filters=FULL_METRICS)
                 m['kbps'] = video_kbps(out)
                 out.unlink(missing_ok=True)
                 m['_bytes'] = sz
@@ -280,7 +290,7 @@ def calibrate_one(work, ref, nframes, codecs, duration, src_name='src', cache=No
                   f'hvs={m["psnr_hvs"]:.2f}  ({dt:5.1f}s) {tag}', flush=True)
 
     anchors = [(c, m['vmaf']) for c, _, m in metrics['libx264']]
-    res = {}
+    res = {'_anchors': [[c, round(v, 4)] for c, v in anchors]}
     for codec in codecs:
         sweep = [(p, v) for p, v, _ in metrics[codec]]
         xs, ys, mono = [], [], monotonic(sweep)
@@ -301,6 +311,7 @@ def calibrate_one(work, ref, nframes, codecs, duration, src_name='src', cache=No
             if vp is not None:
                 dv.append(abs(vp - avmaf))
         res[codec] = {'a': a, 'b': b, 'points': list(zip(xs, ys)),
+                      'sweep': [[p, v] for p, v in sweep],
                       'max_resid_param': resid,
                       'max_delta_vmaf': (max(dv) if dv else None),
                       'monotonic_violation': mono, 'lo': 0, 'hi': None}
@@ -319,6 +330,10 @@ def main():
     ap.add_argument('--tag', default='')
     ap.add_argument('--keep', action='store_true')
     ap.add_argument('--quick', action='store_true', help='快速自检（1 素材 / 少点 / 3s）')
+    ap.add_argument('--loo', action='store_true',
+                    help='留一交叉验证：逐素材留出，用其余素材拟合后预测其 ΔVMAF')
+    ap.add_argument('--full-metrics', action='store_true',
+                    help='标定时一并采集 PSNR/SSIM/XPSNR（默认只采 VMAF+PSNR-HVS）')
     ap.add_argument('--no-resume', action='store_true',
                     help='忽略断点缓存（默认复用 work 目录下的 points_cache.json）')
     args = ap.parse_args()
@@ -330,6 +345,9 @@ def main():
             SWEEP[k] = [21, 30]
     else:
         codecs = [c.strip() for c in args.codecs.split(',') if c.strip()]
+
+    global FULL_METRICS
+    FULL_METRICS = args.full_metrics
 
     srcs = [Path(s) for s in (args.src or [str(p) for p in DEFAULT_SRCS])]
     srcs = [s for s in srcs if s.is_file()]
@@ -392,6 +410,35 @@ def main():
               f'b_m范围=[{min(bs):+.2f}, {max(bs):+.2f}]  '
               f'crf21→{a*21+b:.2f}')
     report['table'] = {k: v for k, v in table.items()}
+
+    if args.loo:
+        names = [n for n in report['per_material'] if 'eqq' in report['per_material'][n]]
+        print('\n── 留一交叉验证（LOO：用其余素材拟合，预测被留出素材的 max|ΔVMAF|）──')
+        for c in codecs:
+            rows, worst = [], None
+            for hold in names:
+                xs, ys = [], []
+                for nm in names:
+                    if nm == hold:
+                        continue
+                    for x, y in report['per_material'][nm]['eqq'].get(c, {}).get('points', []):
+                        xs.append(x); ys.append(y)
+                if len(xs) < 2:
+                    continue
+                a, b = fit_line(xs, ys)
+                sw = report['per_material'][hold]['eqq'][c].get('sweep', [])
+                anc = report['per_material'][hold]['eqq'].get('_anchors', [])
+                dv = []
+                for acrf, avmaf in anc:
+                    v = vmaf_at_param(sw, a * acrf + b)
+                    if v is not None:
+                        dv.append(abs(v - avmaf))
+                m = max(dv) if dv else None
+                rows.append(f'{hold}:{m:.2f}' if m is not None else f'{hold}:NA')
+                if m is not None:
+                    worst = m if worst is None else max(worst, m)
+            print(f"  {c:11} " + ('; '.join(rows) if rows else '（素材不足）')
+                  + (f'   worst={worst:.2f}' if worst is not None else ''))
 
     (work / 'report.json').write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')

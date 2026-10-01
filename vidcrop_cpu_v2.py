@@ -1197,9 +1197,9 @@ def crf_to_rav1e_qp(crf: int) -> int:
     的**等体积**标定值，与 Video_Enhancement 侧口径一致、单一真源。
 
     ⚠ ``-speed`` 会整体平移 rav1e 的码率曲线，故本值**只对已声明的 speed 档成立**。
-      本仓固定下发 ``_RAV1E_SPEED``（默认 10），表值与之配套；
-      若改 speed 必须同步换 ``SIZE_MAP['librav1e']``（等体积口径；见 VE quality_map 的
-      ``_EQVOL_SPEED_OVERRIDE``，那里两档都给了标定值）。
+      本仓**默认 native 档（不下发 ``-speed``，``_RAV1E_SPEED = 0``）**，表值与之配套，
+      与 Video_Enhancement 一致；若显式启用 ``-speed`` 必须同步换 ``SIZE_MAP['librav1e']``
+      （等体积口径；见 VE quality_map 的 ``_EQVOL_SPEED_OVERRIDE``，那里两档都给了标定值）。
     """
     v = from_x264_crf('librav1e', crf)
     if v is None:
@@ -1207,8 +1207,10 @@ def crf_to_rav1e_qp(crf: int) -> int:
     return max(0, min(255, int(round(v))))
 
 
-#: librav1e 固定下发的 ``-speed``（实测见 VE 方案 §6.11.1：快 4.6×，体积 ×1.40）
-_RAV1E_SPEED = 10
+#: librav1e 下发的 ``-speed``：**0 = 不下发（native 档）**，与共享表标定档一致。
+#: 实测（VE 方案 §6.11.1）``-speed 10`` 快 4.6× 但体积 ×1.40、同码率多掉 ~1.9 dB；
+#: 启用前必须同步换 ``SIZE_MAP`` / ``QUALITY_MAP`` 的 rav1e 行（不同档 = 不同表值）。
+_RAV1E_SPEED = 0
 
 
 def _resolve_quality_params(
@@ -1329,7 +1331,7 @@ def _resolve_quality_params(
         _out = int(round(_ref))
         _qp = crf_to_rav1e_qp(_out)
         print(f"  提示：librav1e 无 -crf，已按基准轴换算为 -qp {_qp}"
-              f"（等体积口径；下发 -speed {_RAV1E_SPEED}）。")
+              f"（{'speed ' + str(_RAV1E_SPEED) if _RAV1E_SPEED > 0 else 'native 档'}口径）。")
         return _out, None, None
 
     # ── 方式 3：--qp（constqp 的恒定 QP）─────────────────────────────────
@@ -1731,7 +1733,9 @@ def build_encoder_options_v2(
     elif crf is not None and c == "librav1e":
         # rav1e 不认 -crf（会被静默忽略），换算成等效 -qp。它已移出
         # CRF_SUPPORTED_CODECS，故必须独立判断（V8）。
-        opts += ["-qp", str(crf_to_rav1e_qp(crf)), "-speed", str(_RAV1E_SPEED)]
+        opts += ["-qp", str(crf_to_rav1e_qp(crf))]
+        if _RAV1E_SPEED > 0:                  # 默认 native（不下发 -speed）
+            opts += ["-speed", str(_RAV1E_SPEED)]
     elif crf is not None and encoder_supports_crf(codec):
         if c in ("libvpx", "libvpx-vp9") and not bitrate:
             # VP8/VP9 的 CRF 必须配合 -b:v 0 才是纯恒定质量，否则退化成

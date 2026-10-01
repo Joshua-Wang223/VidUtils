@@ -47,6 +47,10 @@ C = _load('eqq_calib', ROOT / 'probe' / 'calibrate_equal_quality.py')
 CRF = _load('vu_convert_crf', ROOT / 'convert_crf.py')
 
 
+def _f(v, spec):
+    return 'NA' if v is None else format(v, spec)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--src', default=str(DEFAULT_SRC))
@@ -90,7 +94,8 @@ def main():
     C.encode(prep, 'libx264', args.crf, anchor_out)
     a = C.measure(anchor_out, prep, nframes, work, with_filters=True, subsample=1)
     print(f'  锚点 libx264 crf {args.crf}: vmaf={a["vmaf"]:.3f} '
-          f'psnr={a["psnr"]:.3f} hvs={a["psnr_hvs"]:.3f}')
+          f'psnr={a["psnr"]:.3f} hvs={a["psnr_hvs"]:.3f} '
+          f'ssim={_f(a["ssim"], ".4f")} xpsnr={_f(a["xpsnr"], ".3f")}')
 
     CRF.set_quality_mode('quality')
     fails, warns, rows = [], [], []
@@ -118,10 +123,13 @@ def main():
             if dh is not None and abs(dh) > TOL_HVS:
                 warns.append(f'{codec}: |ΔPSNR-HVS|={abs(dh):.2f} > {TOL_HVS}（参考，不判红）')
             rows.append({'codec': codec, 'param': p, 'vmaf': t['vmaf'],
+                         'psnr': t.get('psnr'), 'psnr_hvs': t.get('psnr_hvs'),
+                         'ssim': t.get('ssim'), 'xpsnr': t.get('xpsnr'),
                          'd_vmaf': dv, 'd_psnr': dp, 'd_psnr_hvs': dh, 'ok': bool(ok)})
             flag = ('✓' if ok else '✗') + (' ⚠' if w else '')
             print(f'  {flag} {codec:11} q={p:>4}  vmaf={t["vmaf"]:.3f}  '
                   f'ΔVMAF={dv:+.3f}  ΔPSNR={dp:+.3f}  ΔPSNR-HVS={dh:+.3f}  '
+                  f'| ssim={_f(t.get("ssim"), ".4f")} xpsnr={_f(t.get("xpsnr"), ".3f")}  '
                   f'(参考门限 {TOL_PSNR}/{TOL_HVS}，不判红)')
     finally:
         CRF.set_quality_mode('size')

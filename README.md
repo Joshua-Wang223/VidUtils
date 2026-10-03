@@ -2034,10 +2034,13 @@ SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（五格，不�
   **2026-10-03**：等质量表 `QUALITY_MAP` 只覆盖软编、硬编回退 `SIZE_MAP`；**GPU 标定前置已落地** ——
   `calibrate_equal_quality.py` 已扩展支持 NVENC（`-cq` + 可用性探测 + `--require-codecs`/`--expect-av1`
   fail-fast + `_table_range` 回退 + 跨仓态势 `cross_repo_status`）；⚠ VE 侧 harness **已自行维护**
-  （含独有 `--axis`，两仓**有意不同版**）；标定 harness
-  与验收探针已按**跨仓契约 CR-1 统一 `-preset p4`**（与 VE 一致；VU 产品默认亦由 p5 改为 p4）。
-  两份专项执行方案见
+  （含独有 `--axis`，两仓**有意不同版**）；标定 harness 与验收探针已按**跨仓契约 CR-1 统一
+  `-preset p4`**、**CR-2 统一 rc（h264/hevc `-rc vbr_hq`、av1 `-rc vbr`）**（均与 VE 一致；
+  VU 产品默认亦 p5→p4）。两份专项执行方案见
   `Plan/VidUtils_等质量标定_T4专项执行方案.md` 与 `Plan/VidUtils_等质量标定_L40_AV1专项执行方案.md`
+- [GPU 等质量标定（M5）准备已收口，等待硬件](memory/project_gpu_eqquality_readiness.md)
+  —— 准备阶段（harness GPU 支持 / 跨仓契约 CR-1 preset p4 + CR-2 rc / 探针 / 门禁 / 基线）
+  2026-10-04 全部收口；**唯一待办 = 上机跑标定**（T4 与 L40/AV1 分列两份专项方案）
 - [按主题拆分同一文件里的两条改动线（`test/split_diff_by_theme.py`）](memory/project_commit_split_tool.md)
   —— 分提交时的 hunk 手术固化成规则驱动工具（判定顺序 **整块覆盖 → 逐行规则 → 关键词 →
   沿用上一段**，判不出来标 `?` + 告警，绝不静默分错线）；**只出 A 侧补丁**，B 侧 = 工作区减去

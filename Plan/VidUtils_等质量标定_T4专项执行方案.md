@@ -14,8 +14,11 @@
 > `verify/verify_quality_mapping.py` ⑨ 组（跨仓两表逐条相等）。
 > **上机探针**：`probe/verify_nvenc_quality_gpu.py`、`probe/t4_acceptance.py`。
 >
-> **状态（2026-10-03）**：CPU 侧 M1~M4 已完结；本方案是 **M5 硬编上机**的 T4 分支，**全部未开始**
-> （`h264/hevc_nvenc` 的 `-cq` 等质量行尚未标定，硬编当前回退 `SIZE_MAP`）。
+> **状态（2026-10-04）**：**准备阶段已收口，等待 GPU（T4）就位**。CPU 侧 M1~M4 已完结；本方案是
+> **M5 硬编上机**的 T4 分支，上机前的前置工作全部就绪 —— harness GPU 支持（可用性探测 /
+> `--require-codecs` / `_table_range` 回退 / 跨仓态势）、跨仓契约 **CR-1（preset p4）/ CR-2（rc 显式
+> `vbr_hq`/`vbr`）** 已落地、门禁与基线同步。**唯一待办 = 上机跑标定**（`h264/hevc_nvenc` 的 `-cq`
+> 等质量行尚未标定，硬编当前回退 `SIZE_MAP`）。
 
 ---
 

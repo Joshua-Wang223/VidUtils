@@ -25,6 +25,16 @@
 #     · V10 preset：x264→NVENC 方向对齐 ffmpeg 官方/VE 枚举（medium→p4）；GPU→CPU 的
 #       反向降级表**刻意保持** medium 落在 p5（否则两脚本默认请求的编码器不同会让
 #       本门的「逐字相同」破功）——故本门输出不变。判据见 verify 的 ⑨/⑪ 组。
+#   例外（2026-10-04，有意变更，跨仓契约 CR-1）：
+#     · 产品默认 GPU preset 由 p5 改为 p4（与 VE 口径一致，`DEFAULT_PRESET_GPU='p4'`）；
+#       反向降级表把 medium 挪到 p4（`NVENC_TO_X264_PRESET['p4']='medium'`，并保留 p5→medium）
+#       ⇒ 两脚本默认仍都落到 `-preset medium`，本门「逐字相同」不破；但 cpu_v2 的默认 GPU
+#       档由 p5 变 p4 ⇒ `hevc_nvenc 显式 --cq` 一行 `-preset p5 → p4`，基线已同步更新。
+#   例外（2026-10-04，有意变更，跨仓契约 CR-2）：
+#     · h264/hevc NVENC 的**默认 rc 由「不发 -rc」改为 `-rc vbr_hq`**（与 VE 一致；av1 不变）。
+#       ⇒ `hevc_nvenc 显式 --cq` 一行多出 `-rc vbr_hq`（`-cq 20 -b:v 0 -rc vbr_hq -preset p4`），
+#       基线已同步更新。判据见 verify 的 verify_rc_lookahead.py ①/⑩A 与跨仓契约 CR-2。
+#       判据见 verify 的 ⑨/⑪ 组与跨仓契约。
 # 用法: bash test/dump_enc_options.sh > out.txt
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1

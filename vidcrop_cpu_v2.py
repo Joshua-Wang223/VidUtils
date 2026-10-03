@@ -64,7 +64,7 @@ vidcrop_cpu_v2.py – 批量视频裁剪/覆盖缩放工具（CPU 多任务并�
 --cq-ref               N 以 h264_nvenc CQ 为统一基准，按等效表换算到目标编码器
                        （例：--codec hevc_nvenc --cq-ref 26 → -cq 28）；与 --crf/--cq 互斥。
                        与 --rc-mode constqp 并用时换算结果落到 -qp
---preset               编码器预设（默认：CPU 编码器 medium / GPU 编码器 p5，支持 NVENC p1~p7 双向映射）
+--preset               编码器预设（默认：CPU 编码器 medium / GPU 编码器 p4，支持 NVENC p1~p7 双向映射）
 --pix-fmt              输出像素格式（auto / none / 具体格式）
 --audio-codec          音频编码器（默认 copy，可选 aac / libopus 等）
 --audio-bitrate        音频重编码码率（默认 128k）
@@ -237,8 +237,10 @@ X264_TO_SVTAV1_PRESET = {
     "fast": 9, "medium": 8, "slow": 6, "slower": 4, "veryslow": 2,
     "placebo": 0,
 }
+# NVENC → libsvtav1 整数档（GPU→CPU 降级用）。**默认档 p4 落 8**（= medium 等效，
+# 与 X264_TO_SVTAV1_PRESET['medium'] 一致；跨仓契约 CR-1）；p5 保留 8 兼容显式 p5。
 NVENC_TO_SVTAV1_PRESET = {
-    "p1": 12, "p2": 11, "p3": 10, "p4": 9, "p5": 8, "p6": 6, "p7": 2,
+    "p1": 12, "p2": 11, "p3": 10, "p4": 8, "p5": 8, "p6": 6, "p7": 2,
 }
 
 PRESET_VALUES = {
@@ -790,15 +792,15 @@ CODEC_ALIASES: Dict[str, str] = {
 # NVENC preset → libx264 preset（**用于 GPU→CPU 降级的档位等效**，不是 x264→NVENC 的
 # 逆表；两者刻意不对称，原因见下）。
 # ⚠ 必须与 vidcrop_hwaccel.py 的同名表逐字相同（孪生约定）。
-# 取向：把 NVENC 的 7 档均匀铺在 x264 阶梯上（faster 起、veryslow 止），**medium 落在
-# p5** —— 这样两脚本"默认请求编码器不同"（hwaccel=h264_nvenc、cpu_v2=libx264）时，
-# 同一条逻辑请求（无 --codec）都能落到 `-preset medium`，保住 dump_cmd_full 的
-# 「逐字相同」硬约束，也保住既有基线。
+# 取向：**medium 落在默认档 p4**（跨仓契约 CR-1，产品默认 preset 由 p5 改 p4）——这样两
+# 脚本"默认请求编码器不同"（hwaccel=h264_nvenc、cpu_v2=libx264）时，同一条逻辑请求
+# （无 --codec）都能落到 `-preset medium`，保住 dump_cmd_full 的「逐字相同」硬约束与既有基线。
+# ⚠ 保留 p5→medium 以兼容"用户显式 --preset p5"的既有行为（p4/p5 同效）。
 NVENC_TO_X264_PRESET: Dict[str, str] = {
     "p1": "ultrafast",
     "p2": "superfast",
     "p3": "veryfast",
-    "p4": "faster",
+    "p4": "medium",
     "p5": "medium",
     "p6": "slow",
     "p7": "veryslow",
@@ -807,8 +809,8 @@ NVENC_TO_X264_PRESET: Dict[str, str] = {
 # x264 名字 → NVENC 档：**用户显式给 x264 风格 preset 时用**，取值与 Video_Enhancement
 # 的 _PRESET_P_INDEX（ffmpeg 官方枚举）逐档一致。
 # ⚠ 它与上面 NVENC_TO_X264_PRESET **不是互逆**：x264 有 10 档、NVENC 只有 7 档，两端
-# 必须压缩（ultrafast/superfast→p1、faster/fast→p3、veryslow/placebo→p7），且官方
-# 枚举把 medium 放在 p4，而反向降级表把 medium 放在 p5。这是有意为之（见上）。
+# 必须压缩（ultrafast/superfast→p1、faster/fast→p3、veryslow/placebo→p7）。两表都
+# 以 **medium=p4** 为准（反向表另保留 p5→medium 以兼容显式 p5）。有意为之（见上）。
 X264_TO_NVENC_PRESET: Dict[str, str] = {
     "ultrafast": "p1", "superfast": "p1",
     "veryfast": "p2", "faster": "p3", "fast": "p3",
@@ -853,12 +855,12 @@ DEFAULT_REF = 21
 # 保证 "不指定" 和 "auto" 落到同一个编码器。
 DEFAULT_CODEC = "libx264"
 
-# 未指定 --preset 时的默认预设：CPU 软件编码器 medium，GPU 硬件编码器 p5，
+# 未指定 --preset 时的默认预设：CPU 软件编码器 medium，GPU 硬件编码器 p4，
 # libsvtav1 为 8（0~13 整数中速度与质量的平衡点）。
-# ⚠ p5 按 ffmpeg 官方 NVENC 枚举是 **slow**（不是 medium；官方 medium 是 p4）。
-# 保持默认 p5 是既有行为/基线的选择（V10 决策：映射对齐官方，默认档不动）。
+# ⚠ 2026-10-04（跨仓契约 CR-1）：GPU 默认由 p5 改为 **p4**，与 VE 口径一致（VE 生产
+#    `medium→p4`）；p4 也正是 ffmpeg 官方 NVENC 枚举里的 medium 档。
 DEFAULT_PRESET_CPU = "medium"
-DEFAULT_PRESET_GPU = "p5"
+DEFAULT_PRESET_GPU = "p4"
 DEFAULT_PRESET_SVTAV1 = "8"
 
 # ── 码率控制轴：--rc-mode / --qp / --lookahead / --bitrate ────────────────
@@ -872,9 +874,15 @@ _RC_MODES = ("constqp", "vbr", "vbr_hq", "cbr", "cbr_hq", "cbr_ld_hq")
 _RC_MODE_HELP = ("nvenc：" + " ".join(_RC_MODES)
                  + "\n  （constqp=恒定 QP（配 --qp）；vbr / vbr_hq=可变码率；"
                    "cbr / cbr_hq / cbr_ld_hq=恒定码率（配 --bitrate））")
-# 允许与 --bitrate 共存的 rc 模式（含 auto = 不下发 -rc）。constqp 不在其中：它是
+# 允许与 --bitrate 共存的 rc 模式（含 auto：auto 对 NVENC 会下发默认 rc ——
+# h264/hevc=vbr_hq、av1=vbr，见下方 _NVENC_DEFAULT_RC）。constqp 不在其中：它是
 # 恒定 QP 模式、会完全无视 -b:v（T4 实测，见仓库 memory/project_t4_gpu_capabilities.md）。
 _RC_MODES_WITH_BITRATE = ("auto",) + tuple(m for m in _RC_MODES if m != "constqp")
+
+# CR-2（跨仓契约，2026-10-04）：NVENC 的**默认 rc**（与 VE 口径一致）：
+# · h264/hevc → vbr_hq；· av1 → vbr（VE 显式下发 `-rc:v vbr`，VU 同样显式 `-rc vbr`）。
+# 显式 --rc-mode 仍原样下发（不受此表影响）。
+_NVENC_DEFAULT_RC = {"h264_nvenc": "vbr_hq", "hevc_nvenc": "vbr_hq", "av1_nvenc": "vbr"}
 _LOOKAHEAD_RANGE = (0, 250)
 _QP_RANGE = (0, 51)
 _BITRATE_RE = re.compile(r"^\d+(\.\d+)?[kKmM]?$")
@@ -930,7 +938,7 @@ def auto_effort(cpu_count: Optional[int] = None) -> Tuple[int, int]:
 
 
 def default_preset_for(codec: str) -> str:
-    """按编码器类型给出默认预设：GPU 硬件编码器 p5，libsvtav1 固定 8，其余 medium。
+    """按编码器类型给出默认预设：GPU 硬件编码器 p4，libsvtav1 固定 8，其余 medium。
 
     libsvtav1 的默认档**不再随核数漂移**（V9）：SIZE_MAP 里 svtav1 的等效关系是在
     `-preset 8` 下标定的，若默认档随 `auto_effort()` 变（16 核会给 7），等效点就会漂。
@@ -1459,12 +1467,13 @@ def apply_rc_control_args(codec: str,
     c = (codec or "").lower()
     args: List[str] = []
     x265_params: List[str] = []
+    default_rc = _NVENC_DEFAULT_RC.get(c)
 
     def _ignore(what: str, why: str) -> None:
         if warn:
             warn(f"{what} 未生效（{why}），已忽略")
 
-    _want_rc = rc_mode != "auto" or qp is not None
+    _want_rc = rc_mode != "auto" or qp is not None or default_rc is not None
     if _want_rc:
         if c in NVENC_CODECS:
             if qp == 0:
@@ -1474,6 +1483,9 @@ def apply_rc_control_args(codec: str,
             else:
                 if rc_mode != "auto":
                     args += ["-rc", rc_mode]
+                elif default_rc is not None:
+                    # CR-2：auto 默认 rc —— h264/hevc=vbr_hq、av1=vbr（均与 VE 一致）。
+                    args += ["-rc", default_rc]
                 if qp is not None:
                     args += ["-qp", str(qp)]
         elif c in _QP_ONLY_CODECS:
@@ -4190,7 +4202,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     ap.add_argument(
         "--preset",
         default=None,
-        help="编码器预设。默认：CPU 编码器 medium，GPU 编码器 p5。"
+        help="编码器预设。默认：CPU 编码器 medium，GPU 编码器 p4。"
              "支持 libx264 风格 (ultrafast~veryslow) 和 NVENC 风格 (p1~p7)，自动双向映射",
     )
     ap.add_argument(
@@ -4292,7 +4304,7 @@ def validate_and_finalize_args(args: argparse.Namespace) -> None:
         args.codec = DEFAULT_CODEC
         print(f"提示：--codec auto 已解析为 {DEFAULT_CODEC}（本脚本为纯 CPU 路径）。")
 
-    # 未指定 --preset 时按编码器类型取默认：GPU 编码器 p5，CPU 编码器 medium
+    # 未指定 --preset 时按编码器类型取默认：GPU 编码器 p4，CPU 编码器 medium
     if not args.preset:
         args.preset = default_preset_for(args.codec)
 

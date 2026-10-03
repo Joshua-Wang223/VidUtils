@@ -85,12 +85,15 @@ def both(codec, **kw):
     return hw(codec, **kw), cv(codec, **kw)
 
 
-print('── ① 默认（一个都不传）：不得出现任何本轴选项 ──')
+print('── ① 默认（一个都不传）：既有质量参数 + CR-2 的 NVENC 默认 -rc ──')
 # 注：NVENC 的 -cq 现在**默认配 -b:v 0**（纯恒定质量，对照 Video_Enhancement 的
-# `-cq:v N -b:v 0`）——这是 [A] 的有意改动，故 NVENC 的期望里多了 `-b:v 0`；
-# 用户级本轴选项（--rc-mode/--qp/--lookahead/--bitrate）仍一个都不出现。
-for name, (c, _), want in (('hwaccel/hevc_nvenc', hw('hevc_nvenc', cq=20), '-cq 20 -b:v 0'),
-                           ('cpu_v2/hevc_nvenc', cv('hevc_nvenc', cq=20), '-cq 20 -b:v 0'),
+# `-cq:v N -b:v 0`）；且 2026-10-04（跨仓契约 CR-2）NVENC 的 auto 默认 rc **显式下发**：
+# h264/hevc → `-rc vbr_hq`、av1 → `-rc vbr`（与 VE 一致）——故 NVENC 期望里多了 `-b:v 0 -rc ...`。
+# 用户级本轴选项（显式 --rc-mode/--qp/--lookahead/--bitrate）仍一个都不出现。
+for name, (c, _), want in (('hwaccel/hevc_nvenc', hw('hevc_nvenc', cq=20), '-cq 20 -b:v 0 -rc vbr_hq'),
+                           ('cpu_v2/hevc_nvenc', cv('hevc_nvenc', cq=20), '-cq 20 -b:v 0 -rc vbr_hq'),
+                           ('hwaccel/av1_nvenc', hw('av1_nvenc', cq=24), '-cq 24 -b:v 0 -rc vbr'),
+                           ('cpu_v2/av1_nvenc', cv('av1_nvenc', cq=24), '-cq 24 -b:v 0 -rc vbr'),
                            ('hwaccel/libx265', hw('libx265', crf=20), '-crf 20'),
                            ('cpu_v2/libx265', cv('libx265', crf=20), '-crf 20')):
     chk(f'① {name} 默认只有既有质量参数', tokens(c), want)
@@ -257,8 +260,8 @@ chk('⑩ A hwaccel NVENC cq 默认补 -b:v 0',
     '-b:v 0' in tokens(hw('hevc_nvenc', cq=20)[0]), True)
 chk('⑩ A cpu_v2 NVENC cq 默认补 -b:v 0',
     '-b:v 0' in tokens(cv('hevc_nvenc', cq=20)[0]), True)
-chk('⑩ A NVENC cq + --bitrate 不重复下发 -b:v',
-    tokens(hw('hevc_nvenc', cq=20, bitrate='8M')[0]), '-cq 20 -b:v 8M')
+chk('⑩ A NVENC cq + --bitrate 不重复下发 -b:v（仍带 CR-2 默认 -rc）',
+    tokens(hw('hevc_nvenc', cq=20, bitrate='8M')[0]), '-cq 20 -b:v 8M -rc vbr_hq')
 # [B] constqp 下 lookahead 不下发（硬件静默禁用）+ 告知；strict 下抛错。
 for name, (cmd, w) in (('hwaccel', hw('hevc_nvenc', rc_mode='constqp', qp=23, lookahead=40)),
                        ('cpu_v2', cv('hevc_nvenc', rc_mode='constqp', qp=23, lookahead=40))):

@@ -51,7 +51,8 @@
 - [两个裁剪脚本的行为一致约定](project_preset_equivalence.md)
   — 两裁剪脚本的 preset 表必须逐字一致；**2026-09-28（V10）拆成两张刻意不对称的表**：
   `X264_TO_NVENC_PRESET` 按 ffmpeg 官方/VE 枚举（medium→p4）、`NVENC_TO_X264_PRESET`
-  只管 GPU→CPU 降级且保持 medium 落在 p5（否则破坏两脚本命令 lockstep + 基线）；
+  只管 GPU→CPU 降级且保持 **medium 落在默认档 p4**（2026-10-04 CR-1 把默认由 p5 改 p4，
+  降级点随之 p5→p4；另留 p5→medium 兼容显式 p5）——否则破坏两脚本命令 lockstep + 基线；
   降级到 CPU 编码器时基准档取"请求的编码器"的默认值再换算（libsvtav1 的默认档已固定为 8）；概览块只展示最终命令里真正会出现的参数
   （编码器名取策略链第一条、无 `-preset` 的编码器不展示 preset 字段）；
   `--codec auto` 必须解析成具体编码器，透传会得到 `-c:v auto` 使 ffmpeg 报 Unknown encoder（曾发生在 cpu_v2）；
@@ -155,7 +156,8 @@
   `@@` 头重算丢换行与计数少算 —— 后两个被 `git apply --recount` 掩盖，
   只有与 `git diff` 逐字节对比才暴露）
 - [码率控制轴：`--rc-mode` / `--qp` / `--lookahead` / `--bitrate`](project_rate_control_params.md)
-  — 四个参数默认值全部 = **不下发**（不传时命令逐字不变；第三道回归门
+  — 四个参数默认值基本 = **不下发**（**CR-2 例外**：2026-10-04 起 NVENC 的 auto 显式下发默认 rc
+  ——h264/hevc=`-rc vbr_hq`、av1=`-rc vbr`，与 VE 一致；软编不变。其余不传时命令逐字不变；第三道回归门
   `test/dump_enc_options.sh` + `baseline/enc_before.txt` 钉住）；`-rc` / `-qp` 是
   **NVENC 专属**（非 NVENC 告警忽略、hwaccel `strict` 下报错）；`--lookahead` 按编码器映射
   （x264/NVENC 用 `-rc-lookahead`、x265 走 `-x265-params`、vp9/aom 用 `-lag-in-frames`、
@@ -184,7 +186,15 @@
   （h264/hevc `-qp 21` 均带内）⇒ **`QUALITY_MAP` 的 b 与 V1 都无需改**；av1 两格在 T4 必 SKIP
   （编不了）⇒ `-qp` ×4 尺度待 L40/Ada；报告在 `verification_report/`；
   **L40/Ada 交接已备好**：探针 `--expect-av1`（本卡不能编 AV1 即 exit 2，防把 SKIP 当已验）
-  + B/C 组 `-结论` 行（直接给动不动 b / `_QP_SCALE`），步骤见方案 §4.10
+  + B/C 组 `-结论` 行（直接给动不动 b / `_QP_SCALE`），步骤见方案 §4.10；
+  **2026-10-03 追加**：等质量表 `QUALITY_MAP` 只覆盖软编、硬编回退 `SIZE_MAP`；GPU 标定前置已落地 ——
+  `calibrate_equal_quality.py` 已扩展支持 NVENC（`-cq` + 可用性探测 + `--require-codecs`/`--expect-av1`
+  fail-fast + `_table_range` 回退 + **跨仓态势 `cross_repo_status`**，报告落 `cross_repo`/`hw_avail`/`gpu`）；
+  ⚠ VE 侧 harness 尚未同步（态势会报「同版 ✗」）；**CR-1 已落实**：标定 harness 与验收探针
+  `verify_nvenc_quality_gpu.py` 统一 `-preset p4`，且 VU **产品默认 `DEFAULT_PRESET_GPU` 由 p5 改 p4**
+  （两脚本孪生；降级表 `NVENC_TO_X264_PRESET['p4']='medium'`、`NVENC_TO_SVTAV1_PRESET['p4']=8`，
+  基线 `test/baseline/enc_before.txt` 第 12 行同步）；两处探针均有 selftest 守卫；
+  两份专项方案见 `Plan/VidUtils_等质量标定_{T4,L40_AV1}专项执行方案.md`
 
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: 码率控制轴：--rc-mode / --qp / --lookahead / --bitrate（两脚本同名同默认）
-description: 2026-09-22 两个裁剪脚本新增的四个码率控制参数——默认值全部=不下发（不传时命令逐字不变）、-rc/-qp 是 NVENC 专属（非 NVENC 告警忽略、strict 报错）、--lookahead 按编码器映射且默认值三边不同、实测 -x265-params 后者整条覆盖前者故必须与 HDR 元数据合并成同一条；2026-09-28 追加：-qp 不是一套刻度（AV1 是 0~255 qindex、VAAPI 0~52），constqp 必须走 QP 尺度层；av1_nvenc 的 -cq 实为 0~63
+description: 2026-09-22 两个裁剪脚本新增的四个码率控制参数——默认值基本=不下发（CR-2 例外：h264/hevc NVENC 的 auto 默认发 -rc vbr_hq）、-rc/-qp 是 NVENC 专属（非 NVENC 告警忽略、strict 报错）、--lookahead 按编码器映射且默认值三边不同、实测 -x265-params 后者整条覆盖前者故必须与 HDR 元数据合并成同一条；2026-09-28 追加：-qp 不是一套刻度（AV1 是 0~255 qindex、VAAPI 0~52），constqp 必须走 QP 尺度层；av1_nvenc 的 -cq 实为 0~63；2026-10-03 追加：等质量表 QUALITY_MAP 只覆盖软编、硬编回退 SIZE_MAP，GPU 标定的前置是扩展只支持软编的 harness（calibrate_equal_quality.py 聚合段对未落表的 nvenc 会 KeyError）；2026-10-04 追加：CR-2 把 NVENC 默认 rc 改为显式下发（h264/hevc=vbr_hq、av1=vbr，与 VE 一致）
 type: project
 ---
 
@@ -11,7 +11,7 @@ type: project
 
 | 参数 | 取值 | 默认 | 落到命令上 |
 |---|---|---|---|
-| `--rc-mode` | `auto` / `constqp` / `vbr` / `vbr_hq` / `cbr` / `cbr_hq` / `cbr_ld_hq`（可写 `nvenc-<mode>`，裸名也收） | `auto`＝**不下发 `-rc`** | `-rc <mode>` |
+| `--rc-mode` | `auto` / `constqp` / `vbr` / `vbr_hq` / `cbr` / `cbr_hq` / `cbr_ld_hq`（可写 `nvenc-<mode>`，裸名也收） | `auto`＝**NVENC 显式下发默认 rc**（CR-2，2026-10-04）：h264/hevc=`-rc vbr_hq`、av1=`-rc vbr`；软编/VAAPI 不下发 | `-rc <mode>` |
 | `--qp` | 0–51 | `None` | `-qp N`，**只在 `constqp` 下** |
 | `--lookahead` | 0–250 | `None` | 见下面映射表 |
 | `--bitrate` | `8M` / `8000k` / `12000000` | `None` | `-b:v <码率>`，**所有编码器都下发** |
@@ -19,6 +19,8 @@ type: project
 ### 默认值的两层口径（用户明确要求先讲清这个才动手）
 
 - **CLI 层**：四个参数的默认都不表示某个具体值，而是"**不下发任何相关选项**"。
+  ⚠ **2026-10-04（CR-2）有唯一例外**：NVENC 的 `auto` 现在会**显式下发默认 rc**
+  （h264/hevc=`-rc vbr_hq`、av1=`-rc vbr`，与 VE 口径一致，见下方「追加：CR-2」）；软编仍不下发。
 - **实际生效值**＝各编码器/preset 自带的默认，而**它们本来就不同**：
   `-rc` 默认 `-1`（不覆盖 preset，配 `-cq 23` 即"VBR + 目标质量"）；
   `-rc-lookahead` 在 NVENC 上默认 **0（关闭）**、x265 默认 **20**、x264 由自身决定
@@ -240,3 +242,71 @@ fail-fast**——不加它时非 AV1 卡上那几格静默 SKIP（退出码仍 0
 要求本卡能编 AV1，否则 **exit 2**。跑完 B/C 组各多一行 `-结论`（`B-av1-结论` / `C-av1-结论`），
 直接给「动不动 `QUALITY_MAP` 的 b / 动不动 `_QP_SCALE`」的可执行结论；两个纯函数结论已纳入
 `--selftest`（避免首次上机才暴露）。步骤、判读矩阵、与 T4 报告对比见方案 §4.10。
+
+## 追加（2026-10-03）：等质量 GPU 标定的**前置缺口**与两份专项方案
+
+**事实**：等质量表 `QUALITY_MAP`（VMAF 定标，`--quality-mode quality` 默认）**目前只覆盖 5 个软编**；
+硬编（NVENC/QSV/AMF/VT）经 `set_quality_mode()` 的 `_ACTIVE_MAP` **回退读 `SIZE_MAP`（等体积）**。
+GPU 侧（立项 M5）要做的就是把 NVENC 的等质量行补进 `QUALITY_MAP`、解除回退。
+
+⭐ **最值钱的一条（动手前必看）**：为 NVENC 做等质量标定，**不能直接跑旧 harness** ——
+旧版 `probe/calibrate_equal_quality.py` **只支持软编**：`SWEEP` / `QUALITY_FLAG` / `BASE_LOCK`
+均无 nvenc；聚合段的 `CRF.QUALITY_MAP[codec][2:4]` 对**尚未落表**的硬编会 **KeyError**
+（硬编当前回退 `SIZE_MAP`）。**⇒ 已落地修复（2026-10-03，本仓，尚未同步 VE）**：
+
+- 新增 NVENC 档位：`SWEEP` / `BASE_LOCK`（`-b:v 0` + **锁定产品默认 `-preset p5`**）/
+  `QUALITY_FLAG='-cq'`（h264/hevc 量程 0~51、av1 0~63）；
+- **聚合段量程改走 `_table_range()`**：`QUALITY_MAP` → `SIZE_MAP` 回退，修掉 KeyError；
+- **可用性探测** `probe_hw_codec()`：真编一小段、判 `rc==0 且产物非空`（列表里有 ≠ 本机可编，
+  T4 的 av1_nvenc 会「报 -22、0 字节」）；不可用即跳过该档；
+- **fail-fast**：`--require-codecs`（通用）/ `--expect-av1`（= 要求 av1_nvenc 且并入档位，
+  不可编即 **exit 2**，防把 SKIP 当已验）；`--expect-av1` 与 `--quick` 互斥；
+- **指纹**：报告与启动打印加入 `gpu`（nvidia-smi 名字/驱动）、`hw_avail`；
+- **跨仓态势感知** `cross_repo_status()`（新增）：启动即打印并在 `report.json` 落 `cross_repo` ——
+  本仓角色（VU/VE）、对侧仓库路径、**两表 `SIZE_MAP`/`QUALITY_MAP` 是否逐条相等**、
+  对侧 harness 的 md5 是否同版、对侧方案文档位置。`--sibling-root` 可显式指定，缺对侧则优雅降级。
+- 自测 `--selftest` 已补 9 项纯逻辑断言（`_table_range` 回退、`_lock_for`、`_missing_required`、
+  `_cmp_tables`、`_repo_role`），无需 ffmpeg 即可跑。
+
+⚠ **三处仍需注意**：① 本仓 harness 已改，**VE 侧 `Accessory/probe/calibrate_equal_quality.py`
+尚未同步**（跨仓态势会报「同版: ✗」，改 harness 是两仓同源约定）；② **CR-1 已落实**：标定 harness
+与验收探针 `probe/verify_nvenc_quality_gpu.py` 统一 `-preset p4`（与 VE 口径一致），且
+**产品默认 `DEFAULT_PRESET_GPU` 由 p5 改为 p4**（两脚本孪生：`vidcrop_cpu_v2.py` + `vidcrop_hwaccel.py`；
+降级点随之 `NVENC_TO_X264_PRESET['p4']='medium'`、`NVENC_TO_SVTAV1_PRESET['p4']=8`，基线
+`test/baseline/enc_before.txt` 第 12 行 `p5→p4` 已同步；lockstep 不破）；
+③ ⭐ **验收探针 `group_a` 曾直接索引 `crf_mod.QUALITY_MAP`**：2026-09-30 把等体积表改名
+`SIZE_MAP` 后，`QUALITY_MAP` 里不再有 nvenc 行 ⇒ `--quick`/A 组直接 **KeyError: 'h264_nvenc'**。
+已改走 `crf_mod.get_quality_map()`（活动表，默认 quality 模式下硬编回退 SIZE_MAP）。**教训：
+凡按编码器查表，一律走 `get_quality_map()`，别直接索引 `QUALITY_MAP`/`SIZE_MAP`。**
+
+**已落地方案**（供后续直接照抄执行）：
+- `Plan/VidUtils_等质量标定_T4专项执行方案.md` —— `h264_nvenc`/`hevc_nvenc` 的 `-cq` 等质量
+  标定 + constqp 回归 + 硬编门禁解锁 + 真机长视频；
+- `Plan/VidUtils_等质量标定_L40_AV1专项执行方案.md` —— **仅 `av1_nvenc`**（T4 无 AV1 NVENC，
+  `--expect-av1` 会 exit 2）+ AV1 `-qp` 尺度（`_QP_SCALE=3`，**勿改回 4**）回归 + AV1 门禁。
+
+**两条不可忘**：① **T4 与 L40 不可互替**（NVENC 代际不同，h264/hevc 以 T4 为准）；
+② `(lo,hi)` 是 **CQ 轴量程**（av1_nvenc 0~63），**不能**拿它夹 `-qp`（`_QP_LIMITS` 才是 QP 轴）。
+
+## 追加（2026-10-04）：CR-2 —— h264/hevc NVENC 默认 rc 统一到 vbr_hq
+
+**事实**（跨仓契约 CR-2「路线 B」）：为让两仓共享的 `QUALITY_MAP` NVENC 行在同一率失真点标定，
+VU 把 **NVENC 的默认 rc 由 `auto`(=不下发) 改为显式下发**（与 VE 一致）：
+**h264/hevc → `-rc vbr_hq`**；**av1 → `-rc vbr`**（VE 的 harness 与生产 av1 降级路径都显式
+`-rc:v vbr`，VU 现在同样显式下发，连「不下发 vs 显式」这处**形式差异**也消掉）。
+
+- 落地：两脚本各加 `_NVENC_DEFAULT_RC = {'h264_nvenc': 'vbr_hq', 'hevc_nvenc': 'vbr_hq',
+  'av1_nvenc': 'vbr'}`，
+  `apply_rc_control_args()` 在 `rc_mode == 'auto'` 且编码器在表中时下发 `-rc vbr_hq`；
+  显式 `--rc-mode` 仍原样下发；av1/软编不受影响。⚠ 用**裸 `-rc`**（不带 `:v`）：与既有
+  `-rc <mode>` 一致，且 `dump_enc_options.sh` 的 token 正则会丢掉带冒号的形式 ⇒ 裸写法才被回归门覆盖。
+- ⚠ **`--cq 0` 的 constqp 改写要联动**：hwaccel 在 auto 下把 `-cq 0` 改写为
+  `-rc constqp -qp 0 -b:v 0`，此时必须**从 rc_args 里摘掉** auto 默认下发的 `-rc vbr_hq`
+  （以及 `-rc-lookahead`），否则命令里出现两条 `-rc`。cpu_v2 不改写（只告警）→ 其 cq0 仍带 vbr_hq。
+- **VE 侧为何不改生产**：VE h264/hevc 走 ctypes 直连 SDK，`nvenc_sdk` 不支持 `vbr`（会静默当 CONSTQP）
+  ⇒ 只能「VE 保持 vbr_hq、VU 向 VE 靠拢」。
+- 判据/基线同步：`verify/verify_rc_lookahead.py` ①/⑩A、`verify/verify_borrow_enhancement.py` ①、
+  `probe/t4_acceptance.py` A4/A7/A8、`test/baseline/enc_before.txt` 第 12 行；harness `BASE_LOCK`。
+  ⚠ **仓内探针也要跟**：`probe/verify_nvenc_quality_gpu.py::encode_nvenc(mode='cq')` 原来只发
+  `-cq:v N -b:v 0`（跑在 preset 默认 VBR，≠ 生产的 vbr_hq）⇒ 已补 `_cq_rc()`（h264/hevc=vbr_hq、
+  av1=vbr）；否则验收探针会在**与生产不同的率失真点**上判 PASS/FAIL。

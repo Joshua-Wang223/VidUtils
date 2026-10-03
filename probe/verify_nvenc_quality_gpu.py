@@ -55,6 +55,10 @@ T4 与 L40 的差别（脚本自动判）
     · 码率比（目标码率 / libx264 crf21 码率）落在 RATE_PASS = (0.65, 1.50)
     · ΔPSNR（目标 − 软编基准）单向下探 ≤ TOL_PSNR = 1.5 dB（过配不罚）
     · VMAF（有 libvmaf 时）：差 ≤ 2.0
+    · NVENC 统一 `-preset p4`（跨仓契约 CR-1，与 VE 一致，也与标定 harness 一致）——
+      ⚠ 2026-10-04 由 p5 统一回 p4；p5 口径的旧报告（如 T4 20260928 之后的临时跑）数字不可逐条对比
+    · 恒定质量分支（`-cq`）显式带 rc（CR-2，与 VE/标定 harness 一致）：h264/hevc=`-rc vbr_hq`、
+      av1=`-rc vbr`；旧报告（无 `-rc`）的码率比/ΔPSNR 与新跑不可逐条对比
 
 结论行（av1 可用时才出现，L40/Ada 上照它决定动不动表）
 ──────────────────────────────────────────────────────
@@ -87,9 +91,22 @@ TOL_VMAF = 2.0
 RATE_PASS = (0.65, 1.50)
 RATE_WARN = (0.55, 1.65)
 
+# NVENC 统一用 **`-preset p4`**（跨仓契约 CR-1，与 VE 口径一致），与标定 harness
+# `probe/calibrate_equal_quality.py` 的 `BASE_LOCK` 保持一致；否则同 `-cq` 下率失真曲线不同、
+# 等效点与码率比会漂。⚠ 两处探针须同时改（2026-10-04 由 p5 统一回 p4，见跨仓契约）。
+NVENC_PRESET = 'p4'
+
 # 上机目标：h264 / hevc 有 VE 的实测支撑，av1 是本次要补的那条
 NVENC_CODECS = ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc')
-# QUALITY_MAP 当前值（crf_ref=21 下的 CQ），用于和实测对比
+
+
+# CR-2（跨仓契约，2026-10-04）：恒定质量分支（`-cq`）的 rc 必须与生产 / 标定 harness 一致，
+# 否则同 `-cq` 的率失真点不同（等效点/码率比会漂）：h264/hevc → `vbr_hq`；av1 → `vbr`。
+def _cq_rc(codec: str) -> str:
+    return 'vbr' if codec == 'av1_nvenc' else 'vbr_hq'
+# 表内值（crf_ref=21 下的 CQ），用于和实测对比。
+# ⚠ 默认 `quality` 模式下硬编未落 QUALITY_MAP ⇒ 回退 SIZE_MAP，故此处数值取自 SIZE_MAP。
+#    取表统一走 crf_mod.get_quality_map()（活动表），**不要**直接索引 QUALITY_MAP（会 KeyError）。
 CQ_TABLE_AT_21 = {'h264_nvenc': 26, 'hevc_nvenc': 28, 'av1_nvenc': 27}
 NAIVE_CQ = 21           # 修复前：基准轴数值被原样当 CQ 下发
 
@@ -169,12 +186,16 @@ def encode_soft(src: Path, out: Path, crf=21, codec='libx264') -> tuple[int, str
 
 
 def encode_nvenc(src: Path, out: Path, codec: str, mode: str, value: int) -> tuple[int, str]:
-    """mode='cq' → `-cq:v N -b:v 0`；mode='qp' → `-rc constqp -qp N -b:v 0`。"""
+    """mode='cq' → `-rc {vbr_hq|vbr} -cq:v N -b:v 0`；mode='qp' → `-rc constqp -qp N -b:v 0`。
+
+    `-cq` 分支的 rc 按 CR-2 与生产 / 标定 harness 对齐（h264/hevc=`vbr_hq`、av1=`vbr`，
+    见 `_cq_rc`），否则同 `-cq` 的率失真点不同。
+    """
     cmd = ['ffmpeg', '-nostdin', '-y', '-hide_banner', '-loglevel', 'error',
-           '-i', str(src), '-an', '-c:v', codec, '-preset', 'p4',
+           '-i', str(src), '-an', '-c:v', codec, '-preset', NVENC_PRESET,
            '-pix_fmt', 'yuv420p']
     if mode == 'cq':
-        cmd += ['-cq:v', str(value), '-b:v', '0']
+        cmd += ['-rc', _cq_rc(codec), '-cq:v', str(value), '-b:v', '0']
     else:
         cmd += ['-rc', 'constqp', '-qp', str(value), '-b:v', '0']
     cmd += [str(out)]
@@ -275,7 +296,7 @@ def av1_cq_conclusion(st: str, ratio: float, d: float, table_v: int) -> tuple[st
 
 def group_a(res: Result, crf_mod) -> None:
     print('\n【A】量程与换算（纯逻辑，本机可跑）')
-    Q = crf_mod.QUALITY_MAP
+    Q = crf_mod.get_quality_map()
 
     # A1: 表内量程 vs ffmpeg 声明量程
     # 期望的规格范围（来自 NVIDIA 文档/补丁）：
@@ -503,6 +524,10 @@ def selftest() -> int:
     """只验装置：量程解析 / 判词 / 报告结构。不动 ffmpeg 编码。"""
     print('── selftest ──')
     bad = []
+    if NVENC_PRESET != 'p4':
+        bad.append("NVENC_PRESET 必须为 p4（跨仓契约 CR-1，与 VE 一致；同标定 harness 的 BASE_LOCK）")
+    if (_cq_rc('av1_nvenc'), _cq_rc('h264_nvenc'), _cq_rc('hevc_nvenc')) != ('vbr', 'vbr_hq', 'vbr_hq'):
+        bad.append("_cq_rc 的 CR-2 映射错（应为 av1=vbr、h264/hevc=vbr_hq）")
     sample = """  -cq                <float>      E..V....... Set target quality level (0 to 63, 0 means automatic) (from 0 to 63) (default 0)
   -qp                <int>        E..V....... Constant quantization parameter rate control method (from -1 to 255) (default -1)
 """

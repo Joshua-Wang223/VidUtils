@@ -90,9 +90,9 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
       --cq-ref N       以 h264_nvenc CQ 为统一基准，按等效表换算
     等效表见同目录 convert_crf.py；例：--crf-ref 21 → libvpx-vp9 -crf 27、
     libsvtav1 -crf 27、libx265 -crf 24、hevc_nvenc -cq 28
-  • 默认值：h264_nvenc + --cq 23 + --preset p5；无 NVENC 自动降级为
+  • 默认值：h264_nvenc + --cq 23 + --preset p4；无 NVENC 自动降级为
     libx264 + --crf 21 + --preset medium（preset 按"请求的编码器"的默认档换算到
-    各策略实际用的编码器，降级前后档位等效，如 av1_nvenc p5 → libsvtav1 8）
+    各策略实际用的编码器，降级前后档位等效，如 av1_nvenc p4 → libsvtav1 8）
   • 速度档位自动取值：libaom-av1 的 -cpu-used 与 libsvtav1 的 -preset 按 CPU 核数
     自动选档（ffmpeg 给 libaom-av1 的默认 -cpu-used=1 慢到不可用，实测仅 1fps）
   • librav1e 没有 -crf（实测传 -crf 只会被 ffmpeg 静默忽略），自动换算为等效 -qp
@@ -105,7 +105,7 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
   python vidcrop_hwaccel.py \\
       --input video.mp4 --output out.mp4 \\
       --output-width 1280 --output-height 720 \\
-      --codec hevc_nvenc --cq 20 --preset p5
+      --codec hevc_nvenc --cq 20 --preset p4
 
   # 2) 批量批量 · cover 模式（等比缩放+裁剪，保持目录结构）
   python vidcrop_hwaccel.py \\
@@ -117,7 +117,7 @@ vidcrop_hwaccel.py — 基于 FFmpeg 的视频批量裁剪工具（硬件加速�
   python vidcrop_hwaccel.py \\
       --input ./raw --output ./out --recursive \\
       --output-width 1920 --output-height 1080 \\
-      --codec av1_nvenc --cq 24 --preset p5
+      --codec av1_nvenc --cq 24 --preset p4
 
   # 2c) AV1 · CPU 编码（libsvtav1；不可用 GPU 时 av1_nvenc 也会自动降级到这里）
   python vidcrop_hwaccel.py \\
@@ -346,22 +346,24 @@ X264_TO_SVTAV1_PRESET = {
     'fast': 9, 'medium': 8, 'slow': 6, 'slower': 4, 'veryslow': 2,
     'placebo': 0,
 }
+# NVENC → libsvtav1 整数档（GPU→CPU 降级用）。**默认档 p4 落 8**（= medium 等效，
+# 与 X264_TO_SVTAV1_PRESET['medium'] 一致；跨仓契约 CR-1）；p5 保留 8 兼容显式 p5。
 NVENC_TO_SVTAV1_PRESET = {
-    'p1': 12, 'p2': 11, 'p3': 10, 'p4': 9, 'p5': 8, 'p6': 6, 'p7': 2,
+    'p1': 12, 'p2': 11, 'p3': 10, 'p4': 8, 'p5': 8, 'p6': 6, 'p7': 2,
 }
 
 # NVENC preset → libx264 preset（**用于 GPU→CPU 降级的档位等效**，不是 x264→NVENC 的
 # 逆表；两者刻意不对称，原因见下）。
 # ⚠ 必须与 vidcrop_cpu_v2.py 的同名表逐字相同（孪生约定）。
-# 取向：把 NVENC 的 7 档均匀铺在 x264 阶梯上（faster 起、veryslow 止），**medium 落在
-# p5** —— 这样两脚本"默认请求编码器不同"（hwaccel=h264_nvenc、cpu_v2=libx264）时，
-# 同一条逻辑请求（无 --codec）都能落到 `-preset medium`，保住 dump_cmd_full 的
-# 「逐字相同」硬约束，也保住既有基线。
+# 取向：**medium 落在默认档 p4**（跨仓契约 CR-1，产品默认 preset 由 p5 改 p4）——这样两
+# 脚本"默认请求编码器不同"（hwaccel=h264_nvenc、cpu_v2=libx264）时，同一条逻辑请求
+# （无 --codec）都能落到 `-preset medium`，保住 dump_cmd_full 的「逐字相同」硬约束与既有基线。
+# ⚠ 保留 p5→medium 以兼容"用户显式 --preset p5"的既有行为（p4/p5 同效）。
 NVENC_TO_X264_PRESET = {
     'p1': 'ultrafast',
     'p2': 'superfast',
     'p3': 'veryfast',
-    'p4': 'faster',
+    'p4': 'medium',
     'p5': 'medium',
     'p6': 'slow',
     'p7': 'veryslow',
@@ -370,8 +372,8 @@ NVENC_TO_X264_PRESET = {
 # x264 名字 → NVENC 档：**用户显式给 x264 风格 preset 时用**，取值与 Video_Enhancement
 # 的 _PRESET_P_INDEX（ffmpeg 官方枚举）逐档一致。
 # ⚠ 它与上面 NVENC_TO_X264_PRESET **不是互逆**：x264 有 10 档、NVENC 只有 7 档，两端
-# 必须压缩（ultrafast/superfast→p1、faster/fast→p3、veryslow/placebo→p7），且官方
-# 枚举把 medium 放在 p4，而反向降级表把 medium 放在 p5。这是有意为之（见上）。
+# 必须压缩（ultrafast/superfast→p1、faster/fast→p3、veryslow/placebo→p7）。两表都
+# 以 **medium=p4** 为准（反向表另保留 p5→medium 以兼容显式 p5）。有意为之（见上）。
 X264_TO_NVENC_PRESET = {
     'ultrafast': 'p1', 'superfast': 'p1',
     'veryfast': 'p2', 'faster': 'p3', 'fast': 'p3',
@@ -385,12 +387,12 @@ X264_TO_NVENC_PRESET = {
 # 换算结果：libx264→21 / libx265→24 / h264_nvenc→26 / hevc_nvenc→28。
 DEFAULT_REF = 21
 
-# 未指定 --preset 时的默认预设：CPU 软件编码器 medium，GPU 硬件编码器 p5，
+# 未指定 --preset 时的默认预设：CPU 软件编码器 medium，GPU 硬件编码器 p4，
 # libsvtav1 为 8（0~13 整数中速度与质量的平衡点）。
-# ⚠ p5 按 ffmpeg 官方 NVENC 枚举是 **slow**（不是 medium；官方 medium 是 p4）。
-# 保持默认 p5 是既有行为/基线的选择（V10 决策：映射对齐官方，默认档不动）。
+# ⚠ 2026-10-04（跨仓契约 CR-1）：GPU 默认由 p5 改为 **p4**，与 VE 口径一致（VE 生产
+#    `medium→p4`）；p4 也正是 ffmpeg 官方 NVENC 枚举里的 medium 档。
 DEFAULT_PRESET_CPU = 'medium'
-DEFAULT_PRESET_GPU = 'p5'
+DEFAULT_PRESET_GPU = 'p4'
 DEFAULT_PRESET_SVTAV1 = '8'
 
 # ── 码率控制轴：--rc-mode / --qp / --lookahead / --bitrate ────────────────
@@ -403,10 +405,19 @@ _RC_MODES = ('constqp', 'vbr', 'vbr_hq', 'cbr', 'cbr_hq', 'cbr_ld_hq')
 _RC_MODE_HELP = ('nvenc：' + ' '.join(_RC_MODES)
                  + '\n  （constqp=恒定 QP（配 --qp）；vbr / vbr_hq=可变码率；'
                    'cbr / cbr_hq / cbr_ld_hq=恒定码率（配 --bitrate））')
-# 允许与 --bitrate 共存的 rc 模式。含 auto（= 不下发 -rc，由 preset 决定的 VBR）。
+# 允许与 --bitrate 共存的 rc 模式。含 auto（auto 对 NVENC 会下发默认 rc：
+# h264/hevc=`vbr_hq`、av1=`vbr`，见下方 `_NVENC_DEFAULT_RC`）。
 # constqp 不在其中：它是恒定 QP 模式、**会完全无视 -b:v**（T4 实测，见仓库
 # memory/project_t4_gpu_capabilities.md），共存等于静默丢掉用户给的码率 → CLI 层报错。
 _RC_MODES_WITH_BITRATE = ('auto',) + tuple(m for m in _RC_MODES if m != 'constqp')
+
+# CR-2（跨仓契约，2026-10-04）：NVENC 的**默认 rc**（与 VE 口径一致，否则两仓共享的
+# QUALITY_MAP NVENC 行会在不同率失真点标定 ⇒ ⑨ 组红）：
+# · h264/hevc → `vbr_hq`（VE 生产即 vbr_hq）；
+# · av1 → `vbr`（VE 的 harness 与生产 av1 降级路径都显式下发 `-rc:v vbr`；VU 现在同样显式
+#   下发 `-rc vbr`，把「不下发 vs 显式」这处**形式差异**也消掉）。
+# 显式 `--rc-mode` 仍原样下发（不受此表影响）。
+_NVENC_DEFAULT_RC = {'h264_nvenc': 'vbr_hq', 'hevc_nvenc': 'vbr_hq', 'av1_nvenc': 'vbr'}
 # lookahead 范围：x264 的上限就是 250；NVENC / x265 无上限，250 足够且统一。
 _LOOKAHEAD_RANGE = (0, 250)
 # --qp 是**真实 QP**（基准轴，非 CQ 轴）；量程随编码器不同（见 qp_range()）
@@ -422,7 +433,7 @@ _QP_HINT = '真实 QP（与 x264 QP 同尺度，非 --cq 的 CQ 轴）；量程�
 # [借鉴1] NVENC 策略失败时的 preset 降档重试表：只降不升，p4 及以下不再重试。
 # 对照 Video_Enhancement 的 SDK 路径——InitializeEncoder 返回 code=8（驱动不认该
 # preset）时降到 p4 重试一次、RC/LA 不变（见其 main.py _setup_level1_nvenc）。
-# p4 是实测在 T4/旧驱动上被接受的安全档。默认档是 p5，故 p5/p6/p7 都映射到 p4。
+# p4 是实测在 T4/旧驱动上被接受的安全档。默认档已是 p4；用户显式给 p5/p6/p7 失败时降到 p4 重试。
 _NVENC_PRESET_RETRY = {'p5': 'p4', 'p6': 'p4', 'p7': 'p4'}
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1322,7 +1333,7 @@ def check_container_compatibility(ext: str, codec: str) -> bool:
 
 
 def default_preset_for(codec: str) -> str:
-    """按编码器类型给出默认预设：GPU 硬件编码器 p5，libsvtav1 固定 8，其余 medium。
+    """按编码器类型给出默认预设：GPU 硬件编码器 p4，libsvtav1 固定 8，其余 medium。
 
     libsvtav1 的默认档**不再随核数漂移**（V9）：SIZE_MAP 里 svtav1 的等效关系是在
     `-preset 8` 下标定的，若默认档随 `auto_effort()` 变（16 核会给 7），等效点就会漂。
@@ -1340,13 +1351,13 @@ def strategy_preset(user_preset: Optional[str], requested_codec: str,
     用户显式给了 --preset 就按本策略的编码器换算。没给时，基准档位取
     **用户请求的那个编码器**的默认值，再换算到本策略的编码器 —— 这样降级前后
     的档位是等效的：
-        h264_nvenc(默认 p5) → libx264  得到 medium
-        av1_nvenc (默认 p5) → libsvtav1 得到 8
+        h264_nvenc(默认 p4) → libx264  得到 medium
+        av1_nvenc (默认 p4) → libsvtav1 得到 8
     若反过来按"本策略编码器自己的默认值"取，档位会随编码器漂移（libsvtav1 的
     默认值还会随 CPU 核数变），用户拿到的速度/质量就与请求的不等价了。
 
     --codec auto 是例外：它没有"请求的编码器"可言，策略链本身就是自适应的
-    （NVENC 策略取 p5、CPU 策略取 medium），故仍按本策略编码器取默认值。
+    （NVENC 策略取 p4、CPU 策略取 medium），故仍按本策略编码器取默认值。
 
     由默认档位触发的换算不打印提示（用户没写过那个 --preset）；实际生效值由
     任务概览块统一展示，避免逐文件重复刷屏。quiet=True 则连用户显式给的
@@ -3596,6 +3607,7 @@ def apply_rc_control_args(codec: str,
     c = (codec or '').lower()
     args: List[str] = []
     x265_params: List[str] = []
+    default_rc = _NVENC_DEFAULT_RC.get(c)
 
     def _ignore(what: str, why: str) -> None:
         msg = f'{what} 未生效（{why}），已忽略'
@@ -3604,7 +3616,7 @@ def apply_rc_control_args(codec: str,
         if warn:
             warn(msg)
 
-    _want_rc = rc_mode != 'auto' or qp is not None
+    _want_rc = rc_mode != 'auto' or qp is not None or default_rc is not None
     if _want_rc:
         if c in NVENC_CODECS:
             if qp == 0:
@@ -3614,6 +3626,9 @@ def apply_rc_control_args(codec: str,
             else:
                 if rc_mode != 'auto':
                     args += ['-rc', rc_mode]
+                elif default_rc is not None:
+                    # CR-2：auto 默认 rc —— h264/hevc=`vbr_hq`、av1=`vbr`（均与 VE 一致）。
+                    args += ['-rc', default_rc]
                 if qp is not None:
                     args += ['-qp', str(qp)]
         elif c in _QP_ONLY_CODECS:
@@ -4313,10 +4328,14 @@ def build_ffmpeg_cmd(
             # [借鉴2] 改写后**有效模式是 constqp**，而 constqp 下 NVENC 静默禁用
             # lookahead（对照 Video_Enhancement：crf=0 强制 constqp 且 LA=0）。
             # apply_rc_control_args 看到的仍是用户给的 rc_mode=auto，已按非 constqp
-            # 下发了 `-rc-lookahead` —— 那会是一条**不生效**的选项，故就地摘掉并说明。
-            if '-rc-lookahead' in rc_args:
-                _i = rc_args.index('-rc-lookahead')
-                del rc_args[_i:_i + 2]
+            # 下发了 `-rc-lookahead`（以及 CR-2 新增的默认 `-rc vbr_hq`）—— 它们与
+            # 本次 constqp 改写冲突/不生效，故就地摘掉并说明。
+            _had_la = '-rc-lookahead' in rc_args
+            for _flag in ('-rc-lookahead', '-rc'):
+                while _flag in rc_args:
+                    _i = rc_args.index(_flag)
+                    del rc_args[_i:_i + 2]
+            if _had_la:
                 _warn(f'--lookahead {lookahead} 未生效（--cq 0 已改写为 NVENC constqp'
                       f' 最高质量档，该模式静默禁用 lookahead），已忽略')
         else:
@@ -5279,7 +5298,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
   h265_nvenc → hevc_nvenc,  x264 → libx264,  x265 → libx265
 
 preset 映射（NVENC ↔ libx264 自动转换）：
-  NVENC:   p1(fastest) ~ p7(slowest)，默认 slow（自动映射为 p5）
+  NVENC:   p1(fastest) ~ p7(slowest)，默认 medium（p4）
   libx264: ultrafast ~ veryslow
 
 自定义 FFmpeg 参数：
@@ -5332,7 +5351,7 @@ preset 映射（NVENC ↔ libx264 自动转换）：
 
     # 视频编码
     parser.add_argument('--codec', default='h264_nvenc',
-                        help='视频编码器（默认 h264_nvenc + --cq 23 + --preset p5；'
+                        help='视频编码器（默认 h264_nvenc + --cq 23 + --preset p4；'
                              '无 NVENC 时自动降级为 libx264 + --crf 21 + --preset medium。'
                              '可用 auto；支持别名）。'
                              'H.264/HEVC：libx264/libx265、h264_nvenc/hevc_nvenc；'
@@ -5395,7 +5414,7 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                              'enableAQ/enableTemporalAQ）。默认关闭；非 NVENC 策略会忽略'
                              '并告警（逐策略判断，因为降级策略的编码器可能不是 NVENC）')
     parser.add_argument('--preset', default=None,
-                        help='编码器预设。默认：CPU 编码器 medium，GPU 编码器 p5；'
+                        help='编码器预设。默认：CPU 编码器 medium，GPU 编码器 p4；'
                              'NVENC（p1~p7）与 libx264 风格（ultrafast~veryslow）自动双向映射')
     parser.add_argument('--threads', type=int, default=0, metavar='N',
                         help='FFmpeg 编码线程数。0=自动：本脚本**串行**处理文件，'
@@ -5807,8 +5826,8 @@ def main() -> int:
     args.codec = normalize_codec_name(args.codec)
 
     # --preset 未指定时保持 None，由 process_file 按「请求的编码器」的默认档位换算到
-    # 每条策略实际用的编码器（见 strategy_preset）：既让 GPU 策略拿到 p5、降级到
-    # libx264 时得到 medium，也让 av1_nvenc 降级到 libsvtav1 时得到 p5 的等效档 8。
+    # 每条策略实际用的编码器（见 strategy_preset）：既让 GPU 策略拿到 p4、降级到
+    # libx264 时得到 medium，也让 av1_nvenc 降级到 libsvtav1 时得到 p4 的等效档 8。
 
     # 归一化容器扩展名
     container_ext = args.container
@@ -5969,7 +5988,7 @@ def main() -> int:
     _eff_cuda_scale = bool(_primary.get('cuda_scale'))
     _eff_hwupload = bool(_primary.get('hwupload'))
     # 未指定 --preset 时按"请求的编码器"的默认档位换算，降级前后档位等效
-    # （见 strategy_preset），避免概览显示 p5 而命令里却是 libsvtav1 的 8。
+    # （见 strategy_preset），避免概览显示 p4 而命令里却是 libsvtav1 的 8。
     # quiet：换算提示留给逐策略那次打印，概览块只展示结果值。
     _shown_preset = strategy_preset(args.preset, args.codec, _effective_codec,
                                     quiet=True)

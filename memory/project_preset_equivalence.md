@@ -1,6 +1,6 @@
 ---
 name: 两个裁剪脚本的行为一致约定（preset 换算、概览展示、--codec auto 解析、--mode 语义与校验）
-description: vidcrop_hwaccel.py 与 vidcrop_cpu_v2.py 的 preset 表必须逐字一致（2026-09-28 起是两张刻意不对称的表：x264→NVENC 按官方枚举、NVENC→x264 只管降级且 medium 落在 p5）；降级到 CPU 编码器时 preset 要按"请求的编码器"换算、libsvtav1 默认档固定为 8；概览块只展示最终命令里真正会出现的参数；--codec auto 必须解析成具体编码器而不能透传；--mode（含 crop-cover）的语义、参数校验、同尺寸跳过判定也必须两边一样
+description: vidcrop_hwaccel.py 与 vidcrop_cpu_v2.py 的 preset 表必须逐字一致（2026-10-04 起是两张刻意不对称的表：x264→NVENC 按官方枚举、NVENC→x264 只管降级且 medium 落在默认档 p4，跨仓契约 CR-1）；降级到 CPU 编码器时 preset 要按"请求的编码器"换算、libsvtav1 默认档固定为 8；概览块只展示最终命令里真正会出现的参数；--codec auto 必须解析成具体编码器而不能透传；--mode（含 crop-cover）的语义、参数校验、同尺寸跳过判定也必须两边一样
 type: project
 ---
 
@@ -8,19 +8,21 @@ type: project
 
 preset 表在 `vidcrop_hwaccel.py` 与 `vidcrop_cpu_v2.py` 里各有一份，**两处必须相同**。
 2026-09-16 曾发现它们错位一档（p4/p5/p6 分别 medium/slow/slower vs faster/medium/slow），
-已按 cpu_v2 对齐。**2026-09-28（V10）拆成两张方向不同、刻意不对称的表**：
+已按 cpu_v2 对齐。**2026-09-28（V10）拆成两张方向不同、刻意不对称的表**；
+**2026-10-04（跨仓契约 CR-1）产品默认 GPU preset 由 p5 改为 p4**，降级点随之从 p5 挪到 p4：
 
 | 表 | 方向 | 取值 |
 |---|---|---|
 | `X264_TO_NVENC_PRESET` | 用户给 x264 名 → NVENC pN | **ffmpeg 官方枚举**，与 VE 的 `_PRESET_P_INDEX` 逐档一致：`medium→p4`、`slow→p5`、两端压缩（ultrafast/superfast→p1、faster/fast→p3、veryslow/placebo→p7） |
-| `NVENC_TO_X264_PRESET` | pN → x264 名（**只用于 GPU→CPU 降级**） | 把 7 档均匀铺在 x264 阶梯上，**medium 落在 p5**（`p1 ultrafast … p5 medium … p7 veryslow`） |
+| `NVENC_TO_X264_PRESET` | pN → x264 名（**只用于 GPU→CPU 降级**） | 7 档铺在 x264 阶梯上，**medium 落在默认档 p4**（`p1 ultrafast … p4 medium … p7 veryslow`）；另**保留 `p5→medium`** 以兼容"用户显式给 `--preset p5`"的既有行为。⚠ 姊妹 `NVENC_TO_SVTAV1_PRESET['p4']` 同轮由 9 改 8（medium 等效） |
 
 **Why:** 两张表**不是互逆**，是刻意的：
 - x264→NVENC 必须跟 ffmpeg/VE 一致（用户按官方习惯写 `--preset medium` 应得 p4）；
-- GPU→CPU 降级表若也改成 `p5→slow`，会破坏 `test/dump_cmd_full.sh` 的
+- 降级表必须让**默认档**落到 `medium`，否则破坏 `test/dump_cmd_full.sh` 的
   「两脚本同一条逻辑请求 → 命令逐字相同」硬约束——因为**两脚本默认请求的编码器不同**
-  （hwaccel=`h264_nvenc`→默认 p5，cpu_v2=`libx264`→默认 medium），正是靠 `p5→medium`
-  两者才都落到 `-preset medium`。同理也保住了 `test/baseline/enc_before.txt`。
+  （hwaccel=`h264_nvenc`、cpu_v2=`libx264`）。2026-10-04（CR-1）把产品默认由 p5 改为 p4 后，
+  正是靠 `p4→medium` 两者才都落到 `-preset medium`。同理也保住了 `test/baseline/enc_before.txt`
+  （该文件第 12 行已随之由 `-preset p5` 更新为 `-preset p4`）。
 **How to apply:** 动任一表都要同步另一脚本 + 复查 README 的 `--preset` 行 + 跑
 `dump_cmd_full.sh`（lockstep）与 `dump_enc_options.sh`（基线）。VE 侧会实时改动
 （`Video_Enhancement/external/realesrgan_video/nvenc_sdk.py`），判据 ⑨ 的 `[9-preset]`
@@ -33,8 +35,8 @@ preset 表在 `vidcrop_hwaccel.py` 与 `vidcrop_cpu_v2.py` 里各有一份，**�
 编码器"的默认值，再换算到实际编码器**（见 `vidcrop_hwaccel.py` 的 `strategy_preset()`），
 而不是取目标编码器自己的默认值：
 
-- `h264_nvenc`(默认 p5) → `libx264`  得 `medium`
-- `av1_nvenc` (默认 p5) → `libsvtav1` 得 `8`
+- `h264_nvenc`(默认 p4) → `libx264`  得 `medium`
+- `av1_nvenc` (默认 p4) → `libsvtav1` 得 `8`
 
 **Why:** 取目标编码器自己的默认值会让档位漂移。
 ⚠ **2026-09-28（V9）改了一条**：`libsvtav1` 的默认档**不再按 CPU 核数变**，

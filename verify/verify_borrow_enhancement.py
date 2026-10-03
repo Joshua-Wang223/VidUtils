@@ -90,11 +90,13 @@ def cli(script, extra):
     return p.returncode, (p.stdout + p.stderr)
 
 
-print('── ① [A] NVENC 的 -cq 默认配 -b:v 0（纯恒定质量）──')
-chk('① hwaccel NVENC cq 补 -b:v 0', tokens(hw('hevc_nvenc', cq=20)[0]), '-cq 20 -b:v 0')
-chk('① cpu_v2  NVENC cq 补 -b:v 0', tokens(cv('hevc_nvenc', cq=20)[0]), '-cq 20 -b:v 0')
-chk('① NVENC cq + --bitrate 不补 -b:v 0（不重复 -b:v）',
-    tokens(hw('hevc_nvenc', cq=20, bitrate='8M')[0]), '-cq 20 -b:v 8M')
+print('── ① [A] NVENC 的 -cq 默认配 -b:v 0（纯恒定质量）+ CR-2 默认 -rc vbr_hq ──')
+chk('① hwaccel NVENC cq 补 -b:v 0（+ CR-2 默认 -rc vbr_hq）',
+    tokens(hw('hevc_nvenc', cq=20)[0]), '-cq 20 -b:v 0 -rc vbr_hq')
+chk('① cpu_v2  NVENC cq 补 -b:v 0（+ CR-2 默认 -rc vbr_hq）',
+    tokens(cv('hevc_nvenc', cq=20)[0]), '-cq 20 -b:v 0 -rc vbr_hq')
+chk('① NVENC cq + --bitrate 不补 -b:v 0（不重复 -b:v；仍带 CR-2 默认 -rc）',
+    tokens(hw('hevc_nvenc', cq=20, bitrate='8M')[0]), '-cq 20 -b:v 8M -rc vbr_hq')
 chk('① 非 NVENC（libx264）不受影响', tokens(hw('libx264', crf=20)[0]), '-crf 20')
 
 print('── ② [B] constqp 下不下发无效的 -rc-lookahead ──')

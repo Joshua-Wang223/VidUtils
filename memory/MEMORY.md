@@ -196,6 +196,8 @@
   （两脚本孪生；降级表 `NVENC_TO_X264_PRESET['p4']='medium'`、`NVENC_TO_SVTAV1_PRESET['p4']=8`，
   基线 `test/baseline/enc_before.txt` 第 12 行同步）；两处探针均有 selftest 守卫；
   两份专项方案见 `Plan/VidUtils_等质量标定_{T4,L40_AV1}专项执行方案.md`
+  **2026-10-05 追加**：FFmpeg 9.0 移除 `vbr_hq`/`cbr_hq`，NVENC 默认 rc 统一为 `vbr`，
+  所有脚本/探针/门禁/回归/基线/文档已同步；cbr_hq 同理处理；不引入 -tune hq/-multipass fullres
 - [GPU 等质量标定（M5）准备已收口，等待硬件](project_gpu_eqquality_readiness.md)
   — 准备阶段（harness GPU 支持 / 跨仓契约 CR-1 preset p4 + CR-2 rc / 探针 / 门禁 / 基线）
   2026-10-04 全部收口并提交；**唯一待办 = 上机跑标定**；T4 与 L40(AV1) 分列两份专项方案，

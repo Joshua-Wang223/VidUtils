@@ -90,13 +90,13 @@ def cli(script, extra):
     return p.returncode, (p.stdout + p.stderr)
 
 
-print('── ① [A] NVENC 的 -cq 默认配 -b:v 0（纯恒定质量）+ CR-2 默认 -rc vbr_hq ──')
-chk('① hwaccel NVENC cq 补 -b:v 0（+ CR-2 默认 -rc vbr_hq）',
-    tokens(hw('hevc_nvenc', cq=20)[0]), '-cq 20 -b:v 0 -rc vbr_hq')
-chk('① cpu_v2  NVENC cq 补 -b:v 0（+ CR-2 默认 -rc vbr_hq）',
-    tokens(cv('hevc_nvenc', cq=20)[0]), '-cq 20 -b:v 0 -rc vbr_hq')
+print('── ① [A] NVENC 的 -cq 默认配 -b:v 0（纯恒定质量）+ CR-2 默认 -rc vbr ──')
+chk('① hwaccel NVENC cq 补 -b:v 0（+ CR-2 默认 -rc vbr）',
+    tokens(hw('hevc_nvenc', cq=20)[0]), '-cq 20 -b:v 0 -rc vbr')
+chk('① cpu_v2  NVENC cq 补 -b:v 0（+ CR-2 默认 -rc vbr）',
+    tokens(cv('hevc_nvenc', cq=20)[0]), '-cq 20 -b:v 0 -rc vbr')
 chk('① NVENC cq + --bitrate 不补 -b:v 0（不重复 -b:v；仍带 CR-2 默认 -rc）',
-    tokens(hw('hevc_nvenc', cq=20, bitrate='8M')[0]), '-cq 20 -b:v 8M -rc vbr_hq')
+    tokens(hw('hevc_nvenc', cq=20, bitrate='8M')[0]), '-cq 20 -b:v 8M -rc vbr')
 chk('① 非 NVENC（libx264）不受影响', tokens(hw('libx264', crf=20)[0]), '-crf 20')
 
 print('── ② [B] constqp 下不下发无效的 -rc-lookahead ──')
@@ -109,9 +109,9 @@ try:
     chk('② hwaccel strict 下 constqp+LA 抛错', 'no-raise', 'raise')
 except ValueError as exc:
     chk_in('② hwaccel strict 下报告原因', 'strict 不降级', str(exc))
-chk('② 非 constqp（vbr_hq）仍下发 -rc-lookahead',
-    tokens(hw('hevc_nvenc', rc_mode='vbr_hq', cq=20, lookahead=40)[0]),
-    '-cq 20 -b:v 0 -rc vbr_hq -rc-lookahead 40')
+chk('② 非 constqp（vbr）仍下发 -rc-lookahead',
+    tokens(hw('hevc_nvenc', rc_mode='vbr', cq=20, lookahead=40)[0]),
+    '-cq 20 -b:v 0 -rc vbr -rc-lookahead 40')
 
 print('── ③ [C] crf/cq == 0 的 0 档改写（NVENC 那格只是最高质量档，实测非逐位无损）──')
 chk('③ hwaccel libx265 crf0 → lossless=1',
@@ -123,7 +123,7 @@ chk('③ libx264 crf0 保持 -crf 0（本已无损，不改写）',
 chk('③ NVENC cq0（hwaccel, rc=auto）→ constqp 最高质量档',
     tokens(hw('hevc_nvenc', cq=0)[0]), '-rc constqp -qp 0 -b:v 0')
 chk('③ NVENC cq0 + 显式 rc_mode：只告警不改写（hwaccel）',
-    tokens(hw('hevc_nvenc', cq=0, rc_mode='vbr_hq')[0]), '-cq 0 -b:v 0 -rc vbr_hq')
+    tokens(hw('hevc_nvenc', cq=0, rc_mode='vbr')[0]), '-cq 0 -b:v 0 -rc vbr')
 chk_in('③ NVENC cq0 告警不改写（cpu_v2 差异化）', '不是真无损', cv('hevc_nvenc', cq=0)[1])
 _cmd = hw('libx265', crf=0, lookahead=40)[0]
 chk('③ lossless 与 lookahead 合并进同一条 -x265-params',

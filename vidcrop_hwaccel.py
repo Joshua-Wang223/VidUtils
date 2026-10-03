@@ -401,23 +401,23 @@ DEFAULT_PRESET_SVTAV1 = '8'
 # 这个开关（它们用 -crf / -b:v / -qp 的组合来表达），故按"单后端时前缀可省"
 # 处理：裸名与 `nvenc-` 前缀都收。
 _RC_BACKEND = 'nvenc'
-_RC_MODES = ('constqp', 'vbr', 'vbr_hq', 'cbr', 'cbr_hq', 'cbr_ld_hq')
+_RC_MODES = ('constqp', 'vbr', 'cbr', 'cbr_ld_hq')
 _RC_MODE_HELP = ('nvenc：' + ' '.join(_RC_MODES)
-                 + '\n  （constqp=恒定 QP（配 --qp）；vbr / vbr_hq=可变码率；'
-                   'cbr / cbr_hq / cbr_ld_hq=恒定码率（配 --bitrate））')
+                 + '\n  （constqp=恒定 QP（配 --qp）；vbr=可变码率；'
+                   'cbr / cbr_ld_hq=恒定码率（配 --bitrate））')
 # 允许与 --bitrate 共存的 rc 模式。含 auto（auto 对 NVENC 会下发默认 rc：
-# h264/hevc=`vbr_hq`、av1=`vbr`，见下方 `_NVENC_DEFAULT_RC`）。
+# h264/hevc=`vbr`、av1=`vbr`，见下方 `_NVENC_DEFAULT_RC`）。
 # constqp 不在其中：它是恒定 QP 模式、**会完全无视 -b:v**（T4 实测，见仓库
 # memory/project_t4_gpu_capabilities.md），共存等于静默丢掉用户给的码率 → CLI 层报错。
 _RC_MODES_WITH_BITRATE = ('auto',) + tuple(m for m in _RC_MODES if m != 'constqp')
 
 # CR-2（跨仓契约，2026-10-04）：NVENC 的**默认 rc**（与 VE 口径一致，否则两仓共享的
 # QUALITY_MAP NVENC 行会在不同率失真点标定 ⇒ ⑨ 组红）：
-# · h264/hevc → `vbr_hq`（VE 生产即 vbr_hq）；
+# · h264/hevc → `vbr`（FFmpeg 9.0 移除 vbr_hq，cbr_hq 同理）；
 # · av1 → `vbr`（VE 的 harness 与生产 av1 降级路径都显式下发 `-rc:v vbr`；VU 现在同样显式
 #   下发 `-rc vbr`，把「不下发 vs 显式」这处**形式差异**也消掉）。
 # 显式 `--rc-mode` 仍原样下发（不受此表影响）。
-_NVENC_DEFAULT_RC = {'h264_nvenc': 'vbr_hq', 'hevc_nvenc': 'vbr_hq', 'av1_nvenc': 'vbr'}
+_NVENC_DEFAULT_RC = {'h264_nvenc': 'vbr', 'hevc_nvenc': 'vbr', 'av1_nvenc': 'vbr'}
 # lookahead 范围：x264 的上限就是 250；NVENC / x265 无上限，250 足够且统一。
 _LOOKAHEAD_RANGE = (0, 250)
 # --qp 是**真实 QP**（基准轴，非 CQ 轴）；量程随编码器不同（见 qp_range()）
@@ -2986,7 +2986,7 @@ def parse_scale_algo(spec: Optional[str]) -> Tuple[str, str, str]:
 
 def parse_rc_mode(spec: Optional[str]) -> str:
     """
-    解析 --rc-mode → 'auto' | 'constqp' | 'vbr' | 'vbr_hq' | 'cbr' | 'cbr_hq' | 'cbr_ld_hq'。
+    解析 --rc-mode → 'auto' | 'constqp' | 'vbr' | 'cbr' | 'cbr_ld_hq'。
 
     规则与 parse_scale_algo 同形（`<backend>-<取值>` 或裸 `<取值>`），但有两处**有意**
     的不同：
@@ -3627,7 +3627,7 @@ def apply_rc_control_args(codec: str,
                 if rc_mode != 'auto':
                     args += ['-rc', rc_mode]
                 elif default_rc is not None:
-                    # CR-2：auto 默认 rc —— h264/hevc=`vbr_hq`、av1=`vbr`（均与 VE 一致）。
+                    # CR-2：auto 默认 rc —— h264/hevc=av1=`vbr`（均与 VE 一致）。
                     args += ['-rc', default_rc]
                 if qp is not None:
                     args += ['-qp', str(qp)]
@@ -4328,7 +4328,7 @@ def build_ffmpeg_cmd(
             # [借鉴2] 改写后**有效模式是 constqp**，而 constqp 下 NVENC 静默禁用
             # lookahead（对照 Video_Enhancement：crf=0 强制 constqp 且 LA=0）。
             # apply_rc_control_args 看到的仍是用户给的 rc_mode=auto，已按非 constqp
-            # 下发了 `-rc-lookahead`（以及 CR-2 新增的默认 `-rc vbr_hq`）—— 它们与
+            # 下发了 `-rc-lookahead`（以及 CR-2 新增的默认 `-rc vbr`）—— 它们与
             # 本次 constqp 改写冲突/不生效，故就地摘掉并说明。
             _had_la = '-rc-lookahead' in rc_args
             for _flag in ('-rc-lookahead', '-rc'):
@@ -5382,7 +5382,7 @@ preset 映射（NVENC ↔ libx264 自动转换）：
     parser.add_argument('--rc-mode', default='auto', metavar='MODE',
                         help='NVENC 的码率控制模式（默认 auto=不下发 -rc，由 preset 决定，'
                              '与不写等价）。可选：constqp（恒定 QP，需 --qp）；'
-                             'vbr / vbr_hq（可变码率）；cbr / cbr_hq / cbr_ld_hq'
+                             'vbr（可变码率）；cbr / cbr_ld_hq'
                              '（恒定码率，需 --bitrate）。写法 <mode> 或 nvenc-<mode>'
                              '（本轴只有 NVENC 一个后端，故裸名不歧义）。'
                              '仅对 *_nvenc 编码器生效：libx264 / libx265 没有这个开关'
@@ -5760,7 +5760,7 @@ def main() -> int:
         if args.bitrate:
             print('[ERROR] --rc-mode constqp 与 --bitrate 不能同时使用：\n'
                   '  constqp 是恒定 QP 模式，码率由 QP 决定，NVENC 会完全无视 -b:v。\n'
-                  '  要限定码率请改用 --rc-mode vbr / vbr_hq / cbr*（或去掉 --rc-mode）。',
+              '  要限定码率请改用 --rc-mode vbr / cbr*（或去掉 --rc-mode）。',
                   file=sys.stderr)
             return 2
         if _literal:

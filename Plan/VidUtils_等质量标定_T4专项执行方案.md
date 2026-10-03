@@ -17,7 +17,7 @@
 > **状态（2026-10-04）**：**准备阶段已收口，等待 GPU（T4）就位**。CPU 侧 M1~M4 已完结；本方案是
 > **M5 硬编上机**的 T4 分支，上机前的前置工作全部就绪 —— harness GPU 支持（可用性探测 /
 > `--require-codecs` / `_table_range` 回退 / 跨仓态势）、跨仓契约 **CR-1（preset p4）/ CR-2（rc 显式
-> `vbr_hq`/`vbr`）** 已落地、门禁与基线同步。**唯一待办 = 上机跑标定**（`h264/hevc_nvenc` 的 `-cq`
+> `vbr`）** 已落地、门禁与基线同步。**唯一待办 = 上机跑标定**（`h264/hevc_nvenc` 的 `-cq`
 > 等质量行尚未标定，硬编当前回退 `SIZE_MAP`）。
 
 ---
@@ -112,7 +112,7 @@ nvidia-smi --query-gpu=utilization.gpu,utilization.encoder,utilization.decoder -
 | 位置 | 现状 | 改为 |
 |---|---|---|
 | `SWEEP`（`:67`） | 仅 5 个软编 | 增 `h264_nvenc` / `hevc_nvenc` 扫描点（见下） |
-| `BASE_LOCK`（`:77`） | 无 nvenc | 增 `'h264_nvenc': ['-b:v','0','-preset','p4','-rc','vbr_hq']`、`'hevc_nvenc': [...]`（**锁定 `-preset p4`（CR-1）与 `-rc vbr_hq`（CR-2）**，均与 VE 一致，否则等效点漂移） |
+| `BASE_LOCK`（`:77`） | 无 nvenc | 增 `'h264_nvenc': ['-b:v','0','-preset','p4','-rc','vbr']`、`'hevc_nvenc': [...]`（**锁定 `-preset p4`（CR-1）与 `-rc vbr`（CR-2）**，均与 VE 一致，否则等效点漂移） |
 | `QUALITY_FLAG`（`:85`） | 无 nvenc | 增 `'h264_nvenc': '-cq'`、`'hevc_nvenc': '-cq'` |
 | `encode()`（`:191`） | 软解 + `QUALITY_FLAG` | 复用即可（`-cq` + lock 里的 `-b:v 0` 已能把 NVENC 置为恒定质量）；**sw 解码 + `-pix_fmt yuv420p` 对 NVENC 安全**（零拷贝 cuda 管线才禁传 `-pix_fmt`） |
 | 可用性探测 | 无 | 仿 `verify_nvenc_quality_gpu.nvenc_usable()`：实跑一次短编码，不可用即把该档标 SKIP（**T4 的 av1 即此情形**）；新增 `--expect-codecs` fail-fast |

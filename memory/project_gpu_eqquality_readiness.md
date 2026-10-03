@@ -18,7 +18,7 @@ type: project
   **必须**先过 `--expect-av1` 的 fail-fast（防把 SKIP 当"已验过 AV1"）。
 - 阶段 1 要扩展的 harness 已实现（NVENC `-cq`/`-b:v 0`、可用性探测、`--require-codecs`/
   `--expect-av1`、`_table_range` 回退、跨仓态势 `cross_repo_status`、GPU 指纹）——直接开跑。
-- 跨仓契约 **CR-1（preset p4）/ CR-2（rc 显式 `vbr_hq`/`vbr`）已落地**，两仓 `SIZE_MAP` /
+- 跨仓契约 **CR-1（preset p4）/ CR-2（rc 显式 `vbr`/`vbr`）已落地**，两仓 `SIZE_MAP` /
   `QUALITY_MAP` 仍**逐条相等**（判据 `verify/verify_quality_mapping.py` ⑨ 组）。
 - ⚠ 上机跑前先按方案 §3 阶段 0 查**并发负载**（别 kill 别人的流水线）；有 GPU 机器上
   `verify/` 与 `dump_cmd_full` 有一批**既知假红**（环境假设过时，非回归）。

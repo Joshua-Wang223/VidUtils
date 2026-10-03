@@ -88,10 +88,10 @@ def both(codec, **kw):
 print('── ① 默认（一个都不传）：既有质量参数 + CR-2 的 NVENC 默认 -rc ──')
 # 注：NVENC 的 -cq 现在**默认配 -b:v 0**（纯恒定质量，对照 Video_Enhancement 的
 # `-cq:v N -b:v 0`）；且 2026-10-04（跨仓契约 CR-2）NVENC 的 auto 默认 rc **显式下发**：
-# h264/hevc → `-rc vbr_hq`、av1 → `-rc vbr`（与 VE 一致）——故 NVENC 期望里多了 `-b:v 0 -rc ...`。
+# h264/hemc → `-rc vbr`、av1 → `-rc vbr`（与 VE 一致）——故 NVENC 期望里多了 `-b:v 0 -rc ...`。
 # 用户级本轴选项（显式 --rc-mode/--qp/--lookahead/--bitrate）仍一个都不出现。
-for name, (c, _), want in (('hwaccel/hevc_nvenc', hw('hevc_nvenc', cq=20), '-cq 20 -b:v 0 -rc vbr_hq'),
-                           ('cpu_v2/hevc_nvenc', cv('hevc_nvenc', cq=20), '-cq 20 -b:v 0 -rc vbr_hq'),
+for name, (c, _), want in (('hwaccel/hevc_nvenc', hw('hevc_nvenc', cq=20), '-cq 20 -b:v 0 -rc vbr'),
+                           ('cpu_v2/hevc_nvenc', cv('hevc_nvenc', cq=20), '-cq 20 -b:v 0 -rc vbr'),
                            ('hwaccel/av1_nvenc', hw('av1_nvenc', cq=24), '-cq 24 -b:v 0 -rc vbr'),
                            ('cpu_v2/av1_nvenc', cv('av1_nvenc', cq=24), '-cq 24 -b:v 0 -rc vbr'),
                            ('hwaccel/libx265', hw('libx265', crf=20), '-crf 20'),
@@ -102,13 +102,14 @@ chk('① hwaccel/libx265 默认无 -x265-params（HDR 探测过但不写）',
 
 print('── ② --rc-mode / --qp 的取值解析（含前缀与大小写）──')
 cases = [(None, 'auto'), ('', 'auto'), ('auto', 'auto'), ('AUTO', 'auto'),
-         ('vbr', 'vbr'), ('vbr_hq', 'vbr_hq'), ('cbr_ld_hq', 'cbr_ld_hq'),
-         ('nvenc-vbr', 'vbr'), ('NVENC-VBR_HQ', 'vbr_hq'), ('nvenc-auto', 'auto')]
+         ('vbr', 'vbr'), ('cbr_ld_hq', 'cbr_ld_hq'),
+         ('nvenc-vbr', 'vbr'), ('nvenc-auto', 'auto')]
 for spec, want in cases:
     chk(f'② hwaccel parse_rc_mode({spec!r})', H.parse_rc_mode(spec), want)
     chk(f'② cpu_v2  parse_rc_mode({spec!r})', C.parse_rc_mode(spec), want)
 
-bad = ['vaapi-vbr', 'nvenc-', 'nvenc-zzz', 'zzz', '-vbr']
+bad = ['vaapi-vbr', 'nvenc-', 'nvenc-zzz', 'zzz', '-vbr',
+       'vbr_hq', 'cbr_hq', 'NVENC-VBR_HQ']
 for spec in bad:
     hw_first = cv_first = None
     try:
@@ -188,10 +189,11 @@ except ValueError as exc:
     chk_in('⑥ hwaccel strict 下抛错（含提示）', 'strict 不降级', str(exc))
 
 print('── ⑦ 有效组合：-rc / -qp 真的落到命令上 ──')
-h, _ = hw('hevc_nvenc', cq=20, rc_mode='vbr_hq')
-c, _ = cv('hevc_nvenc', cq=20, rc_mode='vbr_hq')
-chk_in('⑦ hwaccel -rc vbr_hq', '-rc vbr_hq', tokens(h))
-chk_in('⑦ cpu_v2  -rc vbr_hq', '-rc vbr_hq', tokens(c))
+h, _ = hw('hevc_nvenc', cq=20, rc_mode='vbr')
+c, _ = cv('hevc_nvenc', cq=20, rc_mode='vbr')
+chk_in('⑦ hwaccel -rc vbr', '-rc vbr', tokens(h))
+chk_in('⑦ cpu_v2  -rc vbr', '-rc vbr', tokens(c))
+chk('⑦ 两脚本同参数命令 token 顺序一致', tokens(h), tokens(c))
 chk('⑦ 两脚本同参数命令 token 顺序一致', tokens(h), tokens(c))
 h, _ = hw('hevc_nvenc', rc_mode='constqp', qp=23)
 c, _ = cv('hevc_nvenc', rc_mode='constqp', qp=23)
@@ -261,7 +263,7 @@ chk('⑩ A hwaccel NVENC cq 默认补 -b:v 0',
 chk('⑩ A cpu_v2 NVENC cq 默认补 -b:v 0',
     '-b:v 0' in tokens(cv('hevc_nvenc', cq=20)[0]), True)
 chk('⑩ A NVENC cq + --bitrate 不重复下发 -b:v（仍带 CR-2 默认 -rc）',
-    tokens(hw('hevc_nvenc', cq=20, bitrate='8M')[0]), '-cq 20 -b:v 8M -rc vbr_hq')
+    tokens(hw('hevc_nvenc', cq=20, bitrate='8M')[0]), '-cq 20 -b:v 8M -rc vbr')
 # [B] constqp 下 lookahead 不下发（硬件静默禁用）+ 告知；strict 下抛错。
 for name, (cmd, w) in (('hwaccel', hw('hevc_nvenc', rc_mode='constqp', qp=23, lookahead=40)),
                        ('cpu_v2', cv('hevc_nvenc', rc_mode='constqp', qp=23, lookahead=40))):
@@ -285,7 +287,7 @@ chk('⑩ C NVENC cq 0 → constqp qp0（hwaccel，rc_mode=auto）',
     tokens(hw('hevc_nvenc', cq=0)[0]), '-rc constqp -qp 0 -b:v 0')
 # 注意 token 顺序：质量块在前、rc_args 在后（既有顺序），故 -rc 出现在最后。
 chk('⑩ C NVENC cq 0 + 显式 rc_mode 只告警不改写（hwaccel）',
-    tokens(hw('hevc_nvenc', cq=0, rc_mode='vbr_hq')[0]), '-cq 0 -b:v 0 -rc vbr_hq')
+    tokens(hw('hevc_nvenc', cq=0, rc_mode='vbr')[0]), '-cq 0 -b:v 0 -rc vbr')
 chk_in('⑩ C NVENC cq 0 告警（cpu_v2 差异化：原样透传、只告警）',
        '不是真无损', cv('hevc_nvenc', cq=0)[1])
 # 合并落同一条 -x265-params（crf 0 + lookahead 同时给）

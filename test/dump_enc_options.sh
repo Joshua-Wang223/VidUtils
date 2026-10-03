@@ -31,10 +31,9 @@
 #       ⇒ 两脚本默认仍都落到 `-preset medium`，本门「逐字相同」不破；但 cpu_v2 的默认 GPU
 #       档由 p5 变 p4 ⇒ `hevc_nvenc 显式 --cq` 一行 `-preset p5 → p4`，基线已同步更新。
 #   例外（2026-10-04，有意变更，跨仓契约 CR-2）：
-#     · h264/hevc NVENC 的**默认 rc 由「不发 -rc」改为 `-rc vbr_hq`**（与 VE 一致；av1 不变）。
-#       ⇒ `hevc_nvenc 显式 --cq` 一行多出 `-rc vbr_hq`（`-cq 20 -b:v 0 -rc vbr_hq -preset p4`），
+#     · h264/hevc NVENC 的**默认 rc 由「不发 -rc」改为 `-rc vbr`**（与 VE 一致；av1 不变）。
+#       ⇒ `hevc_nvenc 显式 --cq` 一行多出 `-rc vbr`（`-cq 20 -b:v 0 -rc vbr -preset p4`），
 #       基线已同步更新。判据见 verify 的 verify_rc_lookahead.py ①/⑩A 与跨仓契约 CR-2。
-#       判据见 verify 的 ⑨/⑪ 组与跨仓契约。
 # 用法: bash test/dump_enc_options.sh > out.txt
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1

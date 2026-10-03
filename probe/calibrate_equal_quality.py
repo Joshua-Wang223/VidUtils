@@ -8,7 +8,7 @@
   * 支持多素材（多次 --src），跨素材聚合（a 池化最小二乘 + b 取中位数）；
   * librav1e 按 `-speed` 档**分别标定**（native 与 speed 10 各出一行）；
   * 支持 **NVENC 硬编**（`h264_nvenc` / `hevc_nvenc` / `av1_nvenc`）：走 `-cq` 轴 + `-b:v 0`，
-    锁定 **`-preset p4`**（CR-1）与**显式默认 rc**（CR-2：h264/hevc=`vbr_hq`、av1=`vbr`）——
+    锁定 **`-preset p4`**（CR-1）与**显式默认 rc**（CR-2：h264/hevc/av1=`vbr`）——
     均与 VE 口径一致，见 `Video_Enhancement/memory/equal-quality-gpu-cross-repo-contract.md`。
     ⚠ 硬件编码器**「列表里有」≠「本机可编」**（T4 的 av1_nvenc 即此）：开跑前用真实短编码**探测**，
     不可用即跳过该档；`--require-codecs` / `--expect-av1` 可把「静默跳过」升级为 **fail-fast（exit 2）**。
@@ -100,9 +100,9 @@ BASE_LOCK = {
     'librav1e':   [],
     # NVENC：`-cq` 是恒定质量(VBR targetQuality)、`-b:v 0` 关掉码率目标；
     # `-preset` 锁定 p4（跨仓契约 CR-1，与 VE 一致）——换挡会整体平移率失真曲线 ⇒ 等效点漂移。
-    # `-rc`：默认 rc 显式下发（跨仓契约 CR-2，与 VE 一致）——h264/hevc=`vbr_hq`、av1=`vbr`。
-    'h264_nvenc': ['-b:v', '0', '-preset', 'p4', '-rc', 'vbr_hq'],
-    'hevc_nvenc': ['-b:v', '0', '-preset', 'p4', '-rc', 'vbr_hq'],
+    # `-rc`：默认 rc 显式下发（跨仓契约 CR-2，与 VE 一致）——h264/hevc=`vbr`、av1=`vbr`。
+    'h264_nvenc': ['-b:v', '0', '-preset', 'p4', '-rc', 'vbr'],
+    'hevc_nvenc': ['-b:v', '0', '-preset', 'p4', '-rc', 'vbr'],
     'av1_nvenc':  ['-b:v', '0', '-preset', 'p4', '-rc', 'vbr'],
 }
 QUALITY_FLAG = {
@@ -667,9 +667,9 @@ def selftest():
     # ── GPU / NVENC 支持（2026-10-03 新增）──
     chk('_ffcodec h264_nvenc', _ffcodec('h264_nvenc'), 'h264_nvenc')
     chk('_lock_for h264_nvenc', _lock_for('h264_nvenc'),
-        ['-b:v', '0', '-preset', 'p4', '-rc', 'vbr_hq'])
+        ['-b:v', '0', '-preset', 'p4', '-rc', 'vbr'])
     chk('_lock_for hevc_nvenc', _lock_for('hevc_nvenc'),
-        ['-b:v', '0', '-preset', 'p4', '-rc', 'vbr_hq'])
+        ['-b:v', '0', '-preset', 'p4', '-rc', 'vbr'])
     chk('_lock_for av1_nvenc（CR-2：显式 -rc vbr）', _lock_for('av1_nvenc'),
         ['-b:v', '0', '-preset', 'p4', '-rc', 'vbr'])
     chk('QUALITY_FLAG av1_nvenc', QUALITY_FLAG['av1_nvenc'], '-cq')

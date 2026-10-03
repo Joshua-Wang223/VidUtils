@@ -312,3 +312,14 @@ VU 把 **NVENC 的默认 rc 由 `auto`(=不下发) 改为显式下发**（与 VE
   ⚠ **仓内探针也要跟**：`probe/verify_nvenc_quality_gpu.py::encode_nvenc(mode='cq')` 原来只发
   `-cq:v N -b:v 0`（跑在 preset 默认 VBR，≠ 生产的 vbr_hq）⇒ 已补 `_cq_rc()`（h264/hevc=vbr_hq、
   av1=vbr）；否则验收探针会在**与生产不同的率失真点**上判 PASS/FAIL。
+
+## 追加（2026-10-05）：FFmpeg 9.0 移除 `vbr_hq` / `cbr_hq`
+
+**事实**：NVENC SDK 升级导致 FFmpeg 9.0+ 正式移除 `vbr_hq` 和 `cbr_hq` 两个速率控制模式（`-rc` 枚举仅剩 `constqp / vbr / cbr / cbr_ld_hq`）。
+
+- 全部 NVENC 默认 rc 由 `vbr_hq` → `vbr`：`_NVENC_DEFAULT_RC` 中 h264/heavyc 一律 `'vbr'`；`_RC_MODES` 移除 `vbr_hq`/`cbr_hq`。
+- cbr_hq 同理处理（默认 rc 和 _RC_MODES 中一并移除）。
+- 不引入 `-tune hq` / `-multipass fullres`（T4 所用 NVENC SDK 版本是否支持需上机确认，默认 rc 仅 `vbr`）。
+- 所有探针/门禁/回归用例同步：`_cq_rc()` 统一返回 `vbr`；BASE_LOCK / A4/A7/A8/A9 / ①组 / ⑦组 / ⑩A / ⑩C / verify_borrow ①组 token 全部 `-rc vbr`；selftest 断言更新为 `('vbr','vbr','vbr')`。
+- `verify_rc_lookahead.py` ②组 parse 用例：`vbr_hq`/`cbr_hq`/`NVENC-VBR_HQ` 从合法值移入非法值（现应抛 ValueError）。
+- CR-2 动机（两仓同一率失真点标定）不变：VE 侧仍是 vbr_hq（ctypes 直连 SDK），VU 向 VE 靠拢的默认 rc 语义仍一致（都是 VBR + 目标质量），只是选项名随 FFmpeg 升级。

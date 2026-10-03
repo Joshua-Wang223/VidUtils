@@ -2033,7 +2033,8 @@ SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（五格，不�
   + B/C 组 `-结论` 行，步骤见方案 §4.10；
   **2026-10-03**：等质量表 `QUALITY_MAP` 只覆盖软编、硬编回退 `SIZE_MAP`；**GPU 标定前置已落地** ——
   `calibrate_equal_quality.py` 已扩展支持 NVENC（`-cq` + 可用性探测 + `--require-codecs`/`--expect-av1`
-  fail-fast + `_table_range` 回退 + 跨仓态势 `cross_repo_status`）；⚠ VE 侧 harness 尚未同步；标定 harness
+  fail-fast + `_table_range` 回退 + 跨仓态势 `cross_repo_status`）；⚠ VE 侧 harness **已自行维护**
+  （含独有 `--axis`，两仓**有意不同版**）；标定 harness
   与验收探针已按**跨仓契约 CR-1 统一 `-preset p4`**（与 VE 一致；VU 产品默认亦由 p5 改为 p4）。
   两份专项执行方案见
   `Plan/VidUtils_等质量标定_T4专项执行方案.md` 与 `Plan/VidUtils_等质量标定_L40_AV1专项执行方案.md`

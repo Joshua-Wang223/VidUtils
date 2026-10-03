@@ -190,7 +190,8 @@
   **2026-10-03 追加**：等质量表 `QUALITY_MAP` 只覆盖软编、硬编回退 `SIZE_MAP`；GPU 标定前置已落地 ——
   `calibrate_equal_quality.py` 已扩展支持 NVENC（`-cq` + 可用性探测 + `--require-codecs`/`--expect-av1`
   fail-fast + `_table_range` 回退 + **跨仓态势 `cross_repo_status`**，报告落 `cross_repo`/`hw_avail`/`gpu`）；
-  ⚠ VE 侧 harness 尚未同步（态势会报「同版 ✗」）；**CR-1 已落实**：标定 harness 与验收探针
+  ⚠ VE 侧 harness **已自行维护**（含独有 `--axis`/QP 轴，两仓**有意不同版**，见 CR-3 ⇒ 跨仓态势
+  报「与本仓不同」属预期、不是未同步）；**CR-1 已落实**：标定 harness 与验收探针
   `verify_nvenc_quality_gpu.py` 统一 `-preset p4`，且 VU **产品默认 `DEFAULT_PRESET_GPU` 由 p5 改 p4**
   （两脚本孪生；降级表 `NVENC_TO_X264_PRESET['p4']='medium'`、`NVENC_TO_SVTAV1_PRESET['p4']=8`，
   基线 `test/baseline/enc_before.txt` 第 12 行同步）；两处探针均有 selftest 守卫；

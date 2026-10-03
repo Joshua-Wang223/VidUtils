@@ -252,9 +252,10 @@ GPU 侧（立项 M5）要做的就是把 NVENC 的等质量行补进 `QUALITY_MA
 ⭐ **最值钱的一条（动手前必看）**：为 NVENC 做等质量标定，**不能直接跑旧 harness** ——
 旧版 `probe/calibrate_equal_quality.py` **只支持软编**：`SWEEP` / `QUALITY_FLAG` / `BASE_LOCK`
 均无 nvenc；聚合段的 `CRF.QUALITY_MAP[codec][2:4]` 对**尚未落表**的硬编会 **KeyError**
-（硬编当前回退 `SIZE_MAP`）。**⇒ 已落地修复（2026-10-03，本仓，尚未同步 VE）**：
+（硬编当前回退 `SIZE_MAP`）。**⇒ 已落地修复（2026-10-03，本仓；VE 侧随后自行维护其 harness，
+含 VE 独有 `--axis`）**：
 
-- 新增 NVENC 档位：`SWEEP` / `BASE_LOCK`（`-b:v 0` + **锁定产品默认 `-preset p5`**）/
+- 新增 NVENC 档位：`SWEEP` / `BASE_LOCK`（`-b:v 0` + `-preset p4`（CR-1）+ 显式默认 rc（CR-2））/
   `QUALITY_FLAG='-cq'`（h264/hevc 量程 0~51、av1 0~63）；
 - **聚合段量程改走 `_table_range()`**：`QUALITY_MAP` → `SIZE_MAP` 回退，修掉 KeyError；
 - **可用性探测** `probe_hw_codec()`：真编一小段、判 `rc==0 且产物非空`（列表里有 ≠ 本机可编，
@@ -268,8 +269,9 @@ GPU 侧（立项 M5）要做的就是把 NVENC 的等质量行补进 `QUALITY_MA
 - 自测 `--selftest` 已补 9 项纯逻辑断言（`_table_range` 回退、`_lock_for`、`_missing_required`、
   `_cmp_tables`、`_repo_role`），无需 ffmpeg 即可跑。
 
-⚠ **三处仍需注意**：① 本仓 harness 已改，**VE 侧 `Accessory/probe/calibrate_equal_quality.py`
-尚未同步**（跨仓态势会报「同版: ✗」，改 harness 是两仓同源约定）；② **CR-1 已落实**：标定 harness
+⚠ **三处仍需注意**：① **VE 侧 harness 已自行维护**（含 VE 独有 `--axis`/QP 轴，见跨仓契约 CR-3）；
+两 harness **有意不同版** ⇒ 跨仓态势报「与本仓不同」属**预期**、不是未同步（VE 用 `-rc:v`、VU 用裸
+`-rc`，行为等价）；② **CR-1 已落实**：标定 harness
 与验收探针 `probe/verify_nvenc_quality_gpu.py` 统一 `-preset p4`（与 VE 口径一致），且
 **产品默认 `DEFAULT_PRESET_GPU` 由 p5 改为 p4**（两脚本孪生：`vidcrop_cpu_v2.py` + `vidcrop_hwaccel.py`；
 降级点随之 `NVENC_TO_X264_PRESET['p4']='medium'`、`NVENC_TO_SVTAV1_PRESET['p4']=8`，基线

@@ -242,9 +242,11 @@ def md5(path, nbytes=1 << 20):
 
 
 # ── 跨仓态势（VE 对等方案）──────────────────────────────────────────────────
-# 本 harness 两仓同源（VU `probe/` 与 VE `Accessory/probe/`），落表真源也须两仓逐字相等
+# 本 harness 两仓各自维护（VU `probe/` 与 VE `Accessory/probe/`），落表真源须两仓逐字相等
 # （判据 ⑨ 组）。开跑前报告「本仓角色 / 对侧仓库 / 两表是否同步 / 对侧 harness 是否同版 /
 # 对侧方案文档位置」，便于两侧协同（改表、改 harness 时知道对侧要不要跟）。
+# ⚠ **两 harness 有意不同版**（VE 另有 `--axis` / QP 轴，见跨仓契约 CR-3；VE 侧的
+# BASE_LOCK 用 `-rc:v`、VU 用裸 `-rc`，行为等价）⇒ md5 不相等是**预期**，不代表未同步。
 def _repo_role():
     return 'VE' if (ROOT / 'src' / 'utils' / 'convert_crf.py').is_file() else 'VU'
 
@@ -788,7 +790,9 @@ def main():
         if cross.get('table_cmp_error'):
             print(f'  两表比较失败: {cross["table_cmp_error"]}')
         if cross.get('sibling_harness'):
-            same = '✓ 同版' if cross.get('harness_in_sync') else '✗ 不同（两仓同源约定：改 harness 需协调同步）'
+            same = ('✓ 逐字节同版' if cross.get('harness_in_sync')
+                    else '✗ 与本仓不同（VE 另有 `--axis`/QP 轴扩展，属 CR-3 **有意差异**；'
+                         '两仓已各自维护，仅当共享块也漂移时才需协调）')
             print(f'  对侧 harness: {cross["sibling_harness"]}')
             print(f'    同版: {same}  md5={cross.get("sibling_harness_md5", "")[:8]}')
         for p in cross.get('sibling_plans', []):

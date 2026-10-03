@@ -30,6 +30,7 @@
 | 2026-09-30 | 初稿 | — |
 | 2026-09-30 | **评审同步（v2）**：① `model_version=` → **`model=`**；② `psnr/hvs/ssim` 修正为「libvmaf feature（PSNR-HVS）+ 独立滤镜（PSNR/SSIM/XPSNR）」并钉死唯一来源；③ 补 **PSNR-HVS / SSIM / XPSNR** 三指标；④ 缺陷归因从「rav1e 特例」改为模型通病；⑤ 补 ffmpeg 二进制锁定与指标同源硬约束；⑥ 修「立即可执行的第一步」引用了**有缓存 bug 的旧脚本**；⑦ 修「§4.1 门禁」悬空引用 | 与 VE 侧 v2 修订同步（本仓 2026-09-30 实测） |
 | 2026-09-30 | **实施状态同步（v3）**：① 登记 M1/M4「非 GPU 部分」**已落地**（HEAD `6ddc46b`）；② 新增「**当前实施状态**」与「**待办清单（含 CPU/GPU 划分）**」；③ 里程碑表加「状态」列并补 **M5**（硬编上机）；④ 订正 §2(b)「7 锚点 + 分段拟合」→ 实际 **5 锚点 + 单直线**；⑤ 补 T4/L40 等硬件依赖标注 | 本仓代码核对 + 实测（2026-09-30） |
+| 2026-10-03 | **CPU 收口 + GPU 待办启动准备（v4）**：① A 组（仅 CPU）**全部完结**，一句话现状写入文首；② **B 组（GPU）从空标题补为 4 条可执行清单**（B1 h264/hevc_nvenc → T4；B2 av1_nvenc → L40/Ada；B3 NVENC QP 行；B4 真机长视频验证），并标注「A 组结论不能外推到 NVENC」「T4 与 L40 不可互替」；③ 新增「**已有成果的位置索引**」节 —— 素材（VE 仓 `input_videos/eqq_calib/`，**两仓共用**、仓库外、存切片非原片）、脚本（两仓同源 vs 仅 VE 仓，逐一标注）、数据（VE 仓 `Accessory/data/eqq_calibration/`，18 文件/1400 点）、**原始 `/tmp` 产物清单**（用户要求原地保留）；④ 补三处易踩的判据：`legacy10s/` **是有效数据不可剔除**、**素材名去重 ≠ 数据完整**、池化前打印四个完整性计数 | VE 仓 `Accessory/docs/EQQ_CALIBRATION_OVERVIEW.md` + 两仓 git 记录（VE `bb2e38f`、`eda957d`） |
 
 ## 当前实施状态（2026-09-30，v3 同步）
 
@@ -67,7 +68,17 @@
 | A8 | ✅ **文档 / 代码收尾** | ffmpeg 二进制指纹入档（§5.4）；`calibrate_equal_quality.py` 默认素材含 576p `word_world_2` 的池化陷阱；立项/方案状态同步 |
 | A9 | ✅ **VE 侧 n3 subsample=1 重跑 + rav1e-native 10s 复标剩余点**：VE 侧已完成（或主动忽略，认为不需） | CPU 标定任务，非 GPU |
 
-### B. 需 GPU（T4 / L40 等）—— **全部未开始**
+### B. 需 GPU（T4 / L40 等）—— **全部未开始，这就是下一步的全部待办**
+
+| # | 待办 | 最低硬件 | 说明 |
+|---|---|---|---|
+| B1 | `h264_nvenc` / `hevc_nvenc`的 `-cq` 等质量标定 | **T4**（Turing，支持 H.264/HEVC NVENC） | 等质量 `-cq` 轴未标，硬编当前回退 `SIZE_MAP` |
+| B2 | `av1_nvenc` 的 `-cq` 等质量标定 | **L40 / Ada** | ⚠ **T4 无 AV1 NVENC**，报 `No capable devices found`；量程 0~63 |
+| B3 | NVENC QP 行（若本仓 `to_constqp_qp` 走 constqp 轴） | h264/hevc **T4**；av1 **L40/Ada** | `av1_nvenc` QP 尺度 ×3 已由 L40 实测确认 |
+| B4 | 真机长视频验证 + 生产管线 GPU 实跑判据 | **T4 / L40** | 详见 `Plan/Video_Enhancement_CRF_CQ统一优化_真机长视频验证与复测_Prompt.md`（VE 侧） |
+
+> ⚠ **A 组全部结论不能外推到 NVENC**：CPU 标定容器无 CUDA，硬编必须换机；
+> 且 **T4 与 L40 不能互相替代**。
 
 ### C. 无需硬件（人工）
 
@@ -268,6 +279,98 @@ cp probe/calibrate_soft_offsets_nocache.py probe/calibrate_equal_quality.py
 > ⚠ **素材路径**：`input_videos/` 与项目根同级（WSL 开发机为 `/mnt/d/Workspace_Python/input_videos`，
 > 生产侧 `/workspace/input_videos`）⇒ 脚本内用变量表达，勿硬编码。
 > ⚠ **所有脚本一律加 `< /dev/null`**（后台进程组 + tty stdin 下会被 SIGTTOU 整组停住）。
+
+## 已有成果的位置索引（**动手前先看这里，别重新造**）
+
+> 🔴 **一句话现状：CPU 侧标定已全部完成并落表，下一步待办全是 GPU 侧（B 组）。**
+
+📖 **完整总览**：`Video_Enhancement/Accessory/docs/EQQ_CALIBRATION_OVERVIEW.md`
+（含 17 条素材明细、5 个脚本的可复制命令行、7 条踩坑教训）。本节只给地图。
+
+### 素材 —— VE 仓 `input_videos/eqq_calib/`（**两仓共用，仓库外，114MB**）
+
+⚠ 在**仓库外**（`/mnt/d/Workspace_Python/input_videos/`），**不入 git**。
+存的是**标定实际使用的 720p 切片**，不是原片（BBC 3 条整集各 536MB 在网络盘 `/mnt/f`）。
+
+```
+input_videos/eqq_calib/
+├── 6s/    12 条   live_kids_play / live_kids_seated / live_kids_table
+│                 cganim_edu_wordworld / cganim_talking_tom / cganim_subs
+│                 tv_bbc_molly_s01e01 / s03e01 / s05e01
+│                 doc_dark_earth / doc_grassland / screen_ui_code
+├── 10s/5 条   anim2d_forest / anim2d_subs_tobot / live_night_wolf
+│                      live_texture_frog / screen_ui_code
+└── manifest_{6s,10s}.json + MANIFEST.md
+```
+
+⚠ 本仓 `temp/m2_srcs/`（7 条：`new5_raw`/`new4_raw`/`cc_anim_300s`/`cc_subs_105s`/
+`earth_dark_80s`/`natgeo_grass_40s`/`ui_screen_10s`）是 `legacy10s` 数据的源，
+**`temp/` 是临时目录，重启即丢** —— 需要时从清单里的 `source_path_resolved` 回取。
+
+### 脚本 —— 两仓同源
+
+| 脚本 | 位置 | 说明 |
+|---|---|---|
+| `calibrate_equal_quality.py` | 两仓 `probe/` | **核心 harness**（无缓存 + `--resume` + `n_subsample=1`） |
+| `loo_equal_quality.py` | 两仓 `probe/` | LOO 交叉验证（md5 一致） |
+| `convert_points_cache.py` | 两仓 `probe/` | points 缓存格式转换（md5 一致） |
+| `eqq_slice_prep.py` | **VE 仓** `probe/` | 原片 → 切片 + manifest（复用 `make_prep`） |
+| `eqq_calibrate_clip.py` | **VE 仓** `probe/` | 单素材测量器。**复核库内数据须加 `--src-is-prep`** |
+| `eqq_calibrate_batch.py` | **VE 仓** `probe/` | 批量并行（manifest 驱动） |
+| `eqq_pool_fit_table.py` | **VE 仓** `probe/` | 落表器，已验证**逐位复现**库内 `QUALITY_MAP`（rc=0） |
+| `eqq_watch_batch.py` | **VE 仓** `probe/` | 批量看护：进度 / 加权 ETA / 异常重启 |
+| `verify_equal_quality.py` | 两仓 `verify/` | 等质量门禁（两侧不逐字节相同，改动须同步） |
+| `verify_quality_mapping.py` | **本仓** `verify/` | 映射表校验（⑨ 组 14/14） |
+
+**三步走**（扩充素材 / 换锚点时用，全程纯 CPU）：
+
+```bash
+python3 Accessory/probe/eqq_slice_prep.py --spec clips.json --outdir ../input_videos/eqq_calib
+python3 Accessory/probe/eqq_calibrate_batch.py \
+    --manifest ../input_videos/eqq_calib/manifest_6s.json \
+    --outroot /tmp/eqq_run --jobs 4 --src-is-prep
+python3 Accessory/probe/eqq_pool_fit_table.py --out /tmp/table.txt
+```
+
+⚠ 三条必守：素材实际时长 ≥ 口径（否则 ffmpeg 静默截断）；VMAF `subsample=1`
+（>1 偏置 1.9~3.0）；每素材独立 workdir（同目录并行会丢点）。详见总览 §6。
+
+### 数据 —— VE 仓 `Accessory/data/eqq_calibration/`（2.2MB，入 git）
+
+```
+eqq_calibration/
+├── points/{6s,10s,legacy10s}/   18 个 points 文件 / 1400 原始点 / ACC 1153
+│   └── clip_name_mapping.json   points 的 key（原始文件名）↔ 切片语义名对照，17 条全覆盖
+├── superseded/只有 2 个真正作废（n3_subsample8 / 3s 冒烟）
+├── reports/                    门禁与验证日志、最终看板
+└── logs/                       逐素材采集日志、看护进度日志
+```
+
+- **落表真源**仍是本仓 `convert_crf.py` 的 `QUALITY_MAP`（与 VE 仓逐条相等）；
+- ⚠ **`legacy10s/`（5 文件 337 点）是有效数据，不可剔除** —— 它是 12 条素材的 10s 侧观测。
+  历史曾被误判为「跨时长脏数据」舍弃，导致虚假改善的 LOO。
+  判据：池化前打印「文件数 / 逐文件点数 / ACC 总点数 / 合并重复点数」四个数比对。
+- ⚠ 池化前必须核**数据完整性**：「素材名去重 ≠ 数据完整」——
+  曾因漏读 VE 侧 10s 历史数据 316 点（素材名与已有数据相同）而错落表。
+
+### 原始 `/tmp` 产物（**用户 2026-10-03 明确要求原地保留，供后期复核**）
+
+> 本轮工作的一手现场，入库的是整理后的形态，两者并存不冲突。
+
+| 路径 | 内容 |
+|---|---|
+| `/tmp/eqq_uni_6s/{new1,word_world_2,bbc_s01e01,bbc_s03e01,bbc_s05e01}/points.json` | 6s 侧 5 条原始点集（各 65 点） |
+| `/tmp/eqq_uni_10s/{anim_10s,anim_subs_10s,dark_10s,texture_10s,ui_10s}/points.json` | 10s 侧 5 条原始点集（各 65 点） |
+| `/tmp/eqq2/1280x720_10s_{n2,n4,anchorB,bbc_anchorB}/points.json` | 旧 10s 侧数据（`legacy10s/` 的源） |
+| `/tmp/eqq_calib/1280x720_10s_n3/points.json` | **作废**（`subsample=8` 偏置 VMAF 1.9~3.0） |
+| `/tmp/eqq_dashboard.md` | 标定过程看板（最终态） |
+| `/tmp/eqq_watch.log` / `/tmp/eqq_watch.out` | 看护进度日志 |
+| `/tmp/gate_*.log` | 四道门禁的运行日志 |
+| `/tmp/eqq_native_srcs/` | BBC 3 条的**符号链接** → `/mnt/f/...`（软链重启即失效） |
+| `/tmp/eqq*.py`、`/tmp/*.sh`（60 个） | 一次性诊断脚本，已归档 VE 仓 `Accessory/archive/eqq_diag/` |
+
+⚠ **临时原片随时会丢**：`VidUtils/temp/m2_srcs/*`、`/tmp/eqq_uni_10s/src/*`、
+`/tmp/eqq_native_srcs/*`（软链）。需长期保留时复制到 `input_videos/` 并更新 manifest。
 
 ## 参考资料
 - Netflix VMAF 标定流程：https://github.com/Netflix/vmaf/tree/master/resource/doc

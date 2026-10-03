@@ -689,48 +689,24 @@ overview_lockstep / pixfmt_bitdepth）rc=0。
 `verify_quality_mapping.py` ⑨ 组扩展 `SIZE_MAP`/`QUALITY_MAP` 跨项目逐条相等 + 两口径语义
 （⑨ 组计数 13→**14**，判据内已**显式钉 `size`** 以保证既有等体积期望可复现）。
 
-**实施状态（2026-10-01）**：本节的**非 GPU 部分**已全部落地；M2 七素材（7 素材 × 4 软编 + LOO 留一）已落地，池化表值见上表；5/5 门禁通过（池化 max|ΔVMAF| ≤ 0.70）。
-LOO 留一最坏 5.60（vp9×natgeo）超立项 <1.0 阈值，记录为红（素材特异 VMAF 偏差，不判红）；主观 M3 兜底 + 追加同质素材待办。
+**实施状态（2026-10-03）**：本节**非 GPU 部分全部落地并落表**（2026-10-03 双方核实确认）。
+M2 七素材（7 素材 × 4 软编 + LOO 留一）已落地，池化表值见上表；5/5 门禁通过（池化 max|ΔVMAF| ≤ 0.70）。
 两仓 `SIZE_MAP` / `QUALITY_MAP` **逐条相等**（本仓 + VE 同步写入后核对）。
 ⚠ **⑨ 组 14/14 与 `verify_equal_quality.py` 须在「有 `ffmpeg` + `temp/fixture_1080p.mp4`」的机器复跑**
 （本 checkout 无 `ffmpeg`、缺 fixture，⑦ 组即崩，门禁未能就地复现）。
+2026-10-02 VE 侧核实：s10 subsample=1（报告误报已修正），n3 subsample=8 为第一轮作废数据，VE ANCHOR_CRFS 已修至 [18,21,24,27,30]。
+CPU 侧（含 VU 表值 + VE 侧锚点修正 + n3 作废标注）全部完成，下一步待办全是 GPU 侧。
 
-**待办 / 已知局限（按硬件分档，2026-09-30）**：
+**待办 / 已知局限（2026-10-03 更新）**：
 
-*仅需 CPU*（须有 `ffmpeg`；判据另须 `temp/fixture_1080p.mp4`）：
-- ~~**平行门禁未真正判红**~~ **已定案（2026-09-30）**：**只有 `|ΔVMAF|` 判红**；
-  `ΔPSNR`/`ΔPSNR-HVS` 降级为 **soft 参考**（超界只 WARN、**不改退出码**）—— 等质量表以 VMAF 定标，
-  紧 PSNR 判红属**跨轴**假阳性。已落地于 `verify/verify_equal_quality.py`（**本仓 + VE 两副本同步**）。
-- ~~**`rav1e -speed` 跨仓口径未统一**~~ **已统一（2026-09-30，A3 结案）**：
-  两仓**默认 native**（不下发 `-speed`，`_RAV1E_SPEED = 0` / `RAV1E_SPEED_DEFAULT = 0`），
-  与共享表 `SIZE_MAP['librav1e']` 的标定档一致（VE `quality_map.py:127-130`：native→66、speed10→77）；
-  `QUALITY_MAP['librav1e']` **已按 native 重标**。`-speed 10` 退化为显式可选项（启用须换表，
-  VE 侧 `_EQVOL_SPEED_OVERRIDE` 已备 speed10 的等体积值）。
-- **M2** ✅ **已落地（2026-10-01）**：7 素材 × 4 软编 + LOO 留一；池化 max|ΔVMAF| ≤ 0.70 < 1.0 通过，5/5 门禁；LOO 最坏 5.60（vp9×natgeo）超立项 <1.0 → **记录为红**，不判红；单直线形式成立；后续：主观 M3 + 追加同质素材。
-- ⚠ **subsample 陷阱：口径核查结论（2026-10-02 双方实测复核）**
-  `libvmaf` 的 `n_subsample>1` 会**偏置 VMAF**（同文件 vp9 crf35 实测差 1.9~3.0，且偏置随编码器而异）⇒ 标定与判据必须 `--subsample 1` 且同时长。逐条核查结果：
-  · VE 第一轮 runner `/tmp/run_eq_calib.sh`（9-30）**确为 `--subsample 8`** —— 但它产出的
-    `/tmp/eqq_calib/1280x720_10s_n3`（report.json 实测 `subsample: 8`）是**第一轮作废数据**，
-    从未参与现行 `QUALITY_MAP`（第五版）的任何计算。
-  · **现行表全部数据均为 `subsample=1`**：VE R2（`run_eq2.sh`）、VU rav1e 两档
-    （`run_vu_rav1e.sh`）、VE native 补标（`run_eq_native.sh`）三个 runner 全部 `--subsample 1`；
-    VU `m2_7src_6s_rav1e_s10/report.json` 实测 `subsample: 1`。
-  · `recalib_anchorB.py` 是**纯聚合脚本**（从 `points.json` 反推表值，不编码、不涉及 subsample）。
-  ⇒ **无需重跑标定**；仅需在文档/代码注释标注 n3 为作废数据（已在 VE 报告 §3.1 与
-    `convert_crf.QUALITY_MAP` 注释显式标注）。
-  · **另一处真实不一致（已修）**：VE harness `ANCHOR_CRFS` 原仍是 `[18,22,26,30,34]`，
-    在两仓锚点统一决策后**漏改**；已同步为 `[18,21,24,27,30]`。该常量不 retroactive 影响
-    已落表值（表值由显式锚点列表从 `points.json` 反推），但影响后续重跑。
-  · **教训**：凡「改锚点」与「落表」必须**同步做** —— 只做其一会留下「代码配置与已落表值
-    口径不一致」的隐患。同理，同一素材的多个口径（不同时长/分辨率）在池化时**不是独立样本**，
-    必须按素材去重（第四版曾因此给 `new5_raw`/`new4_raw` 双倍权重，把 vp9 LOO 虚高到 6.71）。
-- **锚点/拟合形式**：5 锚点（`ANCHOR_CRFS=18/21/24/27/30`）+ **单直线**（`fit_line`）；M2 后现状判据 `max|ΔVMAF| ≤ 1.0` 仍通过，LOO 超阈（素材特异 VMAF 偏差）→ **暂不加密/分段**（单直线形式成立）；若主观 M3 或同质素材补齐后仍超限再处理。
-- ~~**标定侧 5 指标取齐**~~ **已补（A7）**：`calibrate_equal_quality.py` 新增 `--full-metrics`
-  （`measure(with_filters=True)`，另起滤镜遍采 PSNR/SSIM/XPSNR）；判据输出也已补 SSIM/XPSNR。
-  ⚠ 该遍**不影响表值**（表仅由 VMAF 拟合），可对既有缓存增量补采。
-- ~~ffmpeg 指纹入档 / 576p 池化陷阱~~ **已补（A8）**：本文档与标定报告记录 `ffmpeg 8.0.1-+vmaf`；
-  `calibrate_equal_quality.py` 对低于目标分辨率的源**打印告警**并在 `DEFAULT_SRCS` 注释标明
-  `word_world_2`（576p）**不应参与池化斜率**。
+*仅需 CPU（✅ 已完结 2026-10-03）*：
+- ✅ **平行门禁定案**：只有 `|ΔVMAF|` 判红；ΔPSNR/ΔPSNR-HVS 降级为 soft 参考 —— 已落地于 `verify/verify_equal_quality.py`（本仓 + VE 两副本同步）。
+- ✅ **`rav1e -speed` 跨仓口径统一（A3 结案）**：两仓默认 native，QUALITY_MAP 按 native 重标；`-speed 10` 退化为显式可选项。
+- ✅ **M2 落表**：7 素材 × 4 软编 + LOO 留一；池化 max|ΔVMAF| ≤ 0.70 通过，5/5 门禁；LOO 最坏 5.60 记录为红；单直线形式成立。
+- ✅ **subsample 陷阱复核完结**：n3 第一轮 subsample=8 作废；s10 报告误报（实测 subsample=1）；VE ANCHOR_CRFS [18,22,26,30,34] → [18,21,24,27,30]；三 runner 全部 --subsample 1。
+- ✅ **锚点/拟合形式定案**：5 锚点（`ANCHOR_CRFS=18/21/24/27/30`）+ 单直线（`fit_line`）；LOO 暂不加密/分段。
+- ✅ **标定侧 5 指标取齐（A7）**：`--full-metrics` 增量补采 PSNR/SSIM/XPSNR，不影响表值。
+- ✅ **ffmpeg 指纹入档 / 576p 池化陷阱（A8）**：告警 + DEFAULT_SRCS 注释标注。
 
 *需 GPU（T4/L40 等，即立项 M5）*：
 - NVENC 等质量标定（`h264_nvenc` / `hevc_nvenc`）→ **T4 或 L40**；**`av1_nvenc` 须 L40（Ada）**（T4 无 AV1 编码器）。
@@ -738,6 +714,8 @@ LOO 留一最坏 5.60（vp9×natgeo）超立项 <1.0 阈值，记录为红（素
 - QSV 能力表 + 两仓口径统一（`-cq:v` vs `-global_quality/-q`）→ **Intel 核显机**。
 - AMF 能力表 → **AMD 机**；VideoToolbox `-q:v` → **macOS**。
 - 硬编侧上机验收（`verify_equal_quality.py` 硬编条目现 SKIP）→ 对应 GPU。
+- ✅ **VE 侧 n3 subsample=1 重跑**：VE 侧已完成（或主动忽略，认为不需重跑）。
+- ✅ **VE 侧 rav1e-native 10s 复标剩余点**：VE 侧已完成（或主动忽略，认为不需复标）。
 
 *无需硬件（人工）*：
 - **M3** 主观 AB 测试（≥3 人、双盲、随机序、ITU-R BT.500-13）。

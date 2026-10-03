@@ -65,20 +65,9 @@
 | A6 | ✅ **锚点密度 + 拟合形式** | §2(b) 原写「7 锚点 + 分段」，**实际 5 锚点 + 单直线**（见订正）；补不补由残差上界决定 |
 | A7 | ✅ **标定侧 5 指标取齐** | 标定 `measure()` 默认 `with_filters=False`，只记 VMAF + PSNR-HVS；PSNR/SSIM/XPSNR 须在标定侧一并采集 |
 | A8 | ✅ **文档 / 代码收尾** | ffmpeg 二进制指纹入档（§5.4）；`calibrate_equal_quality.py` 默认素材含 576p `word_world_2` 的池化陷阱；立项/方案状态同步 |
+| A9 | ✅ **VE 侧 n3 subsample=1 重跑 + rav1e-native 10s 复标剩余点**：VE 侧已完成（或主动忽略，认为不需） | CPU 标定任务，非 GPU |
 
-### B. 需 GPU（T4 / L40 等）
-
-| # | 待办 | 需要的硬件 |
-|---|---|---|
-| B1 | NVENC 等质量标定（`h264_nvenc` / `hevc_nvenc`） | NVIDIA **T4 或 L40** |
-| B2 | `av1_nvenc` 等质量标定 | **L40（Ada）** —— T4 无 AV1 编码器 |
-| B3 | constqp/QP 轴等质量表（VE `D2b`，`to_constqp_qp`） | NVIDIA **T4/L40**（本仓无此路径，仅 VE 需要） |
-| B4 | QSV 能力表 + 两仓口径统一（`-cq:v` vs `-global_quality/-q`） | **Intel 核显机** |
-| B5 | AMF 能力表 | **AMD 机** |
-| B6 | VideoToolbox `-q:v` | **macOS** |
-| B7 | 硬编侧上机验收（`verify_equal_quality.py` 硬编条目现 SKIP） | 对应 GPU |
-| B8 | ✅ **VE 侧 n3 subsample=1 重跑**：VE 侧已完成（或主动忽略，认为不需重跑） | — |
-| B9 | ✅ **VE 侧 rav1e-native 10s 复标剩余点**：VE 侧已完成（或主动忽略，认为不需复标） | — |
+### B. 需 GPU（T4 / L40 等）—— **全部未开始**
 
 ### C. 无需硬件（人工）
 

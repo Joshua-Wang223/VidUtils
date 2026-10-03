@@ -707,15 +707,15 @@ CPU 侧（含 VU 表值 + VE 侧锚点修正 + n3 作废标注）全部完成，
 - ✅ **锚点/拟合形式定案**：5 锚点（`ANCHOR_CRFS=18/21/24/27/30`）+ 单直线（`fit_line`）；LOO 暂不加密/分段。
 - ✅ **标定侧 5 指标取齐（A7）**：`--full-metrics` 增量补采 PSNR/SSIM/XPSNR，不影响表值。
 - ✅ **ffmpeg 指纹入档 / 576p 池化陷阱（A8）**：告警 + DEFAULT_SRCS 注释标注。
+- ✅ **VE 侧 n3 subsample=1 重跑**：VE 侧已完成（或主动忽略，认为不需重跑）。
+- ✅ **VE 侧 rav1e-native 10s 复标剩余点**：VE 侧已完成（或主动忽略，认为不需复标）。
 
 *需 GPU（T4/L40 等，即立项 M5）*：
 - NVENC 等质量标定（`h264_nvenc` / `hevc_nvenc`）→ **T4 或 L40**；**`av1_nvenc` 须 L40（Ada）**（T4 无 AV1 编码器）。
 - **constqp/QP 轴等质量表**（VE `D2b`，`to_constqp_qp`）→ **T4/L40**（本仓无此路径，仅 VE 需要）。
 - QSV 能力表 + 两仓口径统一（`-cq:v` vs `-global_quality/-q`）→ **Intel 核显机**。
 - AMF 能力表 → **AMD 机**；VideoToolbox `-q:v` → **macOS**。
-- 硬编侧上机验收（`verify_equal_quality.py` 硬编条目现 SKIP）→ 对应 GPU。
-- ✅ **VE 侧 n3 subsample=1 重跑**：VE 侧已完成（或主动忽略，认为不需重跑）。
-- ✅ **VE 侧 rav1e-native 10s 复标剩余点**：VE 侧已完成（或主动忽略，认为不需复标）。
+- 硬编侧上机验收（`verify_equal_quality.py` 硬编条目现 SKIP）→ 对应 GPU（**未开始**）。
 
 *无需硬件（人工）*：
 - **M3** 主观 AB 测试（≥3 人、双盲、随机序、ITU-R BT.500-13）。

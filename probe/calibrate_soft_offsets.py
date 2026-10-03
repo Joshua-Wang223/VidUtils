@@ -111,6 +111,14 @@ def main():
         return 2
 
     # 统一预处理成无音频、目标分辨率、固定时长的中间素材（yuv420p，供各编码器吃）
+    #
+    # ⚠⚠ **缓存陷阱（2026-09-29 定位）**：本行按「文件存在即复用」缓存 prep.mp4，
+    #   **不校验 --src / --duration / --width / --height 是否变化**。于是换一个
+    #   --src 或换分辨率重跑时，会静默沿用**上一条素材**的 prep，得到"不同素材
+    #   跑出几乎相同数值"的假象（实测曾出现 libaom 在两条不同素材上 crf 30~50
+    #   体积逐位相同）。换素材/换分辨率前**必须** `rm -f temp/calib/prep.mp4`。
+    #   需要自动隔离时改用同目录的 `calibrate_soft_offsets_nocache.py`
+    #   （每次运行独立工作目录 + 打印 prep 的 md5，可审计）。
     prep = OUT / 'prep.mp4'
     if not prep.exists() or args.selftest:
         run(['ffmpeg', '-nostdin', '-y', '-hide_banner', '-loglevel', 'error',
@@ -118,6 +126,11 @@ def main():
              '-vf', f'scale={args.width}:{args.height}:flags=lanczos',
              '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '10',
              '-pix_fmt', 'yuv420p', str(prep)])
+    else:
+        print(f'⚠ 复用已存在的 {prep.name}（{prep.stat().st_size/1024:.1f} KiB）——'
+              f'若 --src/--duration/--width/--height 与上次不同，结果会失真！'
+              f'请先 rm -f {prep}，或改用 calibrate_soft_offsets_nocache.py。',
+              file=sys.stderr)
 
     codecs = ['libx264'] + list(TARGET_SWEEPS)
     if args.selftest:

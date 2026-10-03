@@ -1991,11 +1991,36 @@ def _fix_console_streams() -> None:
             pass
 
 
+def _normalize_trailing_backslash(argv: Sequence[str]) -> List[str]:
+    """修复 Windows 传参里「尾随反斜杠被吃掉」的问题。
+
+    PowerShell / cmd 给含空格的参数套上双引号后，`...\\` 会被拼成 `...\\"`；
+    而 Windows 的 argv 切分规则把 `\\"` 当成**转义引号**（`\\` 消失、`"` 变普通
+    字符）。实测：`vidls 'a b\\'` 内核收到的是 `a b"`，于是 `os.lstat` 报文件名
+    语法非法（见 main 里的 `无法访问`）。
+
+    Windows 文件名里不允许出现 `"`，所以「参数以 `"` 结尾」只可能来自这种转义，
+    把它还原成尾随 `\\` 是无歧义的。只作用于 Windows：Linux 上 `"` 是合法文件名
+    字符，不能动。
+    """
+    if not IS_WINDOWS:
+        return list(argv)
+    fixed = []
+    for a in argv:
+        # 单引号原文里一个 `\` 才会让结尾多出一个 `"`；还原成一个 `\` 即可。
+        fixed.append(a[:-1] + "\\" if a.endswith('"') else a)
+    return fixed
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     global _EXIT_HAD_ERROR, _VERBOSE
     _EXIT_HAD_ERROR = False
 
     _fix_console_streams()
+
+    # 必须在 argparse **之前**归一化：否则被吃成 `a b"` 的操作数会被当成普通路径，
+    # 一路走到 os.lstat 才报错（而 --ffmpeg-bin 之类的值也会一并受影响）。
+    argv = _normalize_trailing_backslash(sys.argv[1:] if argv is None else argv)
 
     # 排序与月份都要跟随 locale 才能与 coreutils ls 对齐 —— 但**只在非 Windows 上**。
     # Windows 上 setlocale(LC_TIME, "") 会切到 "Chinese (Simplified)_China.936"

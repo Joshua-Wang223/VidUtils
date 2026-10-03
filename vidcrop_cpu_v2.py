@@ -168,10 +168,12 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 # convert_crf.py，两个裁剪脚本共用同一套换算，避免各处硬编码偏移互相矛盾。
 # 只在"给的是 --cq 但落到 CPU 软编"这一条路径上使用；参数字面量本身不换算。
 try:
-    from convert_crf import QUALITY_MAP, convert_quality, from_x264_crf, to_x264_crf
+    from convert_crf import (SIZE_MAP, QUALITY_MAP, convert_quality, from_x264_crf,
+                             to_x264_crf, get_quality_map, set_quality_mode)
 except ImportError:                       # 从其他工作目录启动时 sys.path 未必含本脚本所在目录
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from convert_crf import QUALITY_MAP, convert_quality, from_x264_crf, to_x264_crf
+    from convert_crf import (SIZE_MAP, QUALITY_MAP, convert_quality, from_x264_crf,
+                             to_x264_crf, get_quality_map, set_quality_mode)
 
 VIDEO_EXTS = {
     ".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv",
@@ -930,7 +932,7 @@ def auto_effort(cpu_count: Optional[int] = None) -> Tuple[int, int]:
 def default_preset_for(codec: str) -> str:
     """按编码器类型给出默认预设：GPU 硬件编码器 p5，libsvtav1 固定 8，其余 medium。
 
-    libsvtav1 的默认档**不再随核数漂移**（V9）：QUALITY_MAP 里 svtav1 的等效关系是在
+    libsvtav1 的默认档**不再随核数漂移**（V9）：SIZE_MAP 里 svtav1 的等效关系是在
     `-preset 8` 下标定的，若默认档随 `auto_effort()` 变（16 核会给 7），等效点就会漂。
     """
     c = codec.lower()
@@ -1079,7 +1081,8 @@ def literal_range(codec: str, kind: str = "crf") -> Tuple[int, int]:
     if runtime is not None:
         return runtime
 
-    m = QUALITY_MAP.get(key) or QUALITY_MAP["h264_nvenc" if kind == "cq" else "libx264"]
+    _qm = get_quality_map()
+    m = _qm.get(key) or _qm["h264_nvenc" if kind == "cq" else "libx264"]
     return int(m[2]), int(m[3])
 
 
@@ -1087,7 +1090,7 @@ def literal_range(codec: str, kind: str = "crf") -> Tuple[int, int]:
 # 它 **不是** CQ 轴（targetQuality，即 -cq）：后者相对 x264 CRF 有 +5(h264)/
 # +7.5(hevc) 的偏移，两者混用会让画质偏松（Plan V1 的跨项目实测反证）。
 # 但 AV1 族的 `-qp` 是 AV1 qindex（≈ 4×QP），必须再过一层尺度；
-# 且各编码器的 `-qp` 量程与 CQ 量程**不同** —— QUALITY_MAP 的 (lo,hi) 描述的是 CQ 轴
+# 且各编码器的 `-qp` 量程与 CQ 量程**不同** —— SIZE_MAP 的 (lo,hi) 描述的是 CQ 轴
 # （av1_nvenc 是 0~63），拿它夹 QP 会把 AV1 的 ~84 夹回 63，故另立 _QP_LIMITS。
 _QP_SCALE: Dict[str, int] = {
     "av1_nvenc": 3,
@@ -1108,7 +1111,7 @@ def qp_scale(codec: str) -> int:
 
 
 def qp_limits(codec: str) -> Tuple[int, int]:
-    """该编码器 `-qp` 的实测量程（可能与 QUALITY_MAP 的 CQ 轴量程不同）。"""
+    """该编码器 `-qp` 的实测量程（可能与 SIZE_MAP 的 CQ 轴量程不同）。"""
     return _QP_LIMITS.get((codec or "").lower(), (0, 51))
 
 
@@ -1155,7 +1158,8 @@ def cq_to_crf(cq: int, target_codec: str, src_codec: str = "h264_nvenc") -> int:
     """
     硬件编码器的 CQ 值 → 目标软件编码器的等效 CRF 值。
 
-    换算基准统一走同目录 convert_crf.py 的 QUALITY_MAP（以 libx264 CRF 为轴）：
+    换算基准统一走同目录 convert_crf.py 的换算表（`--quality-mode` 选等体积/等质量，
+    以 libx264 CRF 为轴）：
         src_codec(cq) ──to_x264_crf──▶ x264 CRF ──from_x264_crf──▶ target_codec(crf)
     旧的硬编码偏移（libx264 +1 / libx265 +4 / AV1 +6）与本表方向相反，已废弃。
 
@@ -1184,13 +1188,29 @@ def crf_to_cq(crf: int, target_codec: str, src_codec: str = "libx264") -> int:
 
 def crf_to_rav1e_qp(crf: int) -> int:
     """
-    librav1e 没有 -crf（实测传 -crf 只会被 ffmpeg 静默忽略并告警，质量退回默认值），
-    只有 0~255 的 -qp。按实测标定换算：
-      qp = (crf - 5) × 4
-    标定数据（ffmpeg 6.1，640x480 testsrc2 2s，输出体积互差 < 5%）：
-      libaom crf 20/25/30/35  <- rav1e qp 60/80/100/120
+    基准轴（libx264 CRF）→ librav1e 的 ``-qp``（0~255）。
+
+    **2026-09-30 改为直接查表**（原先是"经 libaom 中转"的链式推导）：
+    旧实现 ``qp = (libaom_crf − 5) × 4`` 依赖 ``SIZE_MAP['libaom-av1']``，
+    一旦 libaom 行被重标（现为 ``2.007·x264 − 21.35``），同链给出的值就与
+    早先的实测标定（qp 80）自相矛盾。现改为直接读**当前生效表**的 ``['librav1e']``
+    的**等体积**标定值，与 Video_Enhancement 侧口径一致、单一真源。
+
+    ⚠ ``-speed`` 会整体平移 rav1e 的码率曲线，故本值**只对已声明的 speed 档成立**。
+      本仓**默认 native 档（不下发 ``-speed``，``_RAV1E_SPEED = 0``）**，表值与之配套，
+      与 Video_Enhancement 一致；若显式启用 ``-speed`` 必须同步换 ``SIZE_MAP['librav1e']``
+      （等体积口径；见 VE quality_map 的 ``_EQVOL_SPEED_OVERRIDE``，那里两档都给了标定值）。
     """
-    return max(0, min(255, (int(crf) - 5) * 4))
+    v = from_x264_crf('librav1e', crf)
+    if v is None:
+        v = from_x264_crf('librav1e', DEFAULT_REF) or 0.0
+    return max(0, min(255, int(round(v))))
+
+
+#: librav1e 下发的 ``-speed``：**0 = 不下发（native 档）**，与共享表标定档一致。
+#: 实测（VE 方案 §6.11.1）``-speed 10`` 快 4.6× 但体积 ×1.40、同码率多掉 ~1.9 dB；
+#: 启用前必须同步换 ``SIZE_MAP`` / ``QUALITY_MAP`` 的 rav1e 行（不同档 = 不同表值）。
+_RAV1E_SPEED = 0
 
 
 def _resolve_quality_params(
@@ -1284,10 +1304,11 @@ def _resolve_quality_params(
         return (None, default_quality_for(codec), None) if encoder_supports_cq(codec) \
             else (default_quality_for(codec), None, None)
 
-    # ── librav1e：只有 -qp（0~255，≈4×QP），标定以 AV1(libaom) CRF 为输入 ──────
-    # 移出 CRF_SUPPORTED_CODECS 后（V8），无论从哪条路径进来都先归一到 **libaom-av1
-    # CRF**，再由命令构建处套 crf_to_rav1e_qp()。这样消除了"字面量按 libaom 刻度、
-    # -ref 按基准轴"的双链分歧：`--crf 21` 与 `--crf-ref 21` 都得到 -qp 80。
+    # ── librav1e：只有 -qp（0~255）──────────────────────────────────────────
+    # 移出 CRF_SUPPORTED_CODECS 后（V8），无论从哪条路径进来都先归一到**基准轴**，
+    # 再由 crf_to_rav1e_qp() 查当前生效表的 ['librav1e'] 值得 -qp。
+    # 这样消除了"字面量按 libaom 刻度、-ref 按基准轴"的双链分歧：
+    # `--crf 21` 与 `--crf-ref 21` 都得到同一个 -qp。
     if codec == "librav1e":
         if qp is not None:
             _ref = from_constqp_qp(_src, qp)
@@ -1303,13 +1324,14 @@ def _resolve_quality_params(
             _ref = float(DEFAULT_REF)
         if _ref is None:
             _ref = float(DEFAULT_REF)
-        _v = from_x264_crf("libaom-av1", _ref)          # 基准轴 → AV1 CRF 轴
-        if _v is None:
-            print("  警告：librav1e 无法确定等效 CRF，改用默认质量。")
-            return None, None, None
-        _out = max(0, int(round(_v)))
-        print(f"  提示：librav1e 无 -crf，已按基准轴换算为 -qp {crf_to_rav1e_qp(_out)}"
-              f"（等效视觉质量）。")
+        # 2026-09-30：直接查当前生效表的 ['librav1e']，
+        # 不再经 libaom 中转 —— 后者会随 libaom 行重标而漂移（详见 crf_to_rav1e_qp）。
+        # 返回**基准轴**值：换算由下发处的 crf_to_rav1e_qp() 统一做一次，
+        # 避免"这里换算 + 那里再换算"造成双重换算。
+        _out = int(round(_ref))
+        _qp = crf_to_rav1e_qp(_out)
+        print(f"  提示：librav1e 无 -crf，已按基准轴换算为 -qp {_qp}"
+              f"（{'speed ' + str(_RAV1E_SPEED) if _RAV1E_SPEED > 0 else 'native 档'}口径）。")
         return _out, None, None
 
     # ── 方式 3：--qp（constqp 的恒定 QP）─────────────────────────────────
@@ -1712,6 +1734,8 @@ def build_encoder_options_v2(
         # rav1e 不认 -crf（会被静默忽略），换算成等效 -qp。它已移出
         # CRF_SUPPORTED_CODECS，故必须独立判断（V8）。
         opts += ["-qp", str(crf_to_rav1e_qp(crf))]
+        if _RAV1E_SPEED > 0:                  # 默认 native（不下发 -speed）
+            opts += ["-speed", str(_RAV1E_SPEED)]
     elif crf is not None and encoder_supports_crf(codec):
         if c in ("libvpx", "libvpx-vp9") and not bitrate:
             # VP8/VP9 的 CRF 必须配合 -b:v 0 才是纯恒定质量，否则退化成
@@ -4112,6 +4136,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
              "例：--codec hevc_nvenc --cq-ref 26 → -cq 28。与 --crf / --cq 互斥",
     )
     ap.add_argument(
+        "--quality-mode",
+        choices=["size", "quality"],
+        default="quality",
+        help="换算口径（--crf-ref / --cq-ref / 降级换算用）："
+             "size=等体积（文件大小优先）；quality=等质量（画质优先，默认）。",
+    )
+    ap.add_argument(
         "--rc-mode",
         default="auto",
         metavar="MODE",
@@ -4557,6 +4588,8 @@ def main() -> int:
         args = parse_args(_argv)
         if _extra_tail is not None:
             args.extra_args = _extra_tail
+        # 选定换算口径（等体积/等质量）；默认 volume，旧行为逐字不变。
+        set_quality_mode(args.quality_mode)
         validate_and_finalize_args(args)
     except ValueError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
@@ -4655,8 +4688,8 @@ def main() -> int:
         elif encoder_supports_cq(args.codec):
             quality_parts.append(f"CQ: {default_quality_for(args.codec)}")
         elif args.codec == "librav1e":
-            # librav1e 只有 -qp，值由 crf_to_rav1e_qp 从 AV1 CRF 轴换算而来。
-            _dcrf = args.crf if args.crf is not None else from_x264_crf("libaom-av1", DEFAULT_REF)
+            # librav1e 只有 -qp，由 crf_to_rav1e_qp 按基准轴查表得出（等体积口径）。
+            _dcrf = args.crf if args.crf is not None else DEFAULT_REF
             if _dcrf is not None:
                 quality_parts.append(f"QP: {crf_to_rav1e_qp(int(round(_dcrf)))}")
         elif encoder_supports_crf(args.codec):

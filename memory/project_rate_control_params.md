@@ -1,6 +1,6 @@
 ---
 name: 码率控制轴：--rc-mode / --qp / --lookahead / --bitrate（两脚本同名同默认）
-description: 2026-09-22 两个裁剪脚本新增的四个码率控制参数——默认值基本=不下发（CR-2 例外：h264/hevc NVENC 的 auto 默认发 -rc vbr_hq）、-rc/-qp 是 NVENC 专属（非 NVENC 告警忽略、strict 报错）、--lookahead 按编码器映射且默认值三边不同、实测 -x265-params 后者整条覆盖前者故必须与 HDR 元数据合并成同一条；2026-09-28 追加：-qp 不是一套刻度（AV1 是 0~255 qindex、VAAPI 0~52），constqp 必须走 QP 尺度层；av1_nvenc 的 -cq 实为 0~63；2026-10-03 追加：等质量表 QUALITY_MAP 只覆盖软编、硬编回退 SIZE_MAP，GPU 标定的前置是扩展只支持软编的 harness（calibrate_equal_quality.py 聚合段对未落表的 nvenc 会 KeyError）；2026-10-04 追加：CR-2 把 NVENC 默认 rc 改为显式下发（h264/hevc=vbr_hq、av1=vbr，与 VE 一致）
+description: 2026-09-22 两个裁剪脚本新增的四个码率控制参数——默认值基本=不下发（CR-2 例外：h264/hevc NVENC 的 auto 默认发 -rc vbr_hq）、-rc/-qp 是 NVENC 专属（非 NVENC 告警忽略、strict 报错）、--lookahead 按编码器映射且默认值三边不同、实测 -x265-params 后者整条覆盖前者故必须与 HDR 元数据合并成同一条；2026-09-28 追加：-qp 不是一套刻度（AV1 是 0~255 qindex、VAAPI 0~52），constqp 必须走 QP 尺度层；av1_nvenc 的 -cq 实为 0~63；2026-10-03 追加：等质量表 QUALITY_MAP 只覆盖软编、硬编回退 SIZE_MAP，GPU 标定的前置是扩展只支持软编的 harness（calibrate_equal_quality.py 聚合段对未落表的 nvenc 会 KeyError）；2026-10-04 追加：CR-2 把 NVENC 默认 rc 改为显式下发（后随 FFmpeg 9.0 统一为 vbr）；2026-10-04 追加②：`to_constqp_qp(0)` 无损守卫缺口（已落地）—— 原先 NVENC 靠 `_QP_LIMITS` clamp 恰好为 0，`librav1e`/`libsvtav1` 给 48/52、10/9，VU 侧已加显式 `if value==0: return 0` + ⑪ 组断言（独立于 CR-4）
 type: project
 ---
 
@@ -354,3 +354,32 @@ CQ 路径**：`-tune hq` 冗余、`-multipass` 无收益（第三方称其输出
 - ⚠ 别把 `-preset p7` 当 two-pass：现代 `p1~p7` 别名不带 multipass 标记。
 - 回归：`verify/verify_rc_lookahead.py` ⑩ F 已钉（cbr 自动 fullres / 显式覆盖 / constqp 忽略 /
   h264+uhq 忽略告知 / 非 NVENC 忽略告知）；⑩ A 的 cq+`--bitrate` token 期望同步加了 `-multipass fullres`。
+
+## 追加（2026-10-04）：`to_constqp_qp(0)` 无损守卫缺口 —— ✅ 已落地（VU 侧，独立于 CR-4）
+
+**事实**（两口径复核）：无损档**生产行为一致**（口径无关）—— 5 路 0 值输入
+（`--crf`/`--cq`/`--qp`/`--crf-ref`/`--cq-ref`）在 `_resolve_quality_params` 的 `[LOSSLESS]`
+段（cpu_v2 `:1315` / hwaccel `:3450`）**短路在换算之前**（constqp → `qp=0`；非 constqp → `cq=0`
+交 build 层改写成 `-rc constqp -qp 0 -b:v 0`），`apply_rc_control_args` 另有 `if qp == 0:` 兜底
+（`:1501` / `:3643`）。与 VE 的 writer `crf == 0` 分支一致。
+
+**但函数级不一致** ⚠：`to_constqp_qp(codec, 0)` 实测（size / quality）：
+
+| 编码器 | size | quality |
+|---|---|---|
+| `h264_nvenc` / `hevc_nvenc` / `av1_nvenc` | 0 | 0（**靠 `_QP_LIMITS` 的 lo=0 夹回**，非显式） |
+| `librav1e` | 48 | 52 |
+| `libsvtav1` | 10 | 9 |
+
+成因：NVENC 表 `b>0` ⇒ `to_x264_crf` 把负 ref 夹到 0；AV1 软编表 `b<0` ⇒ ref>0，再 ×`_QP_SCALE`。
+生产不触发（短路在前），但函数与「无损 = 0」契约不符，且与 VE「显式短路、恒为 0」分叉。
+
+**已落地（2026-10-04）**（VU 侧）：两脚本 `to_constqp_qp()` 顶部加 `if value == 0: return 0`
+（逐字同步，仅引号风格不同），去掉对 clamp 的隐式依赖。**独立于 CR-4**（CR-4 是「VU 无
+`QUALITY_MAP_QP`」）。计划/记录在 `Plan/VidUtils_等质量标定_L40_AV1专项执行方案.md` 阶段 8（A6 / G8）。
+⚠ 原 ⑪ 组 `[11] 两脚本 to_constqp_qp 逐点相等`（v=0 那格）只比**两脚本互等**、不比「等于 0」
+⇒ 抓不到本条；**已补**正向断言 `[11] to_constqp_qp(c, 0) 恒 0`（覆盖 h264/hevc/av1_nvenc +
+librav1e + libsvtav1 + libx264），`verify/verify_quality_mapping.py` 全绿（ffmpeg 9.0.2）。
+
+**How to apply**：动无损 / constqp 时记住 —— **0 档靠「短路」而非「换算」**；任何 `to_*` 纯函数
+都应能被单独断言「入 0 出 0」，别依赖 clamp 的巧合（NVENC 恰好为 0 只是巧合）。

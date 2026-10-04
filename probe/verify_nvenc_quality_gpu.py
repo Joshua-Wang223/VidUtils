@@ -61,8 +61,8 @@ T4 与 L40 的差别（脚本自动判）
 
 结论行（av1 可用时才出现，L40/Ada 上照它决定动不动表）
 ──────────────────────────────────────────────────────
-    · `B-av1-结论`：`-cq` 表值(27) 是否等质量 ⇒ 决定要不要改 QUALITY_MAP 的 b
-    · `C-av1-结论`：`-qp` 尺度该取几倍（21 / 84=×4 / 105=×5）⇒ 决定要不要改 _QP_SCALE
+    · `B-av1-结论`：`-cq` 表值(32，L40 已落表) 是否等质量 ⇒ 决定要不要改 QUALITY_MAP 的 b
+    · `C-av1-结论`：`-qp` 尺度该取几倍（21 / 63=×3 / 84=×4 / 105=×5）⇒ 决定要不要改 _QP_SCALE
 
 退出码
 ──────
@@ -105,9 +105,9 @@ def _cq_rc(codec: str) -> str:
     return 'vbr'
 # 表内值（crf_ref=21 下的 CQ），用于和实测对比。
 # ⚠ h264/hevc 已于 2026-10-04 落 QUALITY_MAP（T4 标定）⇒ 取 quality 口径值（均 26）；
-#    av1_nvenc 尚未落表 ⇒ 仍回退 SIZE_MAP（27）。
+#    av1_nvenc 已于 2026-10-04 落 QUALITY_MAP（L40 标定）⇒ quality 口径 1.4573×21+1.1022≈31.7→**32**。
 #    取表统一走 crf_mod.get_quality_map()（活动表），**不要**直接索引 QUALITY_MAP（会 KeyError）。
-CQ_TABLE_AT_21 = {'h264_nvenc': 26, 'hevc_nvenc': 26, 'av1_nvenc': 27}
+CQ_TABLE_AT_21 = {'h264_nvenc': 26, 'hevc_nvenc': 26, 'av1_nvenc': 32}
 NAIVE_CQ = 21           # 修复前：基准轴数值被原样当 CQ 下发
 
 
@@ -471,8 +471,12 @@ def group_c(res: Result, src: Path, work: Path, soft: dict, usable: dict) -> Non
             d = (m['psnr'] - soft['psnr']) if (m['psnr'] and soft['psnr']) else 0.0
             st, vd = rate_verdict(d, ratio)
             av1_ok[v] = st
+            # 候选项是**对照组**：不落带的尺度（21/84/105 等）本就该被排除，
+            # 判词统一由 `C-av1-结论` 汇总（唯一尺度是否落带）⇒ 单格 FAIL 不计入门禁
+            # （与 B 组「朴素值」同处理；否则 L40 正确运行也会因对照组退出 1）。
+            cell_st = 'WARN' if st == 'FAIL' else st
             res.add(f'C-av1-qp{v}', 'C', f'av1_nvenc -rc constqp -qp {v}（{tag}）',
-                    st, vd,
+                    cell_st, vd,
                     evidence=[f'PSNR {m["psnr"] and round(m["psnr"], 2)} dB  '
                               f'{round(m["kbps"] or 0)} kbps  码率比 {ratio:.2f}×'])
         # 结论行：L40/Ada 上跑完直接照它决定"动不动 _QP_SCALE"

@@ -36,7 +36,7 @@ SOFT = ('libx265', 'libvpx-vp9', 'libaom-av1', 'libsvtav1', 'librav1e')
 #   · 覆盖判断走表 —— 未标定的编码器不在表里 ⇒ 自动 SKIP（不误报）；
 #   · 可用性判断走真编探测 —— 防止「表已落、但当前机器无 N 卡/驱动」时假红；
 #   · 保留「全 SKIP ⇒ 退出码 2」空集守卫（防"静默通过"）。
-HARD = ('h264_nvenc', 'hevc_nvenc')
+HARD = ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc')
 DEFAULT_SRC = ROOT.parent / 'input_videos' / 'new5_raw.mp4'
 
 

@@ -1154,8 +1154,14 @@ def to_constqp_qp(codec: str, value: int) -> int:
     （VE 侧未覆盖 AV1，见 Plan 的 V1）：
         value --to_x264_crf--> 基准轴 --×qp_scale--> -qp（再钳到 _QP_LIMITS）
     未知编码器原样返回（不猜测）。
+
+    `value == 0` 是**无损档哨兵**：显式返回 0（与 VE 的显式短路一致），**不**参与线性换算。
+    否则 AV1 族会因表 `b < 0` 算出非 0（`librav1e`→48/52、`libsvtav1`→10/9），NVENC 只是靠
+    `_QP_LIMITS` 的 lo=0 恰好夹回 0。生产路径 `[LOSSLESS]` 已短路在前，此处补函数契约（V14/A6）。
     """
     c = (codec or "").lower()
+    if value == 0:
+        return 0
     ref = to_x264_crf(c, value)
     if ref is None:
         return int(value)

@@ -702,6 +702,10 @@ chk("[11] to_constqp_qp('av1_nvenc', 27) == 63（(27−6)=21 基准 ×3，L40 �
     H.to_constqp_qp('av1_nvenc', 27), 63)
 chk("[11] from_constqp_qp('av1_nvenc', 63) == 21（反向自洽）",
     H.from_constqp_qp('av1_nvenc', 63), 21.0)
+chk("[11] to_constqp_qp(c, 0) 恒 0（V14/A6 无损守卫；不依赖 _QP_LIMITS clamp）",
+    [H.to_constqp_qp(c, 0) for c in ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc',
+                                     'librav1e', 'libsvtav1', 'libx264')],
+    [0, 0, 0, 0, 0, 0])
 chk("[11] 两脚本 to_constqp_qp 逐点相等",
     [H.to_constqp_qp(c, v) for c in ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'librav1e')
      for v in (0, 18, 26, 40)],

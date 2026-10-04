@@ -8,23 +8,36 @@
 - 判据：`verify/verify_quality_mapping.py`（**① ~ ⑪ 组**；⑨ 组现在是**门禁**）
 - 上机验收：
   - `probe/verify_nvenc_quality_gpu.py` —— 本轮改动：各 NVENC 的 `-cq` 偏移（B 组）
-    与 constqp 的 `-qp` 尺度（C 组，重点 `av1_nvenc` 的 ×4）
+    与 constqp 的 `-qp` 尺度（C 组，重点 `av1_nvenc` 的 QP 尺度；**L40 已定为 ×3**，见 §4.10）
   - `probe/t4_acceptance.py` —— 上一轮改动：GPU 策略链上的**落点**（A）、**运行期**（B）、
     `-qp 0` 无损声明（C，配合 `probe/probe_lossless_qp0.sh`）
 - 标定脚本：`probe/calibrate_soft_offsets.py`（真实素材等体积标定，可复现 V9）
 
-> **状态（2026-10-01）：V1 ~ V12 全部已落地 + AV1 QP 尺度修正（×4→×3）+ AV1 软编等效表实测落表 + M2 七素材等质量表已落地 + LOO 留一（超立项 <1.0 阈值，记录为红）**，两脚本 + 两份 `convert_crf.py` 同步。
+> **状态（2026-10-04）：V1 ~ V14 全部已落地；AV1 QP 尺度修正（×4→×3）；AV1 软编等效表 + M2 七素材等质量表已落地（LOO 超立项 <1.0，记录为红）；T4 NVENC（h264/hevc）与 L40 AV1（`av1_nvenc`）等质量行均已落表两仓 ⇒ NVENC 全部覆盖**，两脚本 + 两份 `convert_crf.py` 同步。
 > **T4 上机验收已完成**（§4.9）：NVENC 的 `-cq` 偏移（B 组）与 constqp `-qp` 回基准轴（C 组的
 > h264/hevc 对照）**实测成立**，`t4_acceptance` 20/20 通过 —— 详见 §4.9。
 > **L40/Ada 上机验收已完成**（§4.10）：
 >   - **B-av1-结论** (`-cq 27`)：**PASS**（ΔPSNR +1.74 dB / 码率 1.12×），偏移方向成立，**不改表**
 >   - **C-av1-结论** (QP 尺度)：**PASS** —— 扩扫 42/63/72/84/105/108，**×3(qp=63) 落带内**，将 `_QP_SCALE['av1_nvenc']` 从 4 → 3
 >   - **C-h264/hevc** (`-qp 21`)：**PASS**，constqp 回基准轴正确
-> **仍未覆盖的只有**：AMF 能力表、VideoToolbox `-q:v` —— 待 AMD/macOS 机器复核（见 §4.8）。
+> **T4 NVENC 等质量标定已落表（2026-10-04，§4.12.1）**：`h264_nvenc=(0.9295, 6.2523)` /
+> `hevc_nvenc=(1.1116, 2.1606)`（LOO 3.97 / 5.85，按 ≤5.9 分档门禁判**达标**）；硬编门禁解锁（默认 7 档全绿）；
+> ⚠ **hevc_nvenc 默认 `-cq` 28 → 26** ⇒ 凡断言 hevc 默认/`--crf` 落点的用例须同步。
+> **FFmpeg 9.0 rc 收敛（2026-10-04）**：`vbr_hq`/`cbr_hq`/`cbr_ld_hq`/`qvbr` 已被移除，`_RC_MODES`
+> 收敛到 `constqp/vbr/cbr`，NVENC 默认 rc 统一 `vbr`；新增 `--nvenc-tune` / `--nvenc-multipass`（默认不发）。
+> **L40 AV1 上机标定已落表（2026-10-04，§4.12.2）**：`av1_nvenc=(1.4573, 1.1022, 0, 63)`
+> （crf21→`-cq 32`；LOO 5.76，按 ≤5.9 分档门禁判**达标**）；`-qp` 尺度 **×3** 回归复核 **PASS**；
+> 硬编门禁解锁（默认 **8 档全绿**）；长视频 ΔVMAF=+0.179 —— **NVENC 全部覆盖**。
+> **仍未覆盖**：QSV 能力表（Intel 核显机）、AMF 能力表（AMD 机）、VideoToolbox `-q:v`（macOS）
+> —— 见 §4.8 / §4.12 待办。
 > **等质量换算表已落地（2026-10-01，§4.12）**：新增 `QUALITY_MAP`（**VMAF 定标**），原等体积表
-> 改名 **`SIZE_MAP`**，`--quality-mode size|quality`（**默认 `quality`**）。**非 GPU 部分已落地**
-> （7 素材 × 4 软编 / 单直线；首版单素材已补齐）；**硬编待上机（M5，需 T4/L40 等）**，未覆盖编码器自动回退 `SIZE_MAP`。
-> M2 LOO 留一最坏 5.60（vp9×natgeo），超立项 <1.0 阈值，记录为红；单直线形式通过 pooled 门禁（≤0.70），留主观 M3 兜底 + 追加同质素材。
+> 改名 **`SIZE_MAP`**，`--quality-mode size|quality`（**默认 `quality`**）。软编 + NVENC（h264/hevc/av1）已落表；
+> 未覆盖编码器自动回退 `SIZE_MAP`。
+> **无损守卫缺口（2026-10-04）— ✅ 已落地**：`to_constqp_qp(codec, 0)` 原先只对 NVENC **恰好**为 0
+> （靠 `_QP_LIMITS` 的 lo=0 夹回），`librav1e`/`libsvtav1` 给 48/52、10/9 ⇒ 现两脚本已加显式
+> `if value == 0: return 0`（逐字同步）+ ⑪ 组正向断言，`verify_quality_mapping.py` 全绿
+> （**独立于 CR-4**；见 §0 表 V14 与 L40 方案阶段 8）。
+> M2 LOO 留一最坏 5.60（vp9×natgeo），超立项 <1.0 阈值，记录为红；单直线形式通过 pooled 门禁（≤0.70）。
 > 待办按**CPU / GPU** 分档列于 §4.12 文末。
 
 ---
@@ -47,12 +60,17 @@
 | V10 | preset 表与 VE 对齐 + svtav1 的 p7/veryslow 自洽 | P1 | **已落地（对齐官方枚举）** | VE 的 `[FIX-PRESET-ALIGN]` 已改用 ffmpeg 官方枚举；`X264_TO_NVENC_PRESET` 对齐之，`NVENC_TO_X264_PRESET` 保持 `p5→medium`（保 lockstep/基线）；`X264_TO_SVTAV1_PRESET` 的 fast/medium 已拆开、p7 与 veryslow 同为 2 |
 | V11 | `hevc_videotoolbox` 的 b 105 → 100 | P2 | **已落地** | 纯计算（lo=1 永不可达，crf 0~2.58 全饱和） |
 | V12 | ⑨ 组的待修项逐条转 chk | P2 | **已落地** | 流程（⑨ 现在默认就是门禁；新增 ⑪ 组正向断言） |
+| V14 | `to_constqp_qp(codec, 0)` 无损守卫（恒 0，对齐 VE 显式短路） | P2 | **已落地 (2026-10-04)** | 两脚本加 `if value == 0: return 0`（逐字同步）+ ⑪ 组断言；函数级实测原 NVENC 靠 clamp **恰好** 0、`librav1e`/`libsvtav1` 给 48/52、10/9；生产不触发（`[LOSSLESS]` 短路在前）；见 L40 方案阶段 8 / A6 / G8 |
 
 > **第二轮（2026-09-28）已完成全部剩余项**：V1/V2/V5/V7/V8/V9/V10/V11/V12。
 > `verify/verify_quality_mapping.py` 的 ⑨ 组从 2/13 变为 **13/13 一致**（且默认计入退出码），
 > 并新增 ⑪ 组（V1/V2/V5/V7/V8/V10/V11 的正向断言）。
 > **L40/Ada 第三轮（2026-09-29）完成 AV1 实测验收**：V13 `_QP_SCALE` 4→3，B/C 组全 PASS。
-> ⚠ 仍待上机核实的只有：AMF 能力表、VideoToolbox `-q:v`（见 §4.8）。
+> **T4 第四轮（2026-10-04）完成 h264/hevc NVENC 等质量落表 + 硬编门禁解锁（§4.12.1）**。
+> **L40 第五轮（2026-10-04）完成 `av1_nvenc` 等质量落表 + `-qp` ×3 复核 + 门禁解锁（§4.12.2）**
+> ⇒ **NVENC 全部覆盖**。
+> ⚠ 仍待上机核实/标定：QSV 能力表、AMF 能力表、VideoToolbox `-q:v`（见 §4.8）；
+> 另有**无需 GPU** 的 **V14 无损守卫**（`to_constqp_qp(0)` 恒 0，**已落地**）。
 
 ---
 
@@ -146,7 +164,7 @@ crf-ref / cq-ref / 未给）归一到基准轴，钳到量程后放进返回值�
 |---|---|---|
 | `--codec h264_nvenc --rc-mode constqp --crf-ref 21` | `-qp 26` | **`-qp 21`** |
 | `--codec hevc_nvenc --rc-mode constqp --crf-ref 21` | `-qp 28` | **`-qp 20`**（28→基准 20.5，银行家舍入） |
-| `--codec av1_nvenc --rc-mode constqp --crf-ref 21` | `-qp 27` | **`-qp 84`**（基准 21 × QP 尺度 4） |
+| `--codec av1_nvenc --rc-mode constqp --crf-ref 21` | `-qp 27` | **`-qp 84`**（基准 21 × QP 尺度 4）⚠ **后由 V13 改为 ×3 ⇒ 现为 `-qp 63`** |
 | `--codec hevc_nvenc --rc-mode constqp --qp 18` 降级到 libx265 | `-crf 14` | **`-crf 18`** |
 
 **依据**：ffmpeg 选项语义（`-cq` 是 VBR 的 targetQuality、`-qp` 是 constQP 的真 QP）；
@@ -154,16 +172,16 @@ SDK 结构（`constQP.qpInterP` 与 `targetQuality` 是两个字段）；
 Video_Enhancement 的真实素材实测（`-qp 21` 相对 libx264 crf21 = 1.40× 码率 / ΔPSNR −0.26，
 落在 RATE_PASS 带内）。
 
-**已实现**：两脚本新增 `_QP_SCALE`（`av1_nvenc`/`librav1e` = 4，其余 1）、`_QP_LIMITS`
+**已实现**：两脚本新增 `_QP_SCALE`（初版 `av1_nvenc` = 4，**后由 V13 改为 3**；`librav1e` = 4，其余 1）、`_QP_LIMITS`
 （**`-qp` 量程≠CQ 量程**：av1_nvenc/librav1e 0~255、vaapi 0~52、svtav1 0~63、其余 0~51）、
 `to_constqp_qp()` / `from_constqp_qp()`（与 VE 的 `quality_map.to_constqp_qp()` 同语义，
 另加 AV1 尺度层）；CLI 的 `--qp` 量程改用 `qp_range(codec)`。
 
 **判据已同步**：`verify/verify_quality_mapping.py` ①组（现为 `-crf 18/18`）与
-②组（现为 `-qp 20 / 21 / 84`），并把"`--qp` 与 `--cq` 同量纲"那条**改成"必须不同"**。
+②组（现为 `-qp 20 / 21 / 63`，AV1 项由 V13 从 84 → 63），并把"`--qp` 与 `--cq` 同量纲"那条**改成"必须不同"**。
 
 **回归方式**：`--dry-run` 对比 `-qp` 值（本机可跑）；上机用 `probe/verify_nvenc_quality_gpu.py`
-的 C 组（H.264/HEVC `-qp 21`、AV1 `-qp 84` 应落在码率带内）。
+的 C 组（H.264/HEVC `-qp 21`、AV1 `-qp 63`（×3，V13）应落在码率带内）。
 
 ### ✅ V5：硬件能力表
 
@@ -328,7 +346,7 @@ python3 probe/calibrate_soft_offsets.py --src x.mp4 --duration 6 --width 1920 --
 |---|---|---|---|---|
 | h264_nvenc | 0~51，= x264 QP | **21** | 26 | 基准轴直取 |
 | hevc_nvenc | 0~51，= x264 QP | **20** | 28 | 28→基准 20.5，银行家舍入 |
-| **av1_nvenc** | **0~255（qindex）** | **84** | 27 | 21 × `_QP_SCALE`(4)；修复前 27 在 0~255 上近无损 |
+| **av1_nvenc** | **0~255（qindex）** | **63** | 27 | 21 × `_QP_SCALE`(**3**，L40 扩扫定，V13；**已由 L40 落表后阶段 5 探针复核：仅 ×3 落带**）；修复前 27 在 0~255 上近无损 |
 | libx264 | 0~51 | **18**（`--qp 18`） | 14 | V2：按基准轴回算 |
 | libx265 | 0~51 | **18**（`--qp 18`） | 14 | V2：0.9155×18+1.6385 = 18.1 |
 | libsvtav1 | 0~63（= crf 刻度） | 由 `--qp` 经基准轴映射 | 26 | 差 1 档内 |
@@ -412,13 +430,13 @@ python3 probe/verify_nvenc_quality_gpu.py \
 - **必须传 `--src` 真实素材**（不传会退化成合成 720p testsrc2，结论偏）。建议 ≥10s、720p+。
 - **B 组**：对每个 NVENC 编码器各编两格 —— `-cq 表值`（h264 26 / hevc 28 / av1 27）与
   `-cq 21`（朴素对照格，FAIL 会降级成 WARN）；只有"表值"格计入 FAIL。
-- **C 组**：`av1_nvenc -rc constqp -qp {21, 84, 105}` + h264/hevc 各 `-qp 21` 对照。
+- **C 组**：`av1_nvenc -rc constqp -qp {21, 84, 105}`（**L40 实测结论：×3 = `-qp 63` 落带**，见 §4.10）+ h264/hevc 各 `-qp 21` 对照。
 - 判据：码率比 `RATE_PASS=(0.65,1.50)`、ΔPSNR 单向下探 ≤ `1.5 dB`、有 VMAF 时 ≤ `2.0`。
 
 | GPU | 预期 |
 |---|---|
 | **T4** | `B-av1_nvenc` / `C-av1-*` → SKIP；h264/hevc 的 B/C 正常跑 |
-| **L40 (Ada)** | 全跑满；**C 组就是"AV1 的 `-qp` 是否 ×4"的判据** |
+| **L40 (Ada)** | 全跑满；**C 组判 `av1_nvenc` 的 `-qp` 尺度**（已定 **×3**，见 §4.10） |
 
 ### 4.4 Step 2 · 落点 / 运行期 / 无损（上一轮改动的 GPU 面）
 
@@ -443,8 +461,8 @@ python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
 python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
     --output-width 640 --output-height 360 \
     --codec av1_nvenc --rc-mode constqp --crf-ref 21 | grep 执行命令
-#   期望（仅 AV1 可控 GPU）： … -rc constqp -qp 84 …   （V1 + AV1 QP 尺度 ×4）
-#   T4 上 av1_nvenc 不可用 ⇒ 会**自动降级 libsvtav1**，落点是 -crf 25（V9 表），看不到 -qp 84
+#   期望（仅 AV1 可控 GPU）： … -rc constqp -qp 63 …   （V1 + AV1 QP 尺度 **×3**，V13）
+#   T4 上 av1_nvenc 不可用 ⇒ 会**自动降级 libsvtav1**，落点是 -crf 25（V9 表），看不到 -qp 63
 
 python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
     --output-width 640 --output-height 360 \
@@ -456,8 +474,8 @@ python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
 
 | 上机现象 | 结论 / 动作 |
 |---|---|
-| `C-av1-qp84` 落在容忍带、21/105 不落 | `_QP_SCALE['av1_nvenc']=4` 成立（V1 正确），无需改动 |
-| `C-av1-qp84` 不落、105 更优 | 改 `_QP_SCALE['av1_nvenc']`（**两脚本同步**），必要时调 `_QP_LIMITS` |
+| `C-av1-qp63`(×3) 落带、21/84/105 不落（**L40 实测结论**，见 §4.10） | `_QP_SCALE['av1_nvenc']=3` 成立（V13 已落地），无需改动 |
+| `C-av1` 多候选落带 / 需改尺度 | 人工取更贴者；改 `_QP_SCALE['av1_nvenc']`（**两脚本同步** + 复核 `_QP_LIMITS` + 回跑 §4.1） |
 | `C-h264/hevc -qp 21` FAIL | 与"constqp QP = 基准轴"冲突（V1 前提）→ 需引入 `CONSTQP_QP_OFFSET` 重新评估 |
 | `B-*-表值` FAIL（质量下探超 1.5 dB） | 该编码器 `-cq` 偏移需重标 → 改 `QUALITY_MAP` 的 b（**两份 `convert_crf.py` 同步**），回跑 §4.1 |
 | `t4_acceptance` A 组 FAIL | 先把 `执行命令` 与 §4.5 期望逐 token 对比。若产品命令与 §4.5 一致而探针仍红，则是**探针期望值滞后**（V1/V7 改过落点，见 §4.8），改 `A_CASES` 期望值 —— **别去改产品** |
@@ -478,8 +496,10 @@ python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
 - **AMF**（`h264_amf`/`hevc_amf`/`av1_amf`）：本机与 NVIDIA 机都测不到，其 `-cq` 量程/偏移
   只能按规范保留，待 AMD 机器复核（V5 残留）。
 - **VideoToolbox**：Linux 无该编码器；其 `-q:v` 质量轴与 preset 待 macOS 复核。
-- **AV1 的 `-cq` 偏移与 `-qp` ×4 尺度**：T4 编不了 AV1（`av1_nvenc` 探测实测 `-22 Invalid`）⇒
-  §4.3 的 `B-av1_nvenc` / `C-av1-*` 全 SKIP，**必须在 L40/Ada 上跑**才算判完 —— 交接步骤见 **§4.10**。
+- **AV1 的 `-cq` 偏移与 `-qp` 尺度**：T4 编不了 AV1（`av1_nvenc` 探测实测 `-22 Invalid`）⇒
+  §4.3 的 `B-av1_nvenc` / `C-av1-*` 全 SKIP。**单点已由 §4.10（L40/Ada）判完**：`-cq 27` 方向 PASS、
+  `_QP_SCALE['av1_nvenc']` 定为 **3**（V13）。**仍未做**：`av1_nvenc` 的 `-cq` **等质量全表** ——
+  见专项方案 `Plan/VidUtils_等质量标定_L40_AV1专项执行方案.md`（准备阶段已收口，待 Ada 就位）。
 
 ### 4.9 本轮 T4 上机实测结果（2026-09-28；Tesla T4 / 驱动 580.65.06 / ffmpeg 7.1）
 
@@ -502,8 +522,8 @@ python3 vidcrop_hwaccel.py --input x.mp4 --output y.mp4 --dry-run \
 - **C 组（constqp `-qp` 回基准轴）成立**：h264 `-qp 21` → +1.66 dB / **1.37×**；
   hevc `-qp 21` → +1.93 dB / **1.06×**（均带内）⇒ **V1 前提"constqp 的 `-qp` = 基准轴"成立，
   无需引入 `CONSTQP_QP_OFFSET`**。
-- **av1 两格 SKIP**（本卡 `av1_nvenc` 实探测到 `error code -22 (Invalid)`）⇒ `-qp` ×4 尺度
-  仍**待 L40/Ada 判定**（§4.8）。
+- **av1 两格 SKIP**（本卡 `av1_nvenc` 实探测到 `error code -22 (Invalid)`）⇒ `-qp` 尺度
+  （当时写作 ×4）**后由 §4.10 L40 实测判为 ×3**（§4.8 已更新）。
 
 **§4.4 关键判读**（C1 无损探针）：
 
@@ -594,6 +614,12 @@ python3 probe/verify_nvenc_quality_gpu.py --expect-av1 \
    **当前 L40 实测已定为 3（非 4），勿再改回 4**。
 3. **L40 上 §4.1 的假红与 T4 相同**（有 GPU ⇒ 4 处 verify + 2 个 `dump_cmd_full` 用例），
    不是新回归 —— 见§4.1  的表。
+
+> **后续（2026-10-04）**：本节只覆盖 AV1 的**单点**交接（`-cq 27` 偏移方向 + `-qp` ×3 尺度）。
+> `av1_nvenc` 的 **`-cq` 等质量全表**、硬编等质量门禁解锁、真机长视频另行推进 ——
+> 见专项方案 `Plan/VidUtils_等质量标定_L40_AV1专项执行方案.md`（G3/G5/G6，**准备阶段已收口**）。
+> 另有本仓纯函数缺口 **G8/A6（`to_constqp_qp(0)` 恒 0）—— ✅ 已落地（2026-10-04）**，见该方案阶段 8。
+> 本仓 `V13` 已把 `_QP_SCALE['av1_nvenc']` 定为 **3**；落新 `-cq` 表后按该方案阶段 5 回归复核。
 
 
 ### 4.11 rav1e：改为直接查表 + 固定下发 `-speed 10`（2026-09-30）
@@ -711,8 +737,8 @@ CPU 侧（含 VU 表值 + VE 侧锚点修正 + n3 作废标注）全部完成，
 - ✅ **VE 侧 rav1e-native 10s 复标剩余点**：VE 侧已完成（或主动忽略，认为不需复标）。
 
 *需 GPU（T4/L40 等，即立项 M5）*：
-- ✅ **`h264_nvenc` / `hevc_nvenc` 等质量标定已完成（2026-10-04，T4）**——见下方「追加」；**`av1_nvenc` 须 L40（Ada）**（T4 无 AV1 编码器）——**未做**。
-- **constqp/QP 轴等质量表**（VE `D2b`，`to_constqp_qp`）→ **T4/L40**（本仓无此路径，仅 VE 需要）；h264/hevc 已由 T4 探针 C 组复核。
+- ✅ **`h264_nvenc` / `hevc_nvenc` 等质量标定已完成（2026-10-04，T4）**——见下方「追加」；**`av1_nvenc` 须 L40（Ada）**（T4 无 AV1 编码器）——**准备阶段已收口，待 Ada 上机**，专项方案 `Plan/VidUtils_等质量标定_L40_AV1专项执行方案.md`（主体 G3/A1，`-cq` 等质量全表）。
+- **constqp/QP 轴等质量表**（VE `D2b`，`to_constqp_qp`）→ **T4/L40**（本仓无此路径，仅 VE 需要）；h264/hevc 已由 T4 探针 C 组复核，av1 已由 L40 `C-av1-结论` 复核（`_QP_SCALE=3`）。⚠ L40 落新 `-cq` 表后须回归复核（L40 方案阶段 5 / A2）。
 - QSV 能力表 + 两仓口径统一（`-cq:v` vs `-global_quality/-q`）→ **Intel 核显机**。
 - AMF 能力表 → **AMD 机**；VideoToolbox `-q:v` → **macOS**。
 - ✅ 硬编侧上机验收：`verify/verify_equal_quality.py` 硬编条目**已解锁**（默认 7 档全绿）；L40 的 `av1_nvenc` 待补。
@@ -736,6 +762,32 @@ CPU 侧（含 VU 表值 + VE 侧锚点修正 + n3 作废标注）全部完成，
 - ⚠ **NVENC 代际**：本行按 T4(Turing) 标定；Ada(L40) 上跑 h264/hevc 若需等质量，须做跨代复核。
 - 教训沿用：`hevc_nvenc` 的默认 `-cq` 由 SIZE_MAP 的 28 → 等质量表 26（`t4_acceptance` A4/A7、
   `verify_nvenc_quality_gpu.CQ_TABLE_AT_21`、README 默认值同步更新）。
+
+### 4.12.2 追加（2026-10-04）：L40 上机 —— `av1_nvenc` 等质量行落表 + `-qp` ×3 复核
+
+**环境**：NVIDIA **L40** / 驱动 580.65.06 / ffmpeg **9.0.2**；素材池与口径同 §4.12.1
+（17 条 = 12×6s + 5×10s；锚点 `18/21/24/27/30`；`n_subsample=1`；`-cq` 轴 + `-b:v 0 -preset p4 -rc vbr`）。
+
+| 编码器 | a | b | 区间 | `--crf-ref 21` | LOO 最坏 ΔVMAF |
+|---|---|---|---|---|---|
+| `av1_nvenc` | 1.4573 | 1.1022 | 0–63 | `-cq 32` | 5.76 |
+
+- **Gate 0**：`--expect-av1` 实编通过（L40 能编 AV1；T4 报 `error -22`）；A 组量程全绿。
+- **LOO 5.76**（合并 16 素材；单素材 in-sample dVMAF<0.44）—— 与 T4/软编**结构性上限同源**，
+  按 **分档门禁 ≤5.9**（CPU/T4 先例）判达标；`av1_nvenc` 行写入两仓 `QUALITY_MAP`（逐字相等，⑨ 组 14/14）。
+- **`-qp` 尺度回归**：探针 `C-av1-结论` = 仅 ×3(qp=63) 落带 ⇒ `_QP_SCALE['av1_nvenc']=3` 成立、**无需改动**；
+  `B-av1-结论` = 表值 `-cq 32` 落带（ΔPSNR −0.34 dB / 码率 0.96×）。
+- **门禁解锁**：`verify/verify_equal_quality.py` 的 `HARD` 纳入 `av1_nvenc` ⇒ AV1 由 SKIP 变实测
+  （`-cq 32`，ΔVMAF=+0.004）；默认 **8 档全绿**。
+- **长视频**：`Earth at Night` 30s 4K 上 av1 ΔVMAF=+0.179（对照 h264 +0.105 / hevc +0.038，
+  与 T4 长片一致 ⇒ 无跨代异常）。
+- 教训：`av1_nvenc` 默认 `-cq` 由 SIZE_MAP 的 27 → 等质量表 **32**（README 默认值、
+  `verify_nvenc_quality_gpu.CQ_TABLE_AT_21` 已同步）。⚠ `(lo,hi)=(0,63)` 是 **CQ 轴**，`-qp` 另有 `_QP_LIMITS`。
+
+*无需硬件（纯函数，可离线先做）—— ✅ 已完结 2026-10-04*：
+- ✅ **V14 无损守卫**：两脚本 `to_constqp_qp()` 顶部加 `if value == 0: return 0`（逐字同步），
+  去掉对 `_QP_LIMITS` clamp 的隐式依赖；⑪ 组正向断言 `to_constqp_qp(c, 0) == 0` 已补。
+  见 L40 方案阶段 8 / A6 / G8（**独立于 CR-4**）。
 
 *无需硬件（人工）*：
 - ~~**M3** 主观 AB 测试（≥3 人、双盲、随机序、ITU-R BT.500-13）~~ **已取消**：改为纯 AI 自动化验证（VMAF + 多指标交叉参考）。

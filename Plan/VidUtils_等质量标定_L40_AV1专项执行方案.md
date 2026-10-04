@@ -10,19 +10,28 @@
 > **孪生约定**：`vidcrop_cpu_v2.py` / `vidcrop_hwaccel.py` 共享参数逐字一致；
 > `convert_crf.py` 与 VE `src/utils/convert_crf.py` 的两表**逐字同步**。
 > **姊妹文档**：`Plan/PROMPT_等质量换算立项.md`（B2/B3）、
-> `Plan/VidUtils_质量控制参数修复方案.md`（**§4.10 L40 交接步骤**、§4.12、V13）、T4 专项方案。
+> `Plan/VidUtils_质量控制参数修复方案.md`（**§4.10 L40 交接步骤**、§4.12、V13、V14）、T4 专项方案。
 > **门禁**：`verify/verify_equal_quality.py`（主门禁 `|ΔVMAF| ≤ 1.0`）、
 > `verify/verify_quality_mapping.py` ⑨ 组。
 > **上机探针**：`probe/verify_nvenc_quality_gpu.py --expect-av1`（**必须加**）、`probe/t4_acceptance.py`。
 >
-> **状态（2026-10-04）**：**准备阶段已收口，等待 GPU（L40 / Ada）就位** —— 上机前置
-> （harness GPU 支持 + 跨仓契约 CR-1/CR-2 + 探针/门禁）已就绪；`av1_nvenc` 的等质量全表等上机标定。
-> - AV1 的 **`-cq` 偏移方向**已由 §4.10 实测 **PASS**（表值 `-cq 27`：ΔPSNR +1.74 dB / 码率 1.12×）——
->   但那是**单点、与等体积表的比对**，**`-cq` 的等质量全表仍未标定**。
-> - AV1 的 **`-qp` 尺度**已由 §4.10 定为 **`_QP_SCALE['av1_nvenc'] = 3`**（扩扫 42/63/72/84/105/108，
->   ×3(qp=63) 落带内）—— **勿改回 4**。
-> - 本方案的**新增工作**是 `av1_nvenc` 的 **VMAF 等质量表**（写入 `QUALITY_MAP`），
->   以及 `-qp` 尺度在新表值下的**回归复核**。**全部未开始（G3/G4），等 GPU 就位**。
+> **状态（2026-10-04）**：**✅ 已在 NVIDIA L40 上执行完毕（阶段 0~7）** —— `av1_nvenc` 等质量
+> 全表已落表两仓、`-qp` 尺度回归复核通过、硬编门禁解锁、真机长视频达标。指纹：
+> **NVIDIA L40 / 驱动 580.65.06 / ffmpeg 9.0.2**（换构建须重标）。
+> - **Gate 0（阶段 0）PASS**：`--expect-av1` 实编通过（L40 能编 `av1_nvenc`；A 组量程全绿）。
+> - **G3 落表（阶段 2~4）**：`QUALITY_MAP['av1_nvenc'] = (1.4573, 1.1022, 0, 63)`（17 素材 =
+>   12×6s + 5×10s、85 点；crf21→`-cq 32`）。**LOO worst = 5.76**（合并 16 素材；单素材 in-sample
+>   dVMAF < 0.44）—— 与 T4/软编**同源结构性上限**，按**分档门禁 ≤5.9**（CPU/T4 先例）判达标。
+> - **G4（阶段 5）回归复核 PASS**：探针 `C-av1-结论` = 仅 ×3(63) 落带 ⇒ `_QP_SCALE['av1_nvenc']=3`
+>   成立、**无需改动**；`B-av1-结论` = 表值 `-cq 32` 落带（ΔPSNR −0.34 dB / 0.96×）。**勿改回 4**。
+> - **G5（阶段 6）门禁解锁**：`verify_equal_quality.py` 的 `HARD` 纳入 `av1_nvenc` ⇒ AV1 由 SKIP
+>   变实测（`-cq 32`，ΔVMAF=+0.004）。**G6（阶段 7）长视频**：`Earth at Night` 30s 4K 上
+>   av1 ΔVMAF=+0.179（对照 h264 +0.105 / hevc +0.038，与 T4 长片一致 ⇒ 无跨代异常）。
+> - 门禁：`verify_quality_mapping.py` ⑨ 组 **14/14 全绿**（两仓 `QUALITY_MAP` 逐条相等）。
+> - **AV1 无损守卫缺口（2026-10-04，独立于 CR-4）— ✅ 已落地**：VU 生产行为一致（`[LOSSLESS]`
+>   短路在前，口径无关）；函数级 `to_constqp_qp(codec, 0)` 原先对 `librav1e`（48/52）、`libsvtav1`（10/9）
+>   不恒为 0（NVENC 仅靠 `_QP_LIMITS` 夹回）—— **已修**：两脚本加 `if value == 0: return 0`（逐字同步）
+>   + ⑪ 组正向断言，门禁全绿。详见**阶段 8**。
 
 ---
 
@@ -44,13 +53,14 @@
 
 | 编号 | 待办 | 硬件 | 归属 | 状态 | 本方案是否覆盖 |
 |---|---|---|---|---|---|
-| G0 | 扩展 harness 支持 NVENC | 任意有 N 卡 | 两仓同源 | 未开始（**共用前置**） | ✅ 阶段 1（细节同 T4 方案） |
-| G1/G2 | h264/hevc_nvenc `-cq` 等质量 | T4 | 两仓 | 未开始 | ❌ 见 T4 方案 |
-| **G3** | **`av1_nvenc` 的 `-cq` 等质量标定** | **L40/Ada** | 两仓 | 未开始 | ✅ **本方案主体** |
-| **G4** | **AV1 constqp `-qp` 尺度回归复核** | **L40/Ada** | VE 主 / 本仓复核 | 部分（×3 已定） | ✅ 本方案阶段 5 |
-| **G5** | AV1 硬编等质量门禁解锁 | L40 | 本仓 | 未开始 | ✅ 本方案阶段 6 |
-| **G6** | AV1 真机长视频验证 | L40 | 两仓 | 未开始 | ✅ 本方案阶段 7 |
+| G0 | 扩展 harness 支持 NVENC | 任意有 N 卡 | 两仓同源 | **已落地（2026-10-03）** | ✅ 阶段 1（细节同 T4 方案） |
+| G1/G2 | h264/hevc_nvenc `-cq` 等质量 | T4 | 两仓 | **已落表（2026-10-04 T4）** | ❌ 见 T4 方案 |
+| **G3** | **`av1_nvenc` 的 `-cq` 等质量标定** | **L40/Ada** | 两仓 | **✅ 已落表（2026-10-04 L40）** | ✅ **本方案主体** |
+| **G4** | **AV1 constqp `-qp` 尺度回归复核** | **L40/Ada** | VE 主 / 本仓复核 | **✅ 已复核（仅 ×3 落带）** | ✅ 本方案阶段 5 |
+| **G5** | AV1 硬编等质量门禁解锁 | L40 | 本仓 | **✅ 已解锁（AV1 由 SKIP 变实测）** | ✅ 本方案阶段 6 |
+| **G6** | AV1 真机长视频验证 | L40 | 两仓 | **✅ 已达标（30s 4K，ΔVMAF=+0.179）** | ✅ 本方案阶段 7 |
 | G7 | 落点/运行期/无损回归复核 | T4（L40 可选） | 本仓 | 部分已做 | ⚠ 可选 |
+| **G8** | **AV1 无损守卫缺口：`to_constqp_qp(0)` 恒 0（对齐 VE 显式短路）** | **无关（纯函数）** | **本仓（VU）** | **已落地（2026-10-04）** | ✅ 本方案阶段 8 |
 
 > ⚠ **T4 与 L40 不可互替**：L40 虽也能编 h264/hevc，但二者 NVENC 代际不同。
 > **h264/hevc 的等质量行以 T4 标定为准**；L40 上若跑 h264/hevc 只为**跨代交叉核对**，
@@ -68,6 +78,7 @@
 | **A3** | AV1 硬编等质量门禁解锁 | AV1 条目从 SKIP 变实测 | A1/A2 | 硬编 `|ΔVMAF| ≤ 1.0` |
 | **A4** | AV1 真机长视频验证 | 长片报告 | A1 | 见立项 B4 |
 | **A5** | 报告归档 + 与 T4 报告对比 | `verification_report/*L40_<TS>.*` | 全程 | A 组与 T4 一致；多出 av1 格 |
+| **A6** | ✅ **已落地（2026-10-04）** AV1 无损守卫缺口：`to_constqp_qp(codec,0)` 恒 0（对齐 VE 显式短路） | 两脚本同步加 `if value == 0: return 0` | 无（纯函数） | 5 编码器 ×2 口径全为 0；⑨/⑪ 组绿；生产命令逐字不变 |
 
 ---
 
@@ -209,6 +220,83 @@ python3 verify/verify_equal_quality.py --src <素材> --duration 6 \
 #    期望：A 组完全相同；h264/hevc 对照可复现；额外多出 av1 三格 + 两条结论行
 ```
 
+### 阶段 8 · AV1 无损守卫缺口（`to_constqp_qp(0)` 恒 0）（A6/G8）
+
+> ✅ **已落地（2026-10-04）**：两脚本 `to_constqp_qp()` 顶部加 `if value == 0: return 0`（逐字同步，
+> 仅引号风格不同）+ ⑪ 组正向断言 `[11] to_constqp_qp(c, 0) 恒 0`；`verify/verify_quality_mapping.py`
+> **全绿**（ffmpeg 9.0.2）。下方保留落地记录与复核步骤，供回归时对照。
+>
+> **独立于 CR-4**：CR-4 说的是「VU 无 `QUALITY_MAP_QP`（QP 轴等质量表）」，本条是**无损守卫**
+> 缺口，二者无依赖、别混。
+
+**① 生产行为：一致 ✅（口径无关）**
+
+5 路 0 值输入（`--crf` / `--cq` / `--qp` / `--crf-ref` / `--cq-ref`）在
+`_resolve_quality_params` 的 `[LOSSLESS]` 段（`vidcrop_cpu_v2.py:1315` /
+`vidcrop_hwaccel.py:3450`）**短路在换算之前**：
+
+- `constqp` → 直接返回 `qp=0`；
+- 非 `constqp` → 返回 `cq=0`，交 `build_ffmpeg_cmd` 的 `[LOSSLESS]` 改写块
+  写成 `-rc constqp -qp 0 -b:v 0`；
+- `apply_rc_control_args` 另有 `if qp == 0:`（`vidcrop_cpu_v2.py:1501` /
+  `vidcrop_hwaccel.py:3643`）—— 同样下发 `-rc constqp -qp 0 -b:v 0`。
+
+与 VE 的 writer `crf == 0` 分支一致 ⇒ **0 档在生产上不经过 `to_constqp_qp()`**。
+
+**② 函数级：不一致 ⚠（实测）**
+
+`to_constqp_qp(codec, 0)` 的实际返回值（本仓 `vidcrop_cpu_v2.py:1150` /
+`vidcrop_hwaccel.py:1520`，两种口径各跑一次）：
+
+| `to_constqp_qp(c, 0)` | size | quality | 成因 |
+|---|---|---|---|
+| `h264_nvenc` / `hevc_nvenc` / `av1_nvenc` | 0 | 0 | 表 `b > 0` ⇒ ref<0 被 `to_x264_crf` 夹到 0 ⇒ 恰好为 0（**靠 clamp**） |
+| `librav1e` | **48** | **52** ❌ | 表 `b ≈ −81 / −102` ⇒ ref≈12/13，再 ×`_QP_SCALE=4` |
+| `libsvtav1` | **10** | **9** ❌ | 表 `b ≈ −21` ⇒ ref≈10/9 |
+
+即 NVENC 只是**碰巧**为 0（依赖 `_QP_LIMITS` 的 `lo=0`），AV1 软编会给非 0；
+生产不触发（短路在前），但**函数本身与「无损 = 0」契约不符**，也与 VE「显式短路、恒为 0」语义分叉。
+
+**③ 动作（本仓 / VU 侧）**
+
+两脚本 `to_constqp_qp()` 顶部加**显式无损守卫**，与 VE 对齐、去掉对 clamp 的隐式依赖：
+
+```python
+def to_constqp_qp(codec: str, value: int) -> int:
+    c = (codec or '').lower()
+    if value == 0:             # 无损档哨兵：与 VE 显式短路一致，勿依赖 _QP_LIMITS 夹回
+        return 0
+    ref = to_x264_crf(c, value)
+    ...
+```
+
+- ⚠ **孪生不破**：`vidcrop_cpu_v2.py` 与 `vidcrop_hwaccel.py` **逐字同步**。
+- 该改动**不改任何生产命令**（0 值走不到该函数），只补函数契约。
+- 属 **VU 侧改动**（本仓即 VidUtils/VU）；VE 侧只记录交接、不代改。
+
+**④ 验证**
+
+```bash
+# a) 函数级：5 编码器 × 2 口径，to_constqp_qp(c,0) 必须全为 0
+python3 - <<'PY'
+import convert_crf as crf
+import vidcrop_hwaccel as H, vidcrop_cpu_v2 as C
+cs = ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'librav1e', 'libsvtav1')
+for m in ('size', 'quality'):
+    crf.set_quality_mode(m)
+    print(m, {x: (H.to_constqp_qp(x, 0), C.to_constqp_qp(x, 0)) for x in cs})
+PY
+
+# b) 门禁：⑨ 组跨仓逐条相等 + ⑪ 组正向断言
+python3 verify/verify_quality_mapping.py
+
+# c) 生产回归：0 档命令逐字不变（两条路径都出 -rc constqp -qp 0 -b:v 0）
+```
+
+> ✅ 已补正向断言：⑪ 组新增 `[11] to_constqp_qp(c, 0) 恒 0`（覆盖 h264/hevc/av1_nvenc + librav1e +
+> libsvtav1 + libx264）。原 ⑪ 组 `[11] 两脚本 to_constqp_qp 逐点相等` 只比**两脚本互等**、不比「等于 0」，
+> 抓不到本条 —— 现已补齐。若日后回退，先看这条是否变红。
+
 ---
 
 ## 4. 判读矩阵
@@ -225,6 +313,8 @@ python3 verify/verify_equal_quality.py --src <素材> --duration 6 \
 | `B-av1-结论` = FAIL | 表值未落带 ⇒ 重标 b（两仓同步 + 回跑 ⑨ 组） |
 | 探针 av1 格 SKIP | **只应出现在非 Ada 卡**；加 `--expect-av1` 后绝不该静默 SKIP |
 | L40 上 §4.1 的假红 | 与 T4 相同（有 GPU ⇒ 4 处 verify + 2 个 `dump_cmd_full` 用例），非本方案回归 |
+| `to_constqp_qp(c, 0) != 0`（`librav1e` 48/52、`libsvtav1` 10/9） | **函数级无损守卫缺口**（生产不触发）—— ✅ **已修（V14/A6，2026-10-04）**；若回退则两脚本加 `if value == 0: return 0`（逐字同步 + 回跑 ⑨/⑪ 组）；**独立于 CR-4** |
+| 生产路径 `--cq 0` / `--crf 0` / `--qp 0` | `[LOSSLESS]` 在换算前短路 ⇒ **口径无关、一致**；`to_constqp_qp(0)` 的取值**不影响**生产命令 |
 
 ---
 
@@ -235,6 +325,8 @@ python3 verify/verify_equal_quality.py --src <素材> --duration 6 \
 3. `verify/verify_equal_quality.py` —— AV1 条目解锁。
 4. 报告：`/tmp/eqq_gpu/<tag>/report.json`、`verification_report/nvenc_quality_L40_<TS>.{json,md}`。
 5. 文档：本方案 + 立项 M5 状态 + 方案 §4.10/§4.12 更新；工程记忆 `memory/` 更新。
+6. ✅ 两脚本 `to_constqp_qp()` 的**无损守卫**（`if value == 0: return 0`，逐字同步）—— A6/G8，
+   **已落地（2026-10-04）**；⑪ 组正向断言 `to_constqp_qp(c, 0) == 0` 已补。
 
 ---
 
@@ -256,6 +348,8 @@ python3 verify/verify_equal_quality.py --src <素材> --duration 6 \
 12. **报告归档带 GPU 名 + 时间戳**，与 T4 报告可对比。
 13. **改表必回跑 ⑨ 组**；**改 `_QP_SCALE` 要两脚本同步 + 复核 `_QP_LIMITS`**。
 14. **上机前查并发负载**（Ada 机 TensorRT 只体现在 `utilization.gpu`）。
+15. **无损守卫显式化**：`to_constqp_qp(codec, 0)` 必须**恒为 0**（与 VE 显式短路对齐），
+    别依赖 `_QP_LIMITS` 的 clamp 兜底 —— NVENC 只是**碰巧**为 0，AV1 软编会漏（见阶段 8）。
 
 ### 6.1 `-tune` / `-multipass` 的取舍（2026-10-04；T4 实测 + AV1 特性）
 
@@ -281,6 +375,9 @@ python3 verify/verify_equal_quality.py --src <素材> --duration 6 \
 - **R5 · L40 上 `verify/` 假红**：与 T4 相同（有 GPU 的环境假设过时），非本方案回归。
 - **R6 · §4.1 门禁须在有 `ffmpeg` + `temp/fixture_1080p.mp4` 的机器复跑**：本开发 checkout 缺 fixture 时 ⑦ 组即崩。
 - **R7 · `-b:v` 语义**：AV1 NVENC 同样 `-cq N` 无视 `-b:v`；标定用 `-cq N -b:v 0`，别加 `-maxrate`。
+- **R8 · 无损守卫缺口** —— ✅ **已修（2026-10-04，V14/A6）**：原先 `to_constqp_qp(0)` 只对 NVENC
+  **恰好**为 0（靠 `_QP_LIMITS` 的 `lo=0` 夹回），`librav1e`/`libsvtav1` 给 48/52、10/9。现两脚本已加
+  `if value == 0: return 0`（逐字同步）+ ⑪ 组断言。⚠ **别再依赖 clamp 的巧合**；**独立于 CR-4**，详见阶段 8。
 
 ---
 
@@ -306,6 +403,11 @@ python3 probe/loo_equal_quality.py --workroot /tmp/eqq_gpu --tag l40_720p_6s \
 # 落表后门禁
 python3 verify/verify_quality_mapping.py
 python3 verify/verify_equal_quality.py --src <素材> --duration 6 --codecs av1_nvenc < /dev/null
+
+# 无损守卫（A6/G8，纯函数，无需 GPU）
+python3 -c "import vidcrop_hwaccel as H; \
+print({c: H.to_constqp_qp(c, 0) for c in ('h264_nvenc','hevc_nvenc','av1_nvenc','librav1e','libsvtav1')})"
+#   期望全为 0；当前 librav1e=48 / libsvtav1=10 ⇒ 未修
 
 # 上机探针（看 B/C 两条 av1 结论行）
 python3 probe/verify_nvenc_quality_gpu.py --expect-av1 --src <素材> \

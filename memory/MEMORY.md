@@ -197,11 +197,15 @@
   基线 `test/baseline/enc_before.txt` 第 12 行同步）；两处探针均有 selftest 守卫；
   两份专项方案见 `Plan/VidUtils_等质量标定_{T4,L40_AV1}专项执行方案.md`
   **2026-10-05 追加**：FFmpeg 9.0 移除 `vbr_hq`/`cbr_hq`（**并 `cbr_ld_hq`/`qvbr`**），NVENC 默认 rc 统一为 `vbr`，
-  `_RC_MODES` 收敛到 `constqp/vbr/cbr`；所有脚本/探针/门禁/回归/基线/文档已同步；不引入 -tune hq/-multipass fullres
-- [GPU 等质量标定（M5）：T4 已完成，L40(AV1) 待做](project_gpu_eqquality_readiness.md)
-  — 2026-10-04 T4 上机：h264/hevc_nvenc 的 `-cq` 等质量行落表两仓（LOO 3.97/5.85，按 ≤5.9 分档门禁），
-  硬编门禁解锁（默认 7 档全绿）；跨仓契约 CR-1 preset p4 / CR-2 rc `vbr`；剩余 av1_nvenc(L40)+QSV/AMF/VT。
-  ⚠ hevc 默认 `-cq` 28→26、`crf-ref21+constqp` `-qp` 20→21；换 ffmpeg 构建须重标
+  `_RC_MODES` 收敛到 `constqp/vbr/cbr`；所有脚本/探针/门禁/回归/基线/文档已同步；不引入 -tune hq/-multipass fullres；
+  **2026-10-04 追加②**：`to_constqp_qp(codec, 0)` **无损守卫缺口 —— ✅ 已落地**：原 NVENC 靠 `_QP_LIMITS`
+  的 lo=0 **恰好**夹为 0（非显式），`librav1e`/`libsvtav1` 给大小 48/52、10/9 ⇒ 函数与「无损=0」契约不符
+  （生产不触发，`[LOSSLESS]` 短路在前）；**两脚本已加 `if value == 0: return 0`**（逐字同步，**独立于 CR-4**）
+  + ⑪ 组正向断言 `[11] to_constqp_qp(c, 0) 恒 0`，门禁全绿；见 L40 方案阶段 8（A6/G8）
+- [GPU 等质量标定（M5）：NVENC 全部完成（T4 h264/hevc + L40 AV1）](project_gpu_eqquality_readiness.md)
+  — 2026-10-04 T4 落 h264/hevc、L40 落 `av1_nvenc` 的 `-cq` 等质量行（LOO 3.97/5.85/5.76，按 ≤5.9 分档门禁），
+  硬编门禁解锁（默认 8 档全绿）；av1 `-qp` ×3 复核 PASS；剩余 QSV/AMF/VT。
+  ⚠ 默认质量 hevc 28→26、**av1 27→32**；换 ffmpeg 构建须重标
 
 ---
 

@@ -9,6 +9,9 @@
 
 ---
 
+- [等质量 LOO 门禁判据锚点 = [0,27]（+ 监控列）](feedback_loo_gate_anchor_range.md)
+  — 2026-10-04 仓主裁定：LOO 判据锚点钉到生产工作区间 [0,27]，crf>27 降为「监控」列不计 FAIL；
+  分档门禁（软编/NVENC ≤5.9、rav1e ≤7.5）；与 VE `eqq_pool_fit_table.GATE_ANCHORS` 同步
 - [长时 ffmpeg 任务必须 setsid 分离 + 别直接写 MP4](project_long_ffmpeg_jobs.md)
   — 代码宿主崩溃会带走同进程组的 ffmpeg；MP4 缺 moov 整份作废（已发生过一次，34 分钟算力白跑）；
   并发实例互删临时文件；以及 `interp_2x_safe.sh` 里那套防呆（锁 / 两层复用校验 / PID 临时名）；

@@ -1131,14 +1131,18 @@ _QP_LIMITS: Dict[str, Tuple[int, int]] = {
     "libx264": (0, 51), "libx265": (0, 51),
 }
 
-# **quality 口径**的 QP 轴等质量行（CR-4 与 VE 同步；2026-10-04 L40 实测）。
+# **quality 口径**的 QP 轴等质量行（CR-4 与 VE 同步；NVENC 三条 h264/hevc 于 T4、av1 于 L40）。
 # AV1 的 `-qp`(qindex) 对基准 CRF 是**仿射带大负截距**（非过原点）：17 素材实测等质 QP
 # 中位 65.7 / 92.3 / 117.9 / 140.8（ref 21/24/27/30），仿射 `7.9338·ref − 97.5136` 贴合
 # （残差 ≤3.4）；而 `_QP_SCALE` 的过原点 ×3 只在 ref≈21 成立（ref24/27/30 偏低 −20/−37/−51
-# ⇒ 过度配质、文件偏大）。故 **quality 口径用仿射**，**size 口径仍用 `_QP_SCALE` 的 ×3**
-# （与 VE 的 `_QP_MAP_OVERRIDE` 一致）。⚠ 无损守卫（value==0 ⇒ 0）在 `to_constqp_qp` 顶部短路。
+# ⇒ 过度配质、文件偏大）。h264/hevc 亦为仿射（`≈1×ref + 小偏移`，T4 QP 轴标定）。
+# 故 **quality 口径用仿射**，**size 口径仍用 `_QP_SCALE` 的 ×3**（与 VE 的 `_QP_MAP_OVERRIDE` 一致）。
+# ⚠ 数值**逐条等于 VE `QUALITY_MAP_QP`**（跨仓契约 CR-4；⑨ 组会断言）。
+# ⚠ 无损守卫（value==0 ⇒ 0）在 `to_constqp_qp` 顶部短路。
 _QP_AFFINE_QUALITY: Dict[str, Tuple[float, float]] = {
-    "av1_nvenc": (7.9338, -97.5136),   # (a, b)：qp = a·ref + b（quality 口径，L40 标定）
+    "h264_nvenc": (0.9704, 1.4767),     # (a, b)：qp = a·ref + b（quality 口径，T4 标定）
+    "hevc_nvenc": (1.1083, -2.9183),    # quality 口径，T4 标定
+    "av1_nvenc": (7.9338, -97.5136),    # quality 口径，L40 标定
 }
 
 

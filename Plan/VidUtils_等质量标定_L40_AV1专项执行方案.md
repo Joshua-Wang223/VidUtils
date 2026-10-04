@@ -20,8 +20,9 @@
 > **NVIDIA L40 / 驱动 580.65.06 / ffmpeg 9.0.2**（换构建须重标）。
 > - **Gate 0（阶段 0）PASS**：`--expect-av1` 实编通过（L40 能编 `av1_nvenc`；A 组量程全绿）。
 > - **G3 落表（阶段 2~4）**：`QUALITY_MAP['av1_nvenc'] = (1.4573, 1.1022, 0, 63)`（17 素材 =
->   12×6s + 5×10s、85 点；crf21→`-cq 32`）。**LOO worst = 5.76**（合并 16 素材；单素材 in-sample
->   dVMAF < 0.44）—— 与 T4/软编**同源结构性上限**，按**分档门禁 ≤5.9**（CPU/T4 先例）判达标。
+>   12×6s + 5×10s、85 点；crf21→`-cq 32`）。**LOO[0,27] = 2.79（门禁）/ 监控[全] = 5.76**
+>   （合并 16 素材；单素材 in-sample dVMAF < 0.44）—— 判据锚点=生产工作区间 **[0,27]**
+>   （仓主裁定，与 VE 同步；crf>27 仅监控），按**分档门禁 ≤5.9** 判达标。
 > - **G4（阶段 5）回归复核 + CR-4**：探针 `C-av1-结论` = VU 仿射映射值落带；`B-av1-结论` = 表值
 >   `-cq 32` 落带（ΔPSNR −0.34 dB / 0.96×）。⚠ **CR-4（VE 通知，VU 已独立复现）**：L40 17 素材
 >   实测等质 QP 对基准 CRF 是**仿射带大负截距**（`7.9338·ref−97.5136`，残差 ≤3.4），过原点 `×3`
@@ -160,8 +161,9 @@ python3 probe/calibrate_equal_quality.py \
 ```bash
 python3 probe/loo_equal_quality.py \
     --workroot /tmp/eqq_gpu --tag l40_720p_6s [--tag l40_720p_10s] \
-    --tiers av1_nvenc --tol 1.0
-#   期望：worst ΔVMAF < 1.0；结构性超标则记录 + 申请分档门禁
+    --tiers av1_nvenc
+#   判据：**LOO[0,27]**（判据锚点=生产工作区间，门禁分档 ≤5.9）；crf>27 仅监控不计 FAIL
+#   期望：LOO[0,27] ≤ 5.9；结构性超标则记录 + 申请分档门禁
 ```
 
 > ⚠ **AV1 的 VMAF 曲线更易在低码率端/平涂内容出现非单调平台**：harness 的
@@ -402,7 +404,7 @@ python3 probe/calibrate_equal_quality.py \
 
 # LOO
 python3 probe/loo_equal_quality.py --workroot /tmp/eqq_gpu --tag l40_720p_6s \
-    --tiers av1_nvenc --tol 1.0
+    --tiers av1_nvenc
 
 # 落表后门禁
 python3 verify/verify_quality_mapping.py

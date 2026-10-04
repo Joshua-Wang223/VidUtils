@@ -706,21 +706,44 @@ chk("[11] to_constqp_qp(c, 0) 恒 0（V14/A6 无损守卫；不依赖 _QP_LIMITS
     [H.to_constqp_qp(c, 0) for c in ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc',
                                      'librav1e', 'libsvtav1', 'libx264')],
     [0, 0, 0, 0, 0, 0])
-# ── CR-4：quality 口径下 AV1 的 -qp 走**仿射**（与 VE 的 QUALITY_MAP_QP 同源）──────
-#    L40 17 素材实测：等质 QP 中位 65.7/92.3/117.9/140.8（ref 21/24/27/30）⇒ 仿射
-#    7.9338·ref−97.5136 贴合（残差 ≤3.4）；过原点 ×3 只在 ref≈21 成立（ref24/27/30
-#    偏低 −20/−37/−51）。故 quality 用仿射、size 仍 ×3（与 VE 分口径一致）。
+# ── CR-4：quality 口径下 NVENC 的 -qp 与 VE `QUALITY_MAP_QP` 同源（h264/hevc/av1）────
+#    av1：L40 17 素材实测等质 QP 中位 65.7/92.3/117.9/140.8（ref 21/24/27/30）⇒ 仿射
+#    7.9338·ref−97.5136（残差 ≤3.4）；过原点 ×3 只在 ref≈21 成立；h264/hevc 取 VE 的 QP 行。
+#    判据锚点口径 = 生产工作区间 [0,27]（见 memory/feedback_loo_gate_anchor_range）；crf>27 仅监控。
 _prev_mode = H.get_quality_mode()
 H.set_quality_mode('quality')
+C.set_quality_mode('quality')
+if VE_QM is not None and hasattr(VE_QM, 'set_quality_mode'):
+    VE_QM.set_quality_mode('quality')
 _cq21 = int(round(H.from_x264_crf('av1_nvenc', 21)))   # quality 口径 ref21 的 CQ 值（≈32）
 chk("[11] quality 口径 av1 crf-ref21 → -qp = 71（仿射，≠ size ×3 的 63）",
     H.to_constqp_qp('av1_nvenc', _cq21), 71)
-chk("[11] quality 口径 av1 两脚本 to_constqp_qp 逐点相等（含 0 短路）",
-    [H.to_constqp_qp('av1_nvenc', v) for v in (0, 21, _cq21, 51)],
-    [C.to_constqp_qp('av1_nvenc', v) for v in (0, 21, _cq21, 51)])
 chk("[11] quality 口径 from_constqp_qp('av1_nvenc', 71) ≈ 21.24（仿射反解）",
     round(H.from_constqp_qp('av1_nvenc', 71), 2), 21.24)
+if VE_QM is not None:
+    _qp_strict, _qp_mon = [], []
+    for _c in ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc'):
+        for _ref in range(0, 52):
+            _v = H.from_x264_crf(_c, _ref)
+            if _v is None:
+                continue
+            _vv = int(round(_v))
+            _a, _cc, _e = (H.to_constqp_qp(_c, _vv), C.to_constqp_qp(_c, _vv),
+                           VE_QM.to_constqp_qp(_c, _vv))
+            if _a == _cc == _e:
+                continue
+            (_qp_strict if _ref <= 27 else _qp_mon).append((_c, _ref, _a, _cc, _e))
+    chk("[11] CR-4：quality 口径 VU↔VE 的 -qp 在 ref∈[0,27] 逐点相等（h264/hevc/av1）",
+        _qp_strict, [])
+    print(f'  [监控] quality QP 在 ref 28..51 ' +
+          (f'不一致（不计 FAIL）：{_qp_mon[:6]}' + (' …' if len(_qp_mon) > 6 else '')
+           if _qp_mon else '亦全等（监控项）'))
+else:
+    print('  ℹ 无 VE 仓，CR-4 跨仓 QP 一致性断言跳过')
 H.set_quality_mode(_prev_mode)
+C.set_quality_mode(_prev_mode)
+if VE_QM is not None and hasattr(VE_QM, 'set_quality_mode'):
+    VE_QM.set_quality_mode(_prev_mode)
 chk("[11] 两脚本 to_constqp_qp 逐点相等",
     [H.to_constqp_qp(c, v) for c in ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'librav1e')
      for v in (0, 18, 26, 40)],

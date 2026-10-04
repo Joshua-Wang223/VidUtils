@@ -214,11 +214,11 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 # （CPU 的 --crf、GPU 的 --cq）一律原样下发。
 try:
     from convert_crf import (SIZE_MAP, QUALITY_MAP, convert_quality, from_x264_crf,
-                             to_x264_crf, get_quality_map, set_quality_mode)
+                             to_x264_crf, get_quality_mode, get_quality_map, set_quality_mode)
 except ImportError:                       # 从其他工作目录启动时 sys.path 未必含本脚本所在目录
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from convert_crf import (SIZE_MAP, QUALITY_MAP, convert_quality, from_x264_crf,
-                             to_x264_crf, get_quality_map, set_quality_mode)
+                             to_x264_crf, get_quality_mode, get_quality_map, set_quality_mode)
 
 # ═══════════════════════════════════════════════════════════════════
 #  常量定义
@@ -1501,6 +1501,16 @@ _QP_LIMITS: Dict[str, Tuple[int, int]] = {
     'libx264': (0, 51), 'libx265': (0, 51),
 }
 
+# **quality 口径**的 QP 轴等质量行（CR-4 与 VE 同步；2026-10-04 L40 实测）。
+# AV1 的 `-qp`(qindex) 对基准 CRF 是**仿射带大负截距**（非过原点）：17 素材实测等质 QP
+# 中位 65.7 / 92.3 / 117.9 / 140.8（ref 21/24/27/30），仿射 `7.9338·ref − 97.5136` 贴合
+# （残差 ≤3.4）；而 `_QP_SCALE` 的过原点 ×3 只在 ref≈21 成立（ref24/27/30 偏低 −20/−37/−51
+# ⇒ 过度配质、文件偏大）。故 **quality 口径用仿射**，**size 口径仍用 `_QP_SCALE` 的 ×3**
+# （与 VE 的 `_QP_MAP_OVERRIDE` 一致）。⚠ 无损守卫（value==0 ⇒ 0）在 `to_constqp_qp` 顶部短路。
+_QP_AFFINE_QUALITY: Dict[str, Tuple[float, float]] = {
+    'av1_nvenc': (7.9338, -97.5136),   # (a, b)：qp = a·ref + b（quality 口径，L40 标定）
+}
+
 
 def qp_scale(codec: str) -> int:
     """该编码器 `-qp` 相对 x264 QP 的尺度（AV1 的 qindex ≈ 4×QP，其余为 1）。"""
@@ -1536,12 +1546,21 @@ def to_constqp_qp(codec: str, value: int) -> int:
     if ref is None:
         return int(value)
     lo, hi = qp_limits(c)
-    return int(max(lo, min(hi, int(round(ref)) * qp_scale(c))))
+    # quality 口径：AV1 走仿射（不过原点，CR-4）；其余编码器与 size 口径仍走 ×qp_scale。
+    aff = _QP_AFFINE_QUALITY.get(c) if get_quality_mode() == 'quality' else None
+    if aff is not None:
+        qp = aff[0] * float(ref) + aff[1]
+    else:
+        qp = float(int(round(ref)) * qp_scale(c))
+    return int(max(lo, min(hi, int(round(qp)))))
 
 
 def from_constqp_qp(codec: str, qp: int) -> float:
     """`-qp` → 基准轴 libx264 CRF（`to_constqp_qp` 的反向，供降级换算用）。"""
-    return max(0.0, min(51.0, float(qp) / qp_scale(codec)))
+    c = (codec or '').lower()
+    aff = _QP_AFFINE_QUALITY.get(c) if get_quality_mode() == 'quality' else None
+    ref = (float(qp) - aff[1]) / aff[0] if aff is not None else float(qp) / qp_scale(codec)
+    return max(0.0, min(51.0, ref))
 
 
 def default_quality_for(codec: str) -> int:

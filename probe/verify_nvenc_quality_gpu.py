@@ -62,7 +62,7 @@ T4 与 L40 的差别（脚本自动判）
 结论行（av1 可用时才出现，L40/Ada 上照它决定动不动表）
 ──────────────────────────────────────────────────────
     · `B-av1-结论`：`-cq` 表值(32，L40 已落表) 是否等质量 ⇒ 决定要不要改 QUALITY_MAP 的 b
-    · `C-av1-结论`：`-qp` 尺度该取几倍（21 / 63=×3 / 84=×4 / 105=×5）⇒ 决定要不要改 _QP_SCALE
+    · `C-av1-结论`：VU 的 av1 `-qp`（quality 仿射映射值）是否落带（对照 naive 21 / 旧 ×3 63 / ×5 105）⇒ 决定要不要复核 av1 QP 映射
 
 退出码
 ──────
@@ -109,6 +109,21 @@ def _cq_rc(codec: str) -> str:
 #    取表统一走 crf_mod.get_quality_map()（活动表），**不要**直接索引 QUALITY_MAP（会 KeyError）。
 CQ_TABLE_AT_21 = {'h264_nvenc': 26, 'hevc_nvenc': 26, 'av1_nvenc': 32}
 NAIVE_CQ = 21           # 修复前：基准轴数值被原样当 CQ 下发
+
+# CR-4：VU 的 av1 constqp（**quality 口径**）走**仿射**（与 VE 的 QUALITY_MAP_QP 同源），
+# 过原点 ×3 仅作 **size 口径/对照**。下列复算 ref21 处的 VU 实际映射值作 C 组主候选。
+AV1_QP_AFFINE = (7.9338, -97.5136)   # (a, b)：qp = a·ref + b（与 vidcrop_*.to_constqp_qp 一致）
+
+
+def av1_vu_qp_at_ref(crf_mod, ref_crf):
+    """复算 VU 在 quality 口径下、基准 CRF=ref_crf 时实际下发的 av1 `-qp`。
+
+    含生产链的取整：`_cq = int(round(from_x264_crf(codec, ref)))` 再 `to_x264_crf` 回 ref。
+    """
+    cq = int(round(crf_mod.from_x264_crf('av1_nvenc', ref_crf)))
+    ref = crf_mod.to_x264_crf('av1_nvenc', cq)
+    a, b = AV1_QP_AFFINE
+    return int(round(a * ref + b))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -256,28 +271,27 @@ def rate_verdict(d_psnr, ratio):
     return 'FAIL', f'ΔPSNR {d_psnr:+.2f} dB，码率 {ratio:.2f}×（越界）'
 
 
-def av1_qp_conclusion(av1_ok: dict) -> tuple[str, str]:
-    """AV1 constqp 的 -qp 尺度结论（**纯函数**，供 group_c 与 --selftest 共用）。
+def av1_qp_conclusion(av1_ok: dict, vu_qp: int = 71) -> tuple[str, str]:
+    """AV1 constqp 的 `-qp` 结论（**纯函数**，供 group_c 与 --selftest 共用）。
 
-    av1_ok = {候选 qp: 判词}（判词来自 rate_verdict 的 status）。返回 (status, detail)。
-    L40/Ada 上跑完照这条决定动不动 `_QP_SCALE['av1_nvenc']`。
+    av1_ok = {候选 qp: 判词}（判词来自 rate_verdict 的 status）。`vu_qp` = VU 在 quality
+    口径下 ref21 实际下发的 `-qp`（仿射，CR-4）⇒ 只要它落带即 PASS。
     """
     in_band = [v for v, st in av1_ok.items() if st == 'PASS']
-    # 优先级：×3(63) > ×4(84) > ×5(105) > ×2(42) > 直取(21)
+    if vu_qp in in_band:
+        others = sorted(v for v in in_band if v != vu_qp)
+        return 'PASS', (f'VU 映射值 {vu_qp}（quality 仿射 @ref21，CR-4 与 VE 同源）等质量落带'
+                        + (f'（另有 {others} 亦落带，仅作参照）' if others else '')
+                        + ' ⇒ 无需改动')
     if 63 in in_band:
-        return 'PASS', ('仅 ×3(63) 落带内 ⇒ `_QP_SCALE["av1_nvenc"]=3` 成立，**无需改动**')
-    if in_band == [84]:
-        return 'PASS', ('仅 ×4(84) 落带内 ⇒ `_QP_SCALE["av1_nvenc"]=4` 成立，**无需改动**')
-    if 105 in in_band and 84 not in in_band:
-        return 'WARN', ('仅 ×5(105) 落带内 ⇒ 建议改 `_QP_SCALE["av1_nvenc"]`→5'
-                        '（**两脚本同步** + 复核 `_QP_LIMITS`；改完回跑方案 §4.1）')
+        return 'WARN', ('VU 仿射值未落带、旧 ×3(63) 落带 ⇒ 复核仿射行/口径（size vs quality）')
     if 21 in in_band:
-        return 'WARN', ('直取基准轴(21) 落带内 ⇒ 可能不需要 QP 尺度层；但与 AV1 qindex 语义'
+        return 'WARN', ('直取基准轴(21) 落带 ⇒ 可能不需要 QP 尺度层；但与 AV1 qindex 语义'
                         '（21 近无损、体积应暴涨）矛盾，务必人工复核后才能撤尺度')
     if not in_band:
-        return 'FAIL', (f'候选均不落容忍带（{av1_ok}）⇒ 无法判定唯一尺度，'
-                        '需扩扫（如 42 / 63 / 126）或按实测码率重标 `QUALITY_MAP["av1_nvenc"]`')
-    return 'WARN', f'多个候选落带内（{in_band}）⇒ 无法判定唯一尺度，需人工取更贴者'
+        return 'FAIL', (f'候选均不落容忍带（{av1_ok}）⇒ 无法判定，'
+                        '需扩扫或按实测重标仿射行（QUALITY_MAP_QP["av1_nvenc"]）')
+    return 'WARN', f'VU 仿射值未落带；候选 {in_band} 落带 ⇒ 无法判定，需人工复核取舍'
 
 
 def av1_cq_conclusion(st: str, ratio: float, d: float, table_v: int) -> tuple[str, str]:
@@ -447,18 +461,19 @@ def group_b(res: Result, src: Path, work: Path, soft: dict, soft_bytes: int,
             res.add('B-av1-结论', 'B', 'av1_nvenc 的 -cq 表值结论', cst, cdet)
 
 
-def group_c(res: Result, src: Path, work: Path, soft: dict, usable: dict) -> None:
+def group_c(res: Result, src: Path, work: Path, soft: dict, usable: dict,
+            vu_qp21: int = 71) -> None:
     print('\n【C】constqp 的 -qp 尺度（专门针对 av1_nvenc；H.264/HEVC 作对照）')
     av1_ok: dict[int, str] = {}          # 候选 qp → 判词（仅 av1 可用时填充）
     if not usable.get('av1_nvenc'):
         res.add('C-av1', 'C', 'AV1 constqp 的 QP 尺度', 'SKIP',
                 '本卡不支持 AV1 NVENC（T4 情形）⇒ 此格必须在 L40/Ada 上跑')
     else:
-        # 候选：直取基准轴(21) / ×3(63) / ×4(84) / ×5(105)
-        # ×3(63) 为 L40 扩扫新增最佳尺度（2026-09-29 实测）
-        for v, tag in ((21, '直取基准轴（当前两项目的做法）'),
-                       (63, '×3（L40 扩扫最佳）'),
-                       (84, '×4（qindex ≈ 4×QP）'),
+        # 候选：直取基准轴(21) / **VU quality 仿射 @ref21**（CR-4）/ 过原点 ×3(63，旧/size) / ×5(105)
+        # 主候选 = VU 当前实际映射值（quality 仿射）；其余为对照（用于排除直取/×3/×5）。
+        for v, tag in ((21, '直取基准轴（naive）'),
+                       (vu_qp21, 'VU quality 仿射（CR-4；7.9338·ref−97.5136 @ref21）'),
+                       (63, '过原点 ×3（旧 / size 口径）'),
                        (105, '×5')):
             out = work / f'c_av1_qp{v}.mp4'
             rc, log = encode_nvenc(src, out, 'av1_nvenc', 'qp', v)
@@ -469,19 +484,26 @@ def group_c(res: Result, src: Path, work: Path, soft: dict, usable: dict) -> Non
             m = measure(src, out, has_libvmaf())
             ratio = (m['kbps'] / soft['kbps']) if (m['kbps'] and soft['kbps']) else 0.0
             d = (m['psnr'] - soft['psnr']) if (m['psnr'] and soft['psnr']) else 0.0
-            st, vd = rate_verdict(d, ratio)
+            dv = (m['vmaf'] - soft['vmaf']) if (m['vmaf'] and soft['vmaf']) else None
+            # CR-4：av1 的映射值以 **VMAF** 判（与等质量表同轴）。PSNR 代理在 ref21 边缘会误判
+            # （qp71：ΔVMAF −0.23 = 等质量，但 ΔPSNR −1.70 越 PSNR 代理带）⇒ PSNR/码率降为 evidence。
+            if dv is not None:
+                st = 'PASS' if abs(dv) <= TOL_VMAF else ('WARN' if abs(dv) <= 2 * TOL_VMAF else 'FAIL')
+                vd = f'ΔVMAF {dv:+.3f}（ΔPSNR {d:+.2f} dB / 码率 {ratio:.2f}×）'
+            else:
+                st, vd = rate_verdict(d, ratio)
             av1_ok[v] = st
-            # 候选项是**对照组**：不落带的尺度（21/84/105 等）本就该被排除，
-            # 判词统一由 `C-av1-结论` 汇总（唯一尺度是否落带）⇒ 单格 FAIL 不计入门禁
-            # （与 B 组「朴素值」同处理；否则 L40 正确运行也会因对照组退出 1）。
+            # 候选项是**对照组**：不落带的尺度（21/63/105 等）本就该被排除，
+            # 判词统一由 `C-av1-结论` 汇总 ⇒ 单格 FAIL 不计入门禁（与 B 组「朴素值」同处理）。
             cell_st = 'WARN' if st == 'FAIL' else st
             res.add(f'C-av1-qp{v}', 'C', f'av1_nvenc -rc constqp -qp {v}（{tag}）',
                     cell_st, vd,
                     evidence=[f'PSNR {m["psnr"] and round(m["psnr"], 2)} dB  '
+                              f'VMAF {m["vmaf"] and round(m["vmaf"], 3)}  '
                               f'{round(m["kbps"] or 0)} kbps  码率比 {ratio:.2f}×'])
-        # 结论行：L40/Ada 上跑完直接照它决定"动不动 _QP_SCALE"
-        cst, cdet = av1_qp_conclusion(av1_ok)
-        res.add('C-av1-结论', 'C', 'AV1 的 -qp 尺度结论', cst, cdet)
+        # 结论行：L40/Ada 上跑完直接照它决定动不动 VU 的 av1 QP 映射（CR-4）
+        cst, cdet = av1_qp_conclusion(av1_ok, vu_qp21)
+        res.add('C-av1-结论', 'C', 'AV1 的 -qp 结论', cst, cdet)
     # H.264 / HEVC 的对照组：QP 与 x264 QP 同尺度 ⇒ 21 应落在带内
     for codec in ('h264_nvenc', 'hevc_nvenc'):
         if not usable.get(codec):
@@ -515,7 +537,7 @@ def write_reports(res: Result, args, gpu: str, src: Path) -> None:
         print(f'\n  报告已写入 {args.json}')
     if args.md:
         lines = [f'# NVENC 质量轴上机验收（{gpu or "GPU 未知"}）', '',
-                 f'- 素材：`{src}`', f'- 判据：ΔPSNR ≥ −{TOL_PSNR} dB，码率比 {RATE_PASS}',
+                 f'- 素材：`{src}`', f'- 判据：ΔPSNR ≥ −{TOL_PSNR} dB，码率比 {RATE_PASS}；C 组 av1 以 |ΔVMAF| ≤ {TOL_VMAF} 判',
                  '', '| 组 | id | 结论 | 状态 | 说明 |', '|---|---|---|---|---|']
         for r in res.rows:
             lines.append(f"| {r['group']} | {r['id']} | {r['title']} | "
@@ -550,22 +572,21 @@ def selftest() -> int:
     if rate_verdict(0.0, 1.6)[0] != 'WARN':
         bad.append('警戒带应 WARN')
     # av1 结论行是纯函数、且只在 L40/Ada 上会走到 ⇒ 必须先自证（否则首次上机才暴露）
-    _qp = {21: 'FAIL', 84: 'PASS', 105: 'FAIL'}
-    if av1_qp_conclusion(_qp)[0] != 'PASS':
-        bad.append('qp 结论：仅 ×4(84) 落带应 PASS')
-    if av1_qp_conclusion({21: 'FAIL', 84: 'FAIL', 105: 'PASS'})[0] != 'WARN':
-        bad.append('qp 结论：仅 ×5(105) 落带应 WARN（建议改尺度）')
-    if av1_qp_conclusion({21: 'PASS', 84: 'FAIL', 105: 'FAIL'})[0] != 'WARN':
+    if av1_qp_conclusion({21: 'FAIL', 71: 'PASS', 63: 'FAIL', 105: 'FAIL'})[0] != 'PASS':
+        bad.append('qp 结论：VU 仿射值(71) 落带应 PASS')
+    if av1_qp_conclusion({21: 'PASS', 71: 'PASS', 63: 'FAIL', 105: 'FAIL'})[0] != 'PASS':
+        bad.append('qp 结论：VU 仿射值落带（另有候选亦落带）仍应 PASS（其余仅作参照）')
+    if av1_qp_conclusion({21: 'FAIL', 71: 'FAIL', 63: 'PASS', 105: 'FAIL'})[0] != 'WARN':
+        bad.append('qp 结论：VU 仿射未落带、旧 ×3(63) 落带应 WARN（复核仿射/口径）')
+    if av1_qp_conclusion({21: 'PASS', 71: 'FAIL', 63: 'FAIL', 105: 'FAIL'})[0] != 'WARN':
         bad.append('qp 结论：仅直取(21) 落带应 WARN（要求人工复核）')
-    if av1_qp_conclusion({21: 'FAIL', 84: 'FAIL', 105: 'FAIL'})[0] != 'FAIL':
-        bad.append('qp 结论：三候选都不落带应 FAIL')
-    if av1_qp_conclusion({21: 'PASS', 84: 'PASS', 105: 'FAIL'})[0] != 'WARN':
-        bad.append('qp 结论：多候选落带应 WARN（无法判定唯一尺度）')
-    if '无需改动' not in av1_qp_conclusion({84: 'PASS'})[1]:
-        bad.append('qp 结论：×4 成立时应写明"无需改动"')
-    _qp_in = {84: 'PASS'}
+    if av1_qp_conclusion({21: 'FAIL', 71: 'FAIL', 63: 'FAIL', 105: 'FAIL'})[0] != 'FAIL':
+        bad.append('qp 结论：候选都不落带应 FAIL')
+    if '无需改动' not in av1_qp_conclusion({71: 'PASS'})[1]:
+        bad.append('qp 结论：VU 仿射值成立时应写明"无需改动"')
+    _qp_in = {71: 'PASS'}
     av1_qp_conclusion(_qp_in)
-    if _qp_in != {84: 'PASS'}:
+    if _qp_in != {71: 'PASS'}:
         bad.append('qp 结论：不应修改入参（须为纯函数）')
     if av1_cq_conclusion('PASS', 1.20, 0.5, 27)[0] != 'PASS':
         bad.append('cq 结论：表值 PASS 应 PASS')
@@ -655,7 +676,7 @@ def main() -> int:
                   f'{"可用" if ok else "不可用（" + why[:80] + "）"}')
 
         group_b(res, src, work, soft, soft_out.stat().st_size, usable)
-        group_c(res, src, work, soft, usable)
+        group_c(res, src, work, soft, usable, av1_vu_qp_at_ref(crf_mod, 21))
         write_reports(res, args, gpu, src)
     finally:
         if not args.keep:

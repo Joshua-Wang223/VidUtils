@@ -698,14 +698,29 @@ chk("[11] to_constqp_qp('h264_nvenc', 26) == 21（对齐 VE 的 to_constqp_qp）
     H.to_constqp_qp('h264_nvenc', 26), 21)
 chk("[11] to_constqp_qp('hevc_nvenc', 28) == 20（20.5 银行家舍入）",
     H.to_constqp_qp('hevc_nvenc', 28), 20)
-chk("[11] to_constqp_qp('av1_nvenc', 27) == 63（(27−6)=21 基准 ×3，L40 扩扫最佳）",
+chk("[11] to_constqp_qp('av1_nvenc', 27) == 63（size 口径：(27−6)=21 基准 ×3）",
     H.to_constqp_qp('av1_nvenc', 27), 63)
-chk("[11] from_constqp_qp('av1_nvenc', 63) == 21（反向自洽）",
+chk("[11] from_constqp_qp('av1_nvenc', 63) == 21（size 口径反向自洽）",
     H.from_constqp_qp('av1_nvenc', 63), 21.0)
 chk("[11] to_constqp_qp(c, 0) 恒 0（V14/A6 无损守卫；不依赖 _QP_LIMITS clamp）",
     [H.to_constqp_qp(c, 0) for c in ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc',
                                      'librav1e', 'libsvtav1', 'libx264')],
     [0, 0, 0, 0, 0, 0])
+# ── CR-4：quality 口径下 AV1 的 -qp 走**仿射**（与 VE 的 QUALITY_MAP_QP 同源）──────
+#    L40 17 素材实测：等质 QP 中位 65.7/92.3/117.9/140.8（ref 21/24/27/30）⇒ 仿射
+#    7.9338·ref−97.5136 贴合（残差 ≤3.4）；过原点 ×3 只在 ref≈21 成立（ref24/27/30
+#    偏低 −20/−37/−51）。故 quality 用仿射、size 仍 ×3（与 VE 分口径一致）。
+_prev_mode = H.get_quality_mode()
+H.set_quality_mode('quality')
+_cq21 = int(round(H.from_x264_crf('av1_nvenc', 21)))   # quality 口径 ref21 的 CQ 值（≈32）
+chk("[11] quality 口径 av1 crf-ref21 → -qp = 71（仿射，≠ size ×3 的 63）",
+    H.to_constqp_qp('av1_nvenc', _cq21), 71)
+chk("[11] quality 口径 av1 两脚本 to_constqp_qp 逐点相等（含 0 短路）",
+    [H.to_constqp_qp('av1_nvenc', v) for v in (0, 21, _cq21, 51)],
+    [C.to_constqp_qp('av1_nvenc', v) for v in (0, 21, _cq21, 51)])
+chk("[11] quality 口径 from_constqp_qp('av1_nvenc', 71) ≈ 21.24（仿射反解）",
+    round(H.from_constqp_qp('av1_nvenc', 71), 2), 21.24)
+H.set_quality_mode(_prev_mode)
 chk("[11] 两脚本 to_constqp_qp 逐点相等",
     [H.to_constqp_qp(c, v) for c in ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'librav1e')
      for v in (0, 18, 26, 40)],

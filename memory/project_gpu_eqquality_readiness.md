@@ -45,3 +45,14 @@ type: project
   B 组「朴素值」同理（同处理见 `verify_nvenc_quality_gpu.py` group_b/group_c）。
 - ⚠ 标定口径铁律不变：`n_subsample=1`、与 CPU 表同锚点同 prep；**换 ffmpeg 构建须重标**
   （指纹 T4/L40 均 580.65.06 / ffmpeg 9.0.2）。
+
+**追加（2026-10-04）· CR-4：av1 `-qp`（quality 口径）改仿射** ——
+VE 落其 `QUALITY_MAP_QP['av1_nvenc']` 后通知 VU（触发跨仓契约 **CR-4**）。VU 用 VE 的 17 素材 QP 点
+**独立复现**：等质 QP 中位 **65.7/92.3/117.9/140.8**（ref 21/24/27/30），拟合 **a=7.9338 / b=−97.5136**
+（残差 ≤3.4）；**过原点 ×3 只在 ref≈21 成立**（ref24/27/30 偏低 −20/−37/−51）。
+⇒ 两脚本加 `_QP_AFFINE_QUALITY`：**quality 口径用仿射、size 口径保留 `×3`**（与 VE 分口径一致）；
+`to_constqp_qp`/`from_constqp_qp` 按 `get_quality_mode()` 分流；⑪ 组新增 quality 断言。
+- ⚠ **判据轴**：探针 C 组 av1 改以 **VMAF** 判（qp71：ΔVMAF −0.23 = 等质量，但 ΔPSNR −1.70 越 PSNR 代理带）
+  —— 与等质量表同轴；PSNR/码率降为 evidence。
+- ⚠ **仍未对齐**：h264/hevc 的 quality 口径 VU 仍恒等（ref×1），VE 有其 QP 行（`(0.9704,1.4767)` /
+  `(1.1083,−2.9183)`）⇒ 两仓在该两档差 ~1~2 QP。⑨ 组目前只在 **size 口径**核 QP（故仍绿）；是否一并对齐由仓主定。

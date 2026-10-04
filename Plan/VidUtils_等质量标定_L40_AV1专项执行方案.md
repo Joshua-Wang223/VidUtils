@@ -22,8 +22,11 @@
 > - **G3 落表（阶段 2~4）**：`QUALITY_MAP['av1_nvenc'] = (1.4573, 1.1022, 0, 63)`（17 素材 =
 >   12×6s + 5×10s、85 点；crf21→`-cq 32`）。**LOO worst = 5.76**（合并 16 素材；单素材 in-sample
 >   dVMAF < 0.44）—— 与 T4/软编**同源结构性上限**，按**分档门禁 ≤5.9**（CPU/T4 先例）判达标。
-> - **G4（阶段 5）回归复核 PASS**：探针 `C-av1-结论` = 仅 ×3(63) 落带 ⇒ `_QP_SCALE['av1_nvenc']=3`
->   成立、**无需改动**；`B-av1-结论` = 表值 `-cq 32` 落带（ΔPSNR −0.34 dB / 0.96×）。**勿改回 4**。
+> - **G4（阶段 5）回归复核 + CR-4**：探针 `C-av1-结论` = VU 仿射映射值落带；`B-av1-结论` = 表值
+>   `-cq 32` 落带（ΔPSNR −0.34 dB / 0.96×）。⚠ **CR-4（VE 通知，VU 已独立复现）**：L40 17 素材
+>   实测等质 QP 对基准 CRF 是**仿射带大负截距**（`7.9338·ref−97.5136`，残差 ≤3.4），过原点 `×3`
+>   仅 ref≈21 成立（ref24/27/30 偏低 −20/−37/−51）⇒ VU 的 av1 `-qp` 在 **quality 口径改仿射**
+>   （两脚本加 `_QP_AFFINE_QUALITY`）、**size 口径保留 ×3**，与 VE `QUALITY_MAP_QP` 同步。
 > - **G5（阶段 6）门禁解锁**：`verify_equal_quality.py` 的 `HARD` 纳入 `av1_nvenc` ⇒ AV1 由 SKIP
 >   变实测（`-cq 32`，ΔVMAF=+0.004）。**G6（阶段 7）长视频**：`Earth at Night` 30s 4K 上
 >   av1 ΔVMAF=+0.179（对照 h264 +0.105 / hevc +0.038，与 T4 长片一致 ⇒ 无跨代异常）。
@@ -56,7 +59,7 @@
 | G0 | 扩展 harness 支持 NVENC | 任意有 N 卡 | 两仓同源 | **已落地（2026-10-03）** | ✅ 阶段 1（细节同 T4 方案） |
 | G1/G2 | h264/hevc_nvenc `-cq` 等质量 | T4 | 两仓 | **已落表（2026-10-04 T4）** | ❌ 见 T4 方案 |
 | **G3** | **`av1_nvenc` 的 `-cq` 等质量标定** | **L40/Ada** | 两仓 | **✅ 已落表（2026-10-04 L40）** | ✅ **本方案主体** |
-| **G4** | **AV1 constqp `-qp` 尺度回归复核** | **L40/Ada** | VE 主 / 本仓复核 | **✅ 已复核（仅 ×3 落带）** | ✅ 本方案阶段 5 |
+| **G4** | **AV1 constqp `-qp` 回归复核 + CR-4 与 VE 对齐（仿射）** | **L40/Ada** | VE 主 / 本仓复核 | **✅ 已复核并同步（quality 仿射 / size ×3）** | ✅ 本方案阶段 5 / CR-4 |
 | **G5** | AV1 硬编等质量门禁解锁 | L40 | 本仓 | **✅ 已解锁（AV1 由 SKIP 变实测）** | ✅ 本方案阶段 6 |
 | **G6** | AV1 真机长视频验证 | L40 | 两仓 | **✅ 已达标（30s 4K，ΔVMAF=+0.179）** | ✅ 本方案阶段 7 |
 | G7 | 落点/运行期/无损回归复核 | T4（L40 可选） | 本仓 | 部分已做 | ⚠ 可选 |
@@ -74,7 +77,7 @@
 |---|---|---|---|---|
 | **A0** | 复用 G0：harness 支持 NVENC + `--expect-av1` fail-fast | harness 可跑 `av1_nvenc` | 有 Ada 卡 | `--expect-av1` 不报 exit 2 |
 | **A1** | `av1_nvenc` 的 `-cq` 等质量标定（多素材 + LOO） | `QUALITY_MAP['av1_nvenc'] = (a,b,0,63)` | A0 | 池化 `max|ΔVMAF| ≤ 1.0`；LOO 达标 |
-| **A2** | AV1 constqp `-qp` 尺度回归（`_QP_SCALE=3`） | 探针结论行 | A1 落表后 | `C-av1-结论` PASS（仅 ×3 落带） |
+| **A2** | AV1 constqp `-qp` 回归 + **CR-4 对齐**（quality 口径改仿射） | 探针结论行 | A1 落表后 | `C-av1-结论` PASS（VU 仿射映射值落带） |
 | **A3** | AV1 硬编等质量门禁解锁 | AV1 条目从 SKIP 变实测 | A1/A2 | 硬编 `|ΔVMAF| ≤ 1.0` |
 | **A4** | AV1 真机长视频验证 | 长片报告 | A1 | 见立项 B4 |
 | **A5** | 报告归档 + 与 T4 报告对比 | `verification_report/*L40_<TS>.*` | 全程 | A 组与 T4 一致；多出 av1 格 |
@@ -190,13 +193,14 @@ python3 probe/verify_nvenc_quality_gpu.py --expect-av1 \
     --json verification_report/nvenc_quality_L40_$(date +%Y%m%d_%H%M%S).json \
     --md   verification_report/nvenc_quality_L40_$(date +%Y%m%d_%H%M%S).md
 #   看 C-av1-结论：
-#     PASS（仅 ×3(63) 落带） ⇒ _QP_SCALE=3 成立，无需改动
-#     WARN/FAIL            ⇒ 按结论行动作（见 §4 判读矩阵），改尺度须两脚本同步 + 回跑⑨组
+#     PASS（VU 仿射映射值落带） ⇒ quality 仿射映射成立，无需改动
+#     WARN/FAIL              ⇒ 按结论行动作（见 §4 判读矩阵），改表须两脚本同步 + 回跑⑨组
 ```
 
-> 本仓（VidUtils）**无独立 QP 轴表**：`to_constqp_qp()` = 基准轴值 × `_QP_SCALE`，
-> 故本阶段只做回归复核。**VE 侧另需 `QUALITY_MAP_QP`（QP/constqp 轴等质量表）**，
-> 属 VE 交付物，不在本仓范围。
+> 本仓（VidUtils）**无独立 QP 轴表**，`to_constqp_qp()` 原为「基准轴值 × `_QP_SCALE`」。
+> **本阶段实测触发 CR-4**：过原点 ×3 只覆盖 ref≈21，L40 17 素材实测等质 QP 是**仿射**
+> ⇒ VU 现在 **quality 口径用仿射 `7.9338·ref−97.5136`**（两脚本 `_QP_AFFINE_QUALITY`）、
+> **size 口径保留 ×3**；`from_constqp_qp` 同步反解。与 **VE 的 `QUALITY_MAP_QP`（QP 轴表）一致**。
 
 ### 阶段 6 · AV1 硬编等质量门禁解锁（A3）
 
@@ -306,10 +310,10 @@ python3 verify/verify_quality_mapping.py
 | `A-av1_nvenc` 池化 `max|ΔVMAF| ≤ 1.0` 且 LOO 达标 | 落表，解除 `SIZE_MAP` 回退 |
 | LOO 结构性超标 | 先排除执行错误，确认后**记录 + 申请分档门禁**（参照 CPU 侧先例） |
 | `--expect-av1` 报 exit 2 | **本卡不是 Ada**，停；AV1 标定必须上 L40/Ada |
-| `C-av1-结论` = PASS（仅 ×3(63) 落带） | `_QP_SCALE['av1_nvenc']=3` 成立，**无需改动**（勿改回 4） |
-| `C-av1-结论` = WARN（仅 ×4 落带） | 兼容旧表；扩扫确认后再定 |
-| `C-av1-结论` = WARN（仅 ×5 / 仅 21 落带） | 按结论行动作；改尺度须两脚本同步 + 回跑 ⑨ 组 |
-| `C-av1-结论` = FAIL（均不落带） | 扩扫（42/63/126）或按实测码率重标 `QUALITY_MAP['av1_nvenc']` |
+| `C-av1-结论` = PASS（VU 仿射映射值落带） | av1 quality 仿射映射成立，**无需改动**（CR-4 已同步） |
+| `C-av1-结论` = WARN（VU 仿射值未落带、旧 ×3 落带） | 复核仿射行/口径（size vs quality）；改表须两脚本同步 + 回跑 ⑨ 组 |
+| `C-av1-结论` = WARN（仅直取 21 落带） | 可能不需 QP 尺度层；须人工复核后才能撤 |
+| `C-av1-结论` = FAIL（均不落带） | 扩扫或按实测重标仿射行（`_QP_AFFINE_QUALITY` / VE `QUALITY_MAP_QP['av1_nvenc']`） |
 | `B-av1-结论` = FAIL | 表值未落带 ⇒ 重标 b（两仓同步 + 回跑 ⑨ 组） |
 | 探针 av1 格 SKIP | **只应出现在非 Ada 卡**；加 `--expect-av1` 后绝不该静默 SKIP |
 | L40 上 §4.1 的假红 | 与 T4 相同（有 GPU ⇒ 4 处 verify + 2 个 `dump_cmd_full` 用例），非本方案回归 |
@@ -369,7 +373,7 @@ python3 verify/verify_quality_mapping.py
 
 - **R1 · 非 Ada 卡误跑**：不加 `--expect-av1` 时非 AV1 卡静默 SKIP 且 exit 0 ⇒ 误判「AV1 已验」。
   **本方案强制加 `--expect-av1`**。
-- **R2 · `_QP_SCALE` 改回 4**：§4.10 已定为 **3**，勿改回（改尺度须两脚本同步 + 回跑 ⑨ 组）。
+- **R2 · av1 QP 口径**：size 口径 `_QP_SCALE=3`（勿改回 4）；**quality 口径已由 CR-4 改为仿射 `7.9338·ref−97.5136`**（勿退回过原点 ×3）。改任一须两脚本同步 + 回跑 ⑨ 组。
 - **R3 · `(lo,hi)` 是 CQ 轴量程**：`av1_nvenc` 写 `0~63`；**不能**拿它夹 `-qp`（`_QP_LIMITS` 才是 QP 轴）。
 - **R4 · 素材池/时长效应/指纹**：同 T4 方案 §7 R1/R2/R3。
 - **R5 · L40 上 `verify/` 假红**：与 T4 相同（有 GPU 的环境假设过时），非本方案回归。

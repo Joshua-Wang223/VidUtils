@@ -1,0 +1,116 @@
+# FFmpeg NVENC 编码知识总结
+
+## 1. 版本与 SDK 关系
+
+- **FFmpeg 9.0 起**：NVENC 封装移除废弃选项，包括 `vbr_hq`、`cbr_hq`、`cbr_ld_hq`。
+- **原因**：NVIDIA Video Codec SDK API 现代化，旧预设被拆解为可独立控制的参数。
+- **要求**：FFmpeg 9.0 要求 NVENC SDK ≥ 11.1。
+- **驱动与 SDK**：
+  - 驱动 `580.65.06` → 对应 Video Codec SDK **13.0**。
+  - Ubuntu 包 `libffmpeg-nvenc-dev 12.1.14.0` → 编译用头文件为 SDK **12.1**，与驱动兼容。
+- **软编不受影响**：FFmpeg 9.0 的移除仅针对 NVENC，`libx264`、`libx265` 等软件编码器无变化。
+
+## 2. 速率控制模式 `-rc`
+
+FFmpeg NVENC 封装中，`-rc` 仅暴露三个基础值：
+
+| 值 | 含义 | 特点 |
+|---|---|---|
+| `constqp` | 固定 QP | 画质相对恒定，码率/文件大小不可预测 |
+| `vbr` | 可变码率 | 可配合 `-cq` 实现 QVBR，或配合 `-b:v` 实现目标码率 |
+| `cbr` | 恒定码率 | 码率稳定，画质随画面复杂度波动 |
+
+> **注意**：NVENC 封装中**没有**独立的 `-rc qvbr`。QVBR 通过 `-rc vbr -cq <值>` 隐式触发。  
+> 其他封装（如 VAAPI）可能存在独立的 `-rc_mode QVBR`。
+
+## 3. 质量参数
+
+| 参数 | 适用模式 | 说明 |
+|---|---|---|
+| `-cq` | `-rc vbr` | 目标质量等级（0–51，越小越好），启用 QVBR |
+| `-qp` | `-rc constqp` | 固定量化参数（0–51，越小越好） |
+| `-crf` | 软编（x264/x265） | NVENC 无此原生参数，对应 `-cq` |
+| `-qmin` / `-qmax` | CBR/VBR | 限制 QP 范围，间接约束画质 |
+| `-b:v` / `-maxrate` / `-bufsize` | CBR/VBR | 码率控制核心参数 |
+
+> **CQ 模式下 `-b:v` 会被丢弃**：FFmpeg 在 CQ 分支强制把 `averageBitRate`、`vbvBufferSize` 清零，只认 `-maxrate`（`nvenc.c` 中 "CQ mode shall discard avg bitrate/vbv buffer size and honor only max bitrate"）。
+> 因此 `-b:v 0` 是冗余写法（FFmpeg 自己会清零），而**不给 `-maxrate` 时低 CQ 值可能突然飙到极高码率**。
+
+## 4. 关键模式对比
+
+| 模式 | 目标 | 码率行为 | 画质行为 | 文件大小 | 典型场景 |
+|---|---|---|---|---|---|
+| `-rc vbr -cq x`（QVBR） | 恒定感知质量 | 动态波动，需 `-maxrate` 限制 | 稳定 | 不可预测 | 高质量归档、本地收藏 |
+| `-rc vbr -b:v x -multipass fullres` | 在码率预算内优化质量 | 受 `-b:v` / `-maxrate` 约束，multipass 提升命中精度 | 复杂场景可能波动 | 可预测 | 上传平台、有码率限制 |
+| `-rc constqp -qp x` | 固定编码质量 | 完全不可控 | 相对恒定 | 不可预测 | 高质量中间格式 |
+| `-rc cbr -b:v x` | 恒定码率 | 严格稳定 | 随画面波动 | 可预测 | 直播推流、带宽受限 |
+
+> **QVBR vs VBR multipass**：QVBR 是“质量驱动，实时反馈”；VBR multipass 是“码率预算，计划分配”。
+
+## 5. `-tune` 与 `-multipass`
+
+### `-tune` 选项
+
+| 值 | 含义 | 场景 |
+|---|---|---|
+| `hq` | 高质量（默认） | 本地录制、归档 |
+| `ll` | 低延迟 | 直播、视频会议 |
+| `ull` | 超低延迟 | 交互式远程控制 |
+| `lossless` | 无损 | 像素级保留 |
+
+> `uhq` 是 `hevc_nvenc` / `av1_nvenc` 的**原生取值**（`h264_nvenc` 的 `-tune` 只有 hq/ll/ull/lossless，无 uhq）。
+> 它会自动启用 lookahead 与 temporal filter，显存占用更高；不需要、也无法用 `-preset p7` + `-multipass fullres` 去"近似"。
+> 两者正交：uhq 是调优档位，multipass 是帧内两遍率控，互不替代。
+
+### `-multipass` 选项
+
+| 值 | 含义 | 质量 | 速度 |
+|---|---|---|---|
+| `disabled` | 单遍 | 最低 | 最快 |
+| `qres` | 四分之一分辨率两遍 | 良好 | 平衡 |
+| `fullres` | 全分辨率两遍 | 最佳 | 最慢 |
+
+> **`-multipass` 与速率控制模式的关系**（2026-10-04 校正）
+>
+> 1. **CQ 不是独立于 VBR 的模式**：`-rc vbr -cq N`（QVBR）在 NVENC API 层就是 `NV_ENC_PARAMS_RC_VBR`
+>    + `targetQuality`。FFmpeg `nvenc.c` 中未显式给 `-rc` 而给了 `-cq` 时，直接把 rc 判定为 VBR。
+>    所以"multipass 仅在 VBR/CBR 有效、CQ 模式下无效"字面上自相矛盾——CQ 本就是 VBR 的一个子模式。
+> 2. **真正不适用的是 `constqp`**：固定 QP 没有码率目标可优化，驱动会忽略 multipass
+>    （NVEncC 选项文档：`--multipass` 仅对 `--vbr` / `--cbr` 可用）。
+> 3. **FFmpeg 不做模式门控**：`rcParams.multiPass = ctx->multipass` 是无条件下发给驱动的，是否生效由驱动决定。
+>    唯一会覆盖它的是 legacy preset 别名：`slow` → P7 + 两遍，`medium` / `fast` → 强制单遍。
+>    ⚠️ 因此**从 `-preset slow` 改成 `-preset p7` 会静默丢掉两遍率控**（现代 p1–p7 别名不带任何 multipass 标记）。
+> 4. **`-tune hq` 是默认值**（`h264_nvenc` / `hevc_nvenc` 均为 `default hq`），显式写上等于没写，
+>    不可能带来任何画质变化。它只有在覆盖 `ll` / `ull` / `lossless` 时才有意义。
+> 5. **CQ 下的取舍**：NVIDIA 对 multipass 的官方描述是"提升码率控制精度，使实际码率贴近目标，
+>    尤其利于 CBR / 紧 VBV，代价是编码时间与显存"。CQ 不设平均码率目标，收益边际很小，
+>    却要付出约 2 倍耗时与数 GB 显存。故 CQ 归档场景**可以不加**——但理由是"收益小、成本高"，
+>    而不是"会掉画质"。若要叠加，官方自身也有先例（SDK 13.1 指南 §6.2.8"Ultra-High Quality Exports"
+>    即 `-preset p7 -tune uhq -rc vbr -cq 19 -maxrate 80M -multipass fullres`）。
+>    另注：有实测指出 multipass 会让输出**非确定性**（同参数两次编码结果略有差异），做等质量标定复现时需注意。
+>
+> ⚠️ **已撤回的旧论断**：本文此前称"CQ 模式下叠加 `-tune hq -multipass fullres` 会导致质量下降约 2.7–3.3 VMAF，
+> 中等质量点（cq=30）可达 4 VMAF 以上"。经核对，其数字来源（arXiv 2605.01187，Netflix Chimera + Twitch 序列）
+> 使用的是**纯 CBR**、**全文未测试 `-multipass`**、报的是 **BD-Rate %** 而非 VMAF 分值，与结论三重错配；
+> 且"降质量 + 增体积"在码率控制层面自相矛盾。已删除，改为上文的定性表述。
+> **待办**：在有 GPU 的环境做固定 CQ 的 ±multipass A/B（记录 VMAF / 实际码率 / 耗时），用实测数据补回量化结论。
+>
+> **核对依据**：本机 `ffmpeg 8.1.2` 的 `-h encoder=h264_nvenc` / `-h encoder=hevc_nvenc`；
+> FFmpeg master `libavcodec/nvenc.c`（L1036、L1038-1041、L1043-1048、L1139-1151、L240-242）；
+> NVIDIA Video Codec SDK 13.1《Using FFmpeg with NVIDIA GPU Hardware Acceleration》§6.1.10 / §6.2.8；
+> NVEncC（rigaya）选项文档。
+
+## 6. 软编 vs 硬编
+
+- **软件编码**：无 `-rc` 参数，通过参数组合隐式指定模式：
+  - 恒定质量：`-crf 23`
+  - 目标码率：`-b:v 6M`
+  - 恒定码率：`-b:v 6M -maxrate 6M -minrate 6M -bufsize 12M`
+  - 固定 QP：`-qp 23`
+- **FFmpeg 9.0 对软编无影响**，命令无需修改。
+
+## 7. 常用命令示例
+
+### QVBR（恒定质量）
+```bash
+ffmpeg -i input.mp4 -c:v h264_nvenc -rc vbr -cq 23 -maxrate 10M -b:v 0 output.mp4

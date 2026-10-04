@@ -58,3 +58,9 @@ VE 落其 `QUALITY_MAP_QP['av1_nvenc']` 后通知 VU（触发跨仓契约 **CR-4
   —— 与等质量表同轴；PSNR/码率降为 evidence。
 - ✅ **h264/hevc 的 quality 口径已一并对齐 VE**（`_QP_AFFINE_QUALITY` 加 `(0.9704,1.4767)` /
   `(1.1083,−2.9183)`）⇒ 两仓 `-qp` 在 quality 与 size 两口径、**全 ref 0..51 逐点一致（0 差异）**。
+- ⚠ **av1 CQ 行取 VE 规范化值 `(1.4566,1.2165)`**（VE 20b9e81；旧 `(1.4573,1.1022)` 无法由 VE 池复现）
+  ⇒ quality 口径 ref21 的 `-qp` 由 71 → **70**。
+- ⚠ **⑨ 跨仓门禁曾有假门禁**：`verify_quality_mapping.py` 加载 VE `quality_map.py` 时，其
+  `from convert_crf import …` 命中 `sys.modules` 里 **VU** 的同名缓存 ⇒ 「两仓表逐条相等」退化为
+  VU↔VU、**从不检查 VE**。已修（临时把 VE convert_crf 挂名 `convert_crf` 再加载 VE quality_map，
+  并把 [9] 功能比对统一用 VU_CRF）；真实跨仓态势看 `probe/calibrate_equal_quality.py::cross_repo_status`。

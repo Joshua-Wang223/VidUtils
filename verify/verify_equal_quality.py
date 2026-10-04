@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """等质量换算表（QUALITY_MAP）回归判据。
 
-对每条已落表（软编）编码器 × 真实素材：用**等质量表**算出目标参数 → 实测重编码 →
+对每条已落表编码器（软编 + 硬编）× 真实素材：用**等质量表**算出目标参数 → 实测重编码 →
 与同一 libx264 锚点比质量。判据（口径对齐 VE v2 §4.1「唯一来源 / 同轴」原则）：
   * 主门禁（**唯一 FAIL 依据**）：|ΔVMAF| ≤ 1.0
   * 平行**参考**指标（**soft，只 WARN 不判红**）：
@@ -10,8 +10,8 @@
       - |ΔPSNR-HVS| ≤ 0.5 dB（libvmaf feature）
     ⚠ 等质量表以 **VMAF** 定标 ⇒ 同 VMAF **不蕴含**同 PSNR，拿紧 PSNR 判红必然假阳性。
 
-无 GPU：硬编条目不在 QUALITY_MAP 内 ⇒ 自然 SKIP；若**全部** SKIP 则退出码 2
-（防"静默通过"）。
+硬编（NVENC）条目：**表覆盖 + 本机实编探测**双重判据，任一不满足即 SKIP
+（无 GPU / 未标定都不会误报）；若**全部**条目 SKIP 则退出码 2（防"静默通过"）。
 
 用法：
   python3 verify/verify_equal_quality.py < /dev/null
@@ -32,6 +32,11 @@ TOL_PSNR = 0.3   # 参考阈值（soft）：跨轴指标，超界只 WARN（见 
 TOL_HVS = 0.5    # 参考阈值（soft）：同上
 
 SOFT = ('libx265', 'libvpx-vp9', 'libaom-av1', 'libsvtav1', 'librav1e')
+# 硬编（NVENC）：仅当 QUALITY_MAP 已覆盖 **且** 本机实编可用时才实测，否则 SKIP。
+#   · 覆盖判断走表 —— 未标定的编码器不在表里 ⇒ 自动 SKIP（不误报）；
+#   · 可用性判断走真编探测 —— 防止「表已落、但当前机器无 N 卡/驱动」时假红；
+#   · 保留「全 SKIP ⇒ 退出码 2」空集守卫（防"静默通过"）。
+HARD = ('h264_nvenc', 'hevc_nvenc')
 DEFAULT_SRC = ROOT.parent / 'input_videos' / 'new5_raw.mp4'
 
 
@@ -59,7 +64,8 @@ def main():
     ap.add_argument('--width', type=int, default=1280)
     ap.add_argument('--height', type=int, default=720)
     ap.add_argument('--crf', type=int, default=21, help='libx264 锚点 CRF')
-    ap.add_argument('--codecs', default=','.join(SOFT))
+    ap.add_argument('--codecs', default=','.join(SOFT + HARD),
+                    help='逗号分隔；默认软编 + 硬编（硬编按表覆盖 + 本机可用性自动 SKIP）')
     ap.add_argument('--keep', action='store_true')
     args = ap.parse_args()
 
@@ -81,6 +87,19 @@ def main():
     print(f'等质量表覆盖: {sorted(table) or "（空）"}')
     if skipped:
         print(f'SKIP（等质量表未覆盖，需上机/待标定）: {skipped}')
+
+    # 硬编可用性探测：表已覆盖但本机编不了（无 N 卡 / 驱动缺失）⇒ SKIP，不判红
+    hard = [c for c in tested if c in getattr(C, 'HW_CODECS', set())]
+    if hard:
+        probe_src = C.make_probe_src(work)
+        for c in list(hard):
+            ok, why = C.probe_hw_codec(c, probe_src, work)
+            if not ok:
+                tested.remove(c)
+                skipped.append(c)
+                print(f'SKIP（硬编 {c} 本机不可编）: {why[:110]}')
+        probe_src.unlink(missing_ok=True)
+
     if not tested:
         print('✗ 无任何可测条目（等质量表为空或所选编码器均未覆盖）')
         return 2

@@ -870,10 +870,14 @@ DEFAULT_PRESET_SVTAV1 = "8"
 # （`-rc` 是 NVENC 专属，libx264 / libx265 没有"码率控制模式"这个开关，它们用
 # -crf / -b:v / -qp 的组合表达），故裸名不歧义、与前缀写法同样收。
 _RC_BACKEND = "nvenc"
-_RC_MODES = ("constqp", "vbr", "cbr", "cbr_ld_hq")
+# ⚠ FFmpeg 9.0 的 `-rc` 枚举**只剩 constqp / vbr / cbr**（T4 实测 2026-10-04：
+# `vbr_hq` / `cbr_hq` / `cbr_ld_hq` / `qvbr` 全部 rc≠0 `Invalid argument`）。
+# 本表即有效集，移除项不再接受（CLI 层直接报错，好过透传后 ffmpeg 运行期失败）。
+# ⚠ 与 vidcrop_hwaccel.py 的表**逐字一致**（孪生约定）。
+_RC_MODES = ("constqp", "vbr", "cbr")
 _RC_MODE_HELP = ("nvenc：" + " ".join(_RC_MODES)
                  + "\n  （constqp=恒定 QP（配 --qp）；vbr=可变码率；"
-                   "cbr / cbr_ld_hq=恒定码率（配 --bitrate））")
+                   "cbr=恒定码率（配 --bitrate））")
 # 允许与 --bitrate 共存的 rc 模式（含 auto：auto 对 NVENC 会下发默认 rc ——
 # h264/hevc=vbr、av1=vbr，见下方 _NVENC_DEFAULT_RC）。constqp 不在其中：它是
 # 恒定 QP 模式、会完全无视 -b:v（T4 实测，见仓库 memory/project_t4_gpu_capabilities.md）。
@@ -2839,7 +2843,7 @@ def parse_scale_algo(spec: Optional[str]) -> Tuple[str, str, str]:
 
 
 def parse_rc_mode(spec: Optional[str]) -> str:
-    """解析 --rc-mode → 'auto' | 'constqp' | 'vbr' | 'cbr' | 'cbr_ld_hq'。
+    """解析 --rc-mode → 'auto' | 'constqp' | 'vbr' | 'cbr'。
 
     与 vidcrop_hwaccel.py 的同名函数逐字对应（孪生约定：取值表、
     量程、报错首行都要一致）。规则与 parse_scale_algo 同形
@@ -4161,7 +4165,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         metavar="MODE",
         help="NVENC 的码率控制模式（默认 auto=不下发 -rc，由 preset 决定，与不写等价）。"
              "可选：constqp（恒定 QP，需 --qp）；vbr（可变码率）；"
-             "cbr / cbr_ld_hq（恒定码率，需 --bitrate）。写法 <mode> 或 "
+             "cbr（恒定码率，需 --bitrate）。写法 <mode> 或 "
              "nvenc-<mode>（本轴只有 NVENC 一个后端，裸名不歧义）。"
              "仅对 *_nvenc 编码器生效——本脚本默认编码器是 libx264，也没有硬件探测"
              "（--codec *_nvenc 是原样透传给 ffmpeg），所以要用它得先显式 "

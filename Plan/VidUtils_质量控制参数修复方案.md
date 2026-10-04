@@ -711,11 +711,31 @@ CPU 侧（含 VU 表值 + VE 侧锚点修正 + n3 作废标注）全部完成，
 - ✅ **VE 侧 rav1e-native 10s 复标剩余点**：VE 侧已完成（或主动忽略，认为不需复标）。
 
 *需 GPU（T4/L40 等，即立项 M5）*：
-- NVENC 等质量标定（`h264_nvenc` / `hevc_nvenc`）→ **T4 或 L40**；**`av1_nvenc` 须 L40（Ada）**（T4 无 AV1 编码器）。
-- **constqp/QP 轴等质量表**（VE `D2b`，`to_constqp_qp`）→ **T4/L40**（本仓无此路径，仅 VE 需要）。
+- ✅ **`h264_nvenc` / `hevc_nvenc` 等质量标定已完成（2026-10-04，T4）**——见下方「追加」；**`av1_nvenc` 须 L40（Ada）**（T4 无 AV1 编码器）——**未做**。
+- **constqp/QP 轴等质量表**（VE `D2b`，`to_constqp_qp`）→ **T4/L40**（本仓无此路径，仅 VE 需要）；h264/hevc 已由 T4 探针 C 组复核。
 - QSV 能力表 + 两仓口径统一（`-cq:v` vs `-global_quality/-q`）→ **Intel 核显机**。
 - AMF 能力表 → **AMD 机**；VideoToolbox `-q:v` → **macOS**。
-- 硬编侧上机验收（`verify_equal_quality.py` 硬编条目现 SKIP）→ 对应 GPU（**未开始**）。
+- ✅ 硬编侧上机验收：`verify/verify_equal_quality.py` 硬编条目**已解锁**（默认 7 档全绿）；L40 的 `av1_nvenc` 待补。
+
+### 4.12.1 追加（2026-10-04）：T4 上机 —— `h264_nvenc` / `hevc_nvenc` 等质量行落表
+
+**环境**：Tesla T4 / 驱动 580.65.06 / ffmpeg **9.0.2**；素材池 `input_videos/eqq_calib`
+**17 条**（6s 侧 12 + 10s 侧 5）；锚点 `18/21/24/27/30`；`n_subsample=1`；`-cq` 轴 +
+`-b:v 0 -preset p4 -rc vbr`（CR-1/CR-2）。
+
+| 编码器 | a | b | 区间 | `--crf-ref 21` | LOO 最坏 ΔVMAF |
+|---|---|---|---|---|---|
+| `h264_nvenc` | 0.9295 | 6.2523 | 0–51 | 26 | 3.97 |
+| `hevc_nvenc` | 1.1116 | 2.1606 | 0–51 | 26 | 5.85 |
+
+- **LOO 超立项 `<1.0`**，但与 CPU 软编**结构性上限同源**（单素材 dVMAF<0.65、误差非执行错误）；
+  经**仓主裁定**按 **分档门禁 ≤5.9**（CPU 软编先例）判**达标**，h264/hevc 两行写入两仓 `QUALITY_MAP`（逐字相等）。
+- 硬编门禁解锁：`verify/verify_equal_quality.py` 默认 `--codecs` 已含 nvenc，默认 7 档全绿
+  （h264 `ΔVMAF`=−0.044 / hevc +0.135，硬编由 SKIP 变实测）。
+- 落点回归：`t4_acceptance` A 组 + `verify_nvenc_quality_gpu` 探针归档 `verification_report/`。
+- ⚠ **NVENC 代际**：本行按 T4(Turing) 标定；Ada(L40) 上跑 h264/hevc 若需等质量，须做跨代复核。
+- 教训沿用：`hevc_nvenc` 的默认 `-cq` 由 SIZE_MAP 的 28 → 等质量表 26（`t4_acceptance` A4/A7、
+  `verify_nvenc_quality_gpu.CQ_TABLE_AT_21`、README 默认值同步更新）。
 
 *无需硬件（人工）*：
 - ~~**M3** 主观 AB 测试（≥3 人、双盲、随机序、ITU-R BT.500-13）~~ **已取消**：改为纯 AI 自动化验证（VMAF + 多指标交叉参考）。

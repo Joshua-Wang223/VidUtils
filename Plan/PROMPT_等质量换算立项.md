@@ -68,13 +68,13 @@
 | A8 | ✅ **文档 / 代码收尾** | ffmpeg 二进制指纹入档（§5.4）；`calibrate_equal_quality.py` 默认素材含 576p `word_world_2` 的池化陷阱；立项/方案状态同步 |
 | A9 | ✅ **VE 侧 n3 subsample=1 重跑 + rav1e-native 10s 复标剩余点**：VE 侧已完成（或主动忽略，认为不需） | CPU 标定任务，非 GPU |
 
-### B. 需 GPU（T4 / L40 等）—— **全部未开始，这就是下一步的全部待办**
+### B. 需 GPU（T4 / L40 等）—— **B1/B3(h264,hevc) 已于 2026-10-04 T4 完成；B2 待 L40**
 
 | # | 待办 | 最低硬件 | 说明 |
 |---|---|---|---|
-| B1 | `h264_nvenc` / `hevc_nvenc`的 `-cq` 等质量标定 | **T4**（Turing，支持 H.264/HEVC NVENC） | 等质量 `-cq` 轴未标，硬编当前回退 `SIZE_MAP` |
-| B2 | `av1_nvenc` 的 `-cq` 等质量标定 | **L40 / Ada** | ⚠ **T4 无 AV1 NVENC**，报 `No capable devices found`；量程 0~63 |
-| B3 | NVENC QP 行（若本仓 `to_constqp_qp` 走 constqp 轴） | h264/hevc **T4**；av1 **L40/Ada** | `av1_nvenc` QP 尺度 ×3 已由 L40 实测确认 |
+| B1 | `h264_nvenc` / `hevc_nvenc`的 `-cq` 等质量标定 | **T4**（Turing，支持 H.264/HEVC NVENC） | ✅ **已完成（2026-10-04 T4）**：17 素材（eqq_calib 12×6s+5×10s）池化 `h264=(0.9295,6.2523)`、`hevc=(1.1116,2.1606)`，LOO 3.97/5.85，按 ≤5.9 分档门禁达标，两仓 `QUALITY_MAP` 已落 |
+| B2 | `av1_nvenc` 的 `-cq` 等质量标定 | **L40 / Ada** | ⚠ **T4 无 AV1 NVENC**，报 `No capable devices found`；量程 0~63。见 L40 专项方案 |
+| B3 | NVENC QP 行（若本仓 `to_constqp_qp` 走 constqp 轴） | h264/hevc **T4**；av1 **L40/Ada** | ✅ h264/hevc 已由 T4 探针 C 组复核（`-qp 21` 落带）；`av1_nvenc` QP 尺度 ×3 已由 L40 实测确认 |
 | B4 | 真机长视频验证 + 生产管线 GPU 实跑判据 | **T4 / L40** | 详见 `Plan/Video_Enhancement_CRF_CQ统一优化_真机长视频验证与复测_Prompt.md`（VE 侧） |
 
 > ⚠ **A 组全部结论不能外推到 NVENC**：CPU 标定容器无 CUDA，硬编必须换机；
@@ -224,7 +224,7 @@ libx264 CRF 21  ≈  libx265 CRF ?  ≈  libvpx-vp9 CRF ?  ≈  libsvtav1 CRF ? 
 ⚠ 三条前置约束：① **clip 时长必须 ≥ 目标口径**（原 6s 素材源片本身只有 6s，物理上无法补到 10s，只能重新采集 ≈4.5 h；开跑前 `ffprobe` 核实 `--duration` 未被静默截断）；② **同素材跨时长的同名锚点 VMAF 不同**（时长效应，crf30 跨差 1.75）⇒ 同 key 取均值是**必需**规则，不是兜底；③ 池化前打印「文件数 / 逐文件点数 / ACC 总点数 / 合并重复点数」四个数与预期比对 —— **素材名去重 ≠ 数据完整**。 | CPU |
 | M3 | ~~主观 AB 测试~~ → **已取消**：纯 AI 自动化验证（VMAF + 多指标交叉参考） | 主观与 VMAF 预测一致性 > 85% | **已取消** | 无（AI 自动化） |
 | M4 | 两份 `QUALITY_MAP` 同步 + 判据入库 + 文档归档 | ⑨ 组全绿（**基线 13/13 → 14/14**）、无回归 | **已落地**：两仓两表逐条相等 + ⑨ 组 14 项 + §4.12/README 归档（2026-10-01 复跑 ⑨ 组 14/14 全绿） | CPU |
-| **M5** | 硬编（NVENC/QSV/AMF/VT）等质量标定 + constqp/QP 轴（VE）+ 解除回退 | 各硬编 `max|ΔVMAF| ≤ 1.0`；QSV 两仓口径统一 | **未做** | **GPU**：NVENC→T4/L40（`av1_nvenc` 须 **L40**）；QSV→Intel 机；AMF→AMD 机；VT→macOS |
+| **M5** | 硬编（NVENC/QSV/AMF/VT）等质量标定 + constqp/QP 轴（VE）+ 解除回退 | 各硬编 `max|ΔVMAF| ≤ 1.0`；QSV 两仓口径统一 | **部分完成（2026-10-04 T4）**：`h264_nvenc`/`hevc_nvenc` `-cq` 行已落表两仓（17 素材池，LOO 3.97/5.85，**经仓主裁定按分档门禁 ≤5.9** 判达标，同 CPU 软编先例）；constqp `-qp` h264/hevc 探针复核落带；硬编门禁解锁（默认 7 档全绿）。**剩余**：`av1_nvenc`（L40/Ada）、QSV/AMF/VT | **GPU**：NVENC→T4/L40（`av1_nvenc` 须 **L40**）；QSV→Intel 机；AMF→AMD 机；VT→macOS |
 
 > ⚠ **v2 修正**：原 M4 的验收写「§4.1 门禁全绿」，但本文档**没有** §4.1 门禁节（疑为从 VE 侧拷贝的悬空引用）。
 > 本仓真实门禁 = `verify/verify_quality_mapping.py` 的 ⑨ 组；VE 侧门禁是 `crf_cq_unification_verify.py` 的 G0~G10。

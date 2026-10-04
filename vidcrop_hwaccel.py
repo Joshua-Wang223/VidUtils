@@ -401,10 +401,13 @@ DEFAULT_PRESET_SVTAV1 = '8'
 # 这个开关（它们用 -crf / -b:v / -qp 的组合来表达），故按"单后端时前缀可省"
 # 处理：裸名与 `nvenc-` 前缀都收。
 _RC_BACKEND = 'nvenc'
-_RC_MODES = ('constqp', 'vbr', 'cbr', 'cbr_ld_hq')
+# ⚠ FFmpeg 9.0 的 `-rc` 枚举**只剩 constqp / vbr / cbr**（T4 实测 2026-10-04：
+# `vbr_hq` / `cbr_hq` / `cbr_ld_hq` / `qvbr` 全部 rc≠0 `Invalid argument`）。
+# 本表即有效集，移除项不再接受（CLI 层直接报错，好过透传后 ffmpeg 运行期失败）。
+_RC_MODES = ('constqp', 'vbr', 'cbr')
 _RC_MODE_HELP = ('nvenc：' + ' '.join(_RC_MODES)
                  + '\n  （constqp=恒定 QP（配 --qp）；vbr=可变码率；'
-                   'cbr / cbr_ld_hq=恒定码率（配 --bitrate））')
+                   'cbr=恒定码率（配 --bitrate））')
 # 允许与 --bitrate 共存的 rc 模式。含 auto（auto 对 NVENC 会下发默认 rc：
 # h264/hevc=`vbr`、av1=`vbr`，见下方 `_NVENC_DEFAULT_RC`）。
 # constqp 不在其中：它是恒定 QP 模式、**会完全无视 -b:v**（T4 实测，见仓库
@@ -2986,7 +2989,7 @@ def parse_scale_algo(spec: Optional[str]) -> Tuple[str, str, str]:
 
 def parse_rc_mode(spec: Optional[str]) -> str:
     """
-    解析 --rc-mode → 'auto' | 'constqp' | 'vbr' | 'cbr' | 'cbr_ld_hq'。
+    解析 --rc-mode → 'auto' | 'constqp' | 'vbr' | 'cbr'。
 
     规则与 parse_scale_algo 同形（`<backend>-<取值>` 或裸 `<取值>`），但有两处**有意**
     的不同：
@@ -5382,7 +5385,7 @@ preset 映射（NVENC ↔ libx264 自动转换）：
     parser.add_argument('--rc-mode', default='auto', metavar='MODE',
                         help='NVENC 的码率控制模式（默认 auto=不下发 -rc，由 preset 决定，'
                              '与不写等价）。可选：constqp（恒定 QP，需 --qp）；'
-                             'vbr（可变码率）；cbr / cbr_ld_hq'
+                             'vbr（可变码率）；cbr'
                              '（恒定码率，需 --bitrate）。写法 <mode> 或 nvenc-<mode>'
                              '（本轴只有 NVENC 一个后端，故裸名不歧义）。'
                              '仅对 *_nvenc 编码器生效：libx264 / libx265 没有这个开关'

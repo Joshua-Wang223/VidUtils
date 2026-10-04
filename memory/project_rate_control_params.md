@@ -11,7 +11,7 @@ type: project
 
 | 参数 | 取值 | 默认 | 落到命令上 |
 |---|---|---|---|
-| `--rc-mode` | `auto` / `constqp` / `vbr` / `vbr_hq` / `cbr` / `cbr_hq` / `cbr_ld_hq`（可写 `nvenc-<mode>`，裸名也收） | `auto`＝**NVENC 显式下发默认 rc**（CR-2，2026-10-04）：h264/hevc=`-rc vbr_hq`、av1=`-rc vbr`；软编/VAAPI 不下发 | `-rc <mode>` |
+| `--rc-mode` | `auto` / `constqp` / `vbr` / `cbr`（可写 `nvenc-<mode>`，裸名也收；FFmpeg 9.0 起只剩这三个，见文末追加） | `auto`＝**NVENC 显式下发默认 rc**（CR-2，2026-10-04）：h264/hevc=`-rc vbr`、av1=`-rc vbr`；软编/VAAPI 不下发 | `-rc <mode>` |
 | `--qp` | 0–51 | `None` | `-qp N`，**只在 `constqp` 下** |
 | `--lookahead` | 0–250 | `None` | 见下面映射表 |
 | `--bitrate` | `8M` / `8000k` / `12000000` | `None` | `-b:v <码率>`，**所有编码器都下发** |
@@ -20,7 +20,7 @@ type: project
 
 - **CLI 层**：四个参数的默认都不表示某个具体值，而是"**不下发任何相关选项**"。
   ⚠ **2026-10-04（CR-2）有唯一例外**：NVENC 的 `auto` 现在会**显式下发默认 rc**
-  （h264/hevc=`-rc vbr_hq`、av1=`-rc vbr`，与 VE 口径一致，见下方「追加：CR-2」）；软编仍不下发。
+  （h264/hevc=`-rc vbr`、av1=`-rc vbr`，与 VE 口径一致，见下方「追加：CR-2」；FFmpeg 9.0 后 vbr_hq 已删）；软编仍不下发。
 - **实际生效值**＝各编码器/preset 自带的默认，而**它们本来就不同**：
   `-rc` 默认 `-1`（不覆盖 preset，配 `-cq 23` 即"VBR + 目标质量"）；
   `-rc-lookahead` 在 NVENC 上默认 **0（关闭）**、x265 默认 **20**、x264 由自身决定
@@ -196,7 +196,7 @@ NVENC → `-rc constqp -qp 0 -b:v 0`（显式 `--qp 0` 此前缺 `-b:v 0`，已�
 | **V1** | `-qp` 回**基准轴**（不再拿 CQ 轴值直发）。新增 `_QP_SCALE`（AV1 族 ×4）/ `_QP_LIMITS`（av1_nvenc 0~255，**不能**拿 QUALITY_MAP 的 CQ 量程夹）/ `to_constqp_qp()` / `from_constqp_qp()`；constqp 的 `-crf-ref`/`-cq-ref` 与 `--crf` 落硬编都走它。`h264_nvenc cref21 → -qp 21`、`hevc_nvenc → 20`（=VE 的 `to_constqp_qp`）、`av1_nvenc → 84`（21×4） |
 | **V2** | `--qp` 落软编按基准轴回算：`hevc_nvenc constqp --qp 18 → libx265 -crf 18`（此前按 CQ 轴得 14） |
 | **V5** | QSV 移出 `CQ_SUPPORTED_CODECS`（实测无 `-cq`）、VT 也移出（质量轴是 `-q:v`）、去掉 cpu_v2 的 `h265_nvenc` 冗余 ⇒ 两脚本 CQ 集相等。QSV 的 preset 走 x264 档名映射（实测 `-preset` 收 veryfast..veryslow）；对"有质量输入但无质量轴"的编码器补**告警**（不再静默丢值） |
-| **V7** | `DEFAULT_CRF`/`DEFAULT_CQ` → `DEFAULT_REF=21`；未给质量时按基准换算（libx264 21 / libx265 21 / h264_nvenc 26 / hevc_nvenc 28），修掉"硬编默认过配 3 档" |
+| **V7** | `DEFAULT_CRF`/`DEFAULT_CQ` → `DEFAULT_REF=21`；未给质量时按基准换算（libx264 21 / libx265 21 / h264_nvenc 26 / hevc_nvenc 26（2026-10-04 落等质量表前为 28）），修掉"硬编默认过配 3 档" |
 | **V8** | `librav1e` 移出 `CRF_SUPPORTED_CODECS`（对齐 VE 的 `supports_crf`）；字面量 `--crf` 与 `--crf-ref` 都走基准轴 ⇒ 都 `-qp 80`（此前字面量 64）。build 层独立判断 librav1e 下发 `-qp` |
 | **V9** | **真实素材等体积标定**（`input_videos/new5_raw.mp4` 1080p→720p 4s，`probe/calibrate_soft_offsets.py`）：`libx265 → 0.9155x+1.6385`、`libvpx-vp9 → 1.6198−5.7553`、`libsvtav1 → 1.9450−15.62`；两份 `convert_crf.py` 同步。`default_preset_for('libsvtav1')` 固定 `8`（不再随核数漂）。⚠ 等体积≠等质量、素材单一 |
 | **V10** | preset 表拆成两张**刻意不对称**的表（详见 `project_preset_equivalence.md` 约定 1） |
@@ -313,13 +313,20 @@ VU 把 **NVENC 的默认 rc 由 `auto`(=不下发) 改为显式下发**（与 VE
   `-cq:v N -b:v 0`（跑在 preset 默认 VBR，≠ 生产的 vbr_hq）⇒ 已补 `_cq_rc()`（h264/hevc=vbr_hq、
   av1=vbr）；否则验收探针会在**与生产不同的率失真点**上判 PASS/FAIL。
 
-## 追加（2026-10-05）：FFmpeg 9.0 移除 `vbr_hq` / `cbr_hq`
+## 追加（2026-10-05）：FFmpeg 9.0 移除 `vbr_hq` / `cbr_hq`（并 `cbr_ld_hq` / `qvbr`）
 
-**事实**：NVENC SDK 升级导致 FFmpeg 9.0+ 正式移除 `vbr_hq` 和 `cbr_hq` 两个速率控制模式（`-rc` 枚举仅剩 `constqp / vbr / cbr / cbr_ld_hq`）。
+**事实**：NVENC SDK 升级导致 FFmpeg 9.0+ 正式移除 `vbr_hq` 和 `cbr_hq` 两个速率控制模式。
+⚠ **2026-10-04 T4 实测修正**：`ffmpeg 9.0.2` 的 `-rc` 枚举**只剩 `constqp / vbr / cbr`** —— 原文写的
+「仅剩 `constqp / vbr / cbr / cbr_ld_hq`」是**错的**：`cbr_ld_hq` 与 `qvbr` 同批被删。逐值实编
+（`-rc <mode> -cq 23 -b:v 0`）：`constqp/vbr/cbr` rc=0；`vbr_hq`/`cbr_hq`/`cbr_ld_hq`/`qvbr`
+全部 `Invalid argument`。
 
-- 全部 NVENC 默认 rc 由 `vbr_hq` → `vbr`：`_NVENC_DEFAULT_RC` 中 h264/heavyc 一律 `'vbr'`；`_RC_MODES` 移除 `vbr_hq`/`cbr_hq`。
+- 全部 NVENC 默认 rc 由 `vbr_hq` → `vbr`：`_NVENC_DEFAULT_RC` 中 h264/hevc 一律 `'vbr'`；`_RC_MODES` 移除 `vbr_hq`/`cbr_hq`。
 - cbr_hq 同理处理（默认 rc 和 _RC_MODES 中一并移除）。
+- **`_RC_MODES` 收敛到 `('constqp','vbr','cbr')`**：`cbr_ld_hq` 也移除（本仓历史有效集里唯一仍在、但
+  FFmpeg 9.0 已删的值；`qvbr`/`vbr_hq`/`cbr_hq` 本仓从未收过）。`parse_rc_mode()` 对移除值直接抛
+  ValueError（CLI 层报错好过运行期 ffmpeg 失败），两脚本报错首行逐字一致。
 - 不引入 `-tune hq` / `-multipass fullres`（T4 所用 NVENC SDK 版本是否支持需上机确认，默认 rc 仅 `vbr`）。
 - 所有探针/门禁/回归用例同步：`_cq_rc()` 统一返回 `vbr`；BASE_LOCK / A4/A7/A8/A9 / ①组 / ⑦组 / ⑩A / ⑩C / verify_borrow ①组 token 全部 `-rc vbr`；selftest 断言更新为 `('vbr','vbr','vbr')`。
-- `verify_rc_lookahead.py` ②组 parse 用例：`vbr_hq`/`cbr_hq`/`NVENC-VBR_HQ` 从合法值移入非法值（现应抛 ValueError）。
+- `verify_rc_lookahead.py` ②组 parse 用例：`vbr_hq`/`cbr_hq`/`cbr_ld_hq`/`qvbr`/`NVENC-VBR_HQ` 从合法值移入非法值（现应抛 ValueError）。
 - CR-2 动机（两仓同一率失真点标定）不变：VE 侧仍是 vbr_hq（ctypes 直连 SDK），VU 向 VE 靠拢的默认 rc 语义仍一致（都是 VBR + 目标质量），只是选项名随 FFmpeg 升级。

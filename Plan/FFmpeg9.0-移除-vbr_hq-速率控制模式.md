@@ -4,6 +4,10 @@
 
 `vbr_hq` 的移除是 **NVIDIA NVENC SDK 升级导致的必然结果**，并非 FFmpeg 自身的决定。虽然选项名称消失，但通过 `-rc vbr -tune hq -multipass fullres` 的组合仍可实现高质量可变码率编码。
 
+> ⚠ **不止 `vbr_hq`**：FFmpeg 9.0 的 `-rc` 枚举实际**只剩 `constqp / vbr / cbr`**，同批被移除的还有
+> **`cbr_hq`、`cbr_ld_hq`、`qvbr`**（T4 上 `ffmpeg 9.0.2` 实测这四个值全部 `Invalid argument`，
+> 见 §七）。VidUtils 的有效集已收敛到这三个（`_RC_MODES`）。
+
 ---
 
 ## 一、事件背景
@@ -66,3 +70,46 @@ ffmpeg -i input.mp4 -c:v h264_nvenc -rc vbr -tune hq -cq 23 -b:v 0 output.mp4
 NVIDIA 移除 `vbr_hq` 是为了推动编码器 API 向**更现代化、更灵活**的方向演进。新方案虽然需要手动配置更多选项，但也换来了**更精细的控制能力**。
 
 > **迁移速记**：`-rc vbr_hq` → `-rc vbr -tune hq -multipass fullres`（或 `qres`）
+
+---
+
+## 七、同批移除的其它模式（`qvbr` / `cbr_hq` / `cbr_ld_hq`）与 VidUtils 落地
+
+### 7.1 实测：FFmpeg 9.0 的 `-rc` 枚举只剩三个
+
+**T4 实测（2026-10-04，`ffmpeg 9.0.2` / 驱动 580.65.06）**：
+
+```
+$ ffmpeg -h encoder=h264_nvenc | grep -A4 '\-rc '
+  -rc  <int>  ...  Override the preset rate-control (from -1 to INT_MAX)
+     constqp   0   Constant QP mode
+     vbr       1   Variable bitrate mode
+     cbr       2   Constant bitrate mode
+```
+
+逐值实编（`-rc <mode> -cq 23 -b:v 0`）：
+
+| `-rc` 值 | 结果 |
+|---|---|
+| `constqp` / `vbr` / `cbr` | ✅ rc=0 |
+| `vbr_hq` | ❌ `Invalid argument` |
+| `cbr_hq` | ❌ `Invalid argument` |
+| `cbr_ld_hq` | ❌ `Invalid argument` |
+| `qvbr` | ❌ `Invalid argument` |
+
+⇒ **有效集 = `constqp` / `vbr` / `cbr`**；其余四个（`vbr_hq`/`cbr_hq`/`cbr_ld_hq`/`qvbr`）全部不可用。
+（VE 侧 ctypes 直连 SDK 仍接受 `rc_ptr[1]=32`（VBR_HQ）——那是 **SDK 层**，与 FFmpeg **CLI 层**的枚举是两回事，见 VE
+`Plan/T4_NVENC_vbr_hq移除_验证专项.md` §1.6.2。）
+
+### 7.2 VidUtils 落地（CLI 路径，`--rc-mode`）
+
+| 落点 | 内容 |
+|---|---|
+| `vidcrop_hwaccel.py` / `vidcrop_cpu_v2.py` | `_RC_MODES = ('constqp', 'vbr', 'cbr')` —— 移除 `cbr_ld_hq`（本仓历史有效集里唯一仍在、但 FFmpeg 9.0 已删的值；`qvbr`/`vbr_hq`/`cbr_hq` 本仓从未收过）。`parse_rc_mode()` 对移除值**直接抛 ValueError**（CLI 层报错，好过透传后 ffmpeg 运行期失败），两脚本报错首行逐字一致。 |
+| 默认 rc（CR-2） | `_NVENC_DEFAULT_RC` 早已统一为 `vbr`（h264/hevc/av1），与本删除一致，无需再改。 |
+| `verify/verify_rc_lookahead.py` ② | `cbr_ld_hq` 从合法值移入非法值，并补 `qvbr`；断言两脚本都拒绝且首行一致。 |
+| 文档/记忆 | 本节 + `memory/project_rate_control_params.md`「2026-10-05 追加」修正（原文误把 `cbr_ld_hq` 列为仍在枚举内）。 |
+
+> ⚠ **不做的事**：不因 `vbr_hq` 移除就自动加 `-tune hq -multipass fullres`——VU 生产默认 rc 保持裸
+> `-rc vbr`（与 VE 共享 `QUALITY_MAP` 的率失真点契约 CR-2 一致；`-tune/-multipass` 是否被 T4 的
+> NVENC SDK 接受另需上机确认）。

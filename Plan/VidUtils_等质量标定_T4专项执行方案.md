@@ -14,11 +14,20 @@
 > `verify/verify_quality_mapping.py` ⑨ 组（跨仓两表逐条相等）。
 > **上机探针**：`probe/verify_nvenc_quality_gpu.py`、`probe/t4_acceptance.py`。
 >
-> **状态（2026-10-04）**：**准备阶段已收口，等待 GPU（T4）就位**。CPU 侧 M1~M4 已完结；本方案是
-> **M5 硬编上机**的 T4 分支，上机前的前置工作全部就绪 —— harness GPU 支持（可用性探测 /
-> `--require-codecs` / `_table_range` 回退 / 跨仓态势）、跨仓契约 **CR-1（preset p4）/ CR-2（rc 显式
-> `vbr`）** 已落地、门禁与基线同步。**唯一待办 = 上机跑标定**（`h264/hevc_nvenc` 的 `-cq`
-> 等质量行尚未标定，硬编当前回退 `SIZE_MAP`）。
+> **状态（2026-10-04）**：**T4 上机执行完毕，h264/hevc_nvenc 的 `-cq` 等质量行已落表两仓**。
+> 前置（harness GPU 支持 / `--require-codecs` / `_table_range` 回退；跨仓契约 CR-1 preset p4 /
+> CR-2 rc 显式 `vbr`；门禁与基线同步）全部就绪并复核通过。
+> **上机实测结论**（Tesla T4 / 驱动 580.65.06 / ffmpeg 9.0.2，素材池 `input_videos/eqq_calib`
+> 17 条 = 12×6s + 5×10s，锚点 18/21/24/27/30，`n_subsample=1`）：
+> - 池化表（a=最小二乘 / b=各素材中位数）：`h264_nvenc=(0.9295, 6.2523)`、`hevc_nvenc=(1.1116, 2.1606)`，量程均 0~51；crf21→`-cq 26`。
+> - LOO worst：**h264 3.97 / hevc 5.85** ⇒ 超立项 `<1.0`（与 CPU 软编结构性上限同源，单素材 dVMAF<0.65、非执行错误），
+>   经仓主裁定按 **分档门禁 ≤5.9**（CPU 先例）判**达标**，两行已写入 VidUtils + VE `convert_crf.py`（逐字相等，⑨ 组 14/14 绿）。
+> - 硬编门禁解锁：`verify_equal_quality.py` 默认 7 档全绿（h264 ΔVMAF=−0.044 / hevc +0.135，硬编由 SKIP 变实测）。
+> - T3/T5/T6 探针与归档见 `verification_report/`：`verify_nvenc_quality_gpu.py` **PASS 15 / WARN 3 / FAIL 0 / SKIP 2**
+>   （B 组表值 h264/hevc `-cq 26` 落带、C 组 h264/hevc `-qp 21` 落带、av1 SKIP）；`t4_acceptance.py` **20/20 通过**；
+>   长片（`Earth at Night` 30s 4K）门禁 h264 `ΔVMAF`=+0.115 / hevc +0.049。
+>   ⚠ GPU 机上 `dump_cmd_full.sh` 因「默认编码器变 h264_nvenc」而红，属 §7 R3 既知**环境假红**（与本次落表无关）。
+>   **剩余**：`av1_nvenc`（L40/Ada）、QSV/AMF/VT 另机。
 
 ---
 
@@ -42,14 +51,14 @@
 
 | 编号 | 待办 | 硬件 | 归属 | 状态 | 依据 |
 |---|---|---|---|---|---|
-| **G0** | **扩展 `calibrate_equal_quality.py` 支持 NVENC**（`-cq` 轴 + `-b:v 0` + 可用性探测 + 指纹 + range 回退） | 任意有 N 卡 | 两仓同源 | **未开始（前置）** | 当前 harness 无 nvenc；§0 |
-| **G1** | `h264_nvenc` 的 `-cq` 等质量标定 | **T4** | 两仓 | 未开始 | 立项 B1 |
-| **G2** | `hevc_nvenc` 的 `-cq` 等质量标定 | **T4** | 两仓 | 未开始 | 立项 B1 |
+| **G0** | **扩展 `calibrate_equal_quality.py` 支持 NVENC**（`-cq` 轴 + `-b:v 0` + 可用性探测 + 指纹 + range 回退） | 任意有 N 卡 | 两仓同源 | **已落地**（2026-10-03） | 当前 harness 已支持 nvenc；§3 阶段 1 |
+| **G1** | `h264_nvenc` 的 `-cq` 等质量标定 | **T4** | 两仓 | **已落表**（LOO 3.97，≤5.9 分档门禁） | 立项 B1；§3 阶段 3~4 |
+| **G2** | `hevc_nvenc` 的 `-cq` 等质量标定 | **T4** | 两仓 | **已落表**（LOO 5.85，≤5.9 分档门禁） | 立项 B1；§3 阶段 3~4 |
 | **G3** | `av1_nvenc` 的 `-cq` 等质量标定 | **L40/Ada** | 两仓 | 未开始 | 立项 B2；T4 编不了 |
 | **G4** | constqp/QP 轴等质量 | h264/hevc **T4**；av1 **L40** | VE 主 / 本仓复核 | 未开始 | 立项 B3；**本仓无独立 QP 表**，只需复核 `to_constqp_qp()` |
-| **G5** | 硬编等质量门禁解锁（`verify_equal_quality.py` 硬编条目去 SKIP） | T4 + L40 | 本仓 | 未开始 | 方案 §4.12 |
+| **G5** | 硬编等质量门禁解锁（`verify_equal_quality.py` 硬编条目去 SKIP） | T4 + L40 | 本仓 | **已解锁**（默认 7 档全绿） | 方案 §4.12 |
 | **G6** | 真机长视频验证 + 生产管线 GPU 实跑判据 | T4 / L40 | 两仓 | 未开始 | 立项 B4 |
-| **G7** | 落点/运行期/无损回归复核（`-cq`/`-qp` 落点、NVENC 真出片） | T4（L40 可选） | 本仓 | 部分已做（§4.9） | 方案 §4.9 / §4.10 |
+| **G7** | 落点/运行期/无损回归复核（`-cq`/`-qp` 落点、NVENC 真出片） | T4（L40 可选） | 本仓 | **已复核**（探针 + t4_acceptance） | 方案 §4.9 / §4.10 |
 
 > **T4 与 L40 不可互替**：T4=Turing、L40=Ada，**NVENC 代际不同**，同一 `-cq` 的等质量落点
 > 可能不同（尤其 `av1_nvenc` 只有 L40 有）。**h264/hevc 的标定以 T4 为准**；

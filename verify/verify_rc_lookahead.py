@@ -102,14 +102,15 @@ chk('① hwaccel/libx265 默认无 -x265-params（HDR 探测过但不写）',
 
 print('── ② --rc-mode / --qp 的取值解析（含前缀与大小写）──')
 cases = [(None, 'auto'), ('', 'auto'), ('auto', 'auto'), ('AUTO', 'auto'),
-         ('vbr', 'vbr'), ('cbr_ld_hq', 'cbr_ld_hq'),
+         ('vbr', 'vbr'), ('cbr', 'cbr'),
          ('nvenc-vbr', 'vbr'), ('nvenc-auto', 'auto')]
 for spec, want in cases:
     chk(f'② hwaccel parse_rc_mode({spec!r})', H.parse_rc_mode(spec), want)
     chk(f'② cpu_v2  parse_rc_mode({spec!r})', C.parse_rc_mode(spec), want)
 
+# FFmpeg 9.0 `-rc` 枚举只剩 constqp/vbr/cbr ⇒ 其余（含 qvbr / cbr_ld_hq）必须拒绝
 bad = ['vaapi-vbr', 'nvenc-', 'nvenc-zzz', 'zzz', '-vbr',
-       'vbr_hq', 'cbr_hq', 'NVENC-VBR_HQ']
+       'vbr_hq', 'cbr_hq', 'cbr_ld_hq', 'qvbr', 'NVENC-VBR_HQ']
 for spec in bad:
     hw_first = cv_first = None
     try:

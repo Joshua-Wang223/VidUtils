@@ -104,9 +104,10 @@ NVENC_CODECS = ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc')
 def _cq_rc(codec: str) -> str:
     return 'vbr'
 # 表内值（crf_ref=21 下的 CQ），用于和实测对比。
-# ⚠ 默认 `quality` 模式下硬编未落 QUALITY_MAP ⇒ 回退 SIZE_MAP，故此处数值取自 SIZE_MAP。
+# ⚠ h264/hevc 已于 2026-10-04 落 QUALITY_MAP（T4 标定）⇒ 取 quality 口径值（均 26）；
+#    av1_nvenc 尚未落表 ⇒ 仍回退 SIZE_MAP（27）。
 #    取表统一走 crf_mod.get_quality_map()（活动表），**不要**直接索引 QUALITY_MAP（会 KeyError）。
-CQ_TABLE_AT_21 = {'h264_nvenc': 26, 'hevc_nvenc': 28, 'av1_nvenc': 27}
+CQ_TABLE_AT_21 = {'h264_nvenc': 26, 'hevc_nvenc': 26, 'av1_nvenc': 27}
 NAIVE_CQ = 21           # 修复前：基准轴数值被原样当 CQ 下发
 
 

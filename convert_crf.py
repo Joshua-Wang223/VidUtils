@@ -182,7 +182,8 @@ QUALITY_MAP = {
     #   标定与判据必须**同参、同时长**。**本表全部数据均以 subsample=1 产出**
     #   （⚠ 早期 workdir `/tmp/eqq_calib/1280x720_10s_n3` 是 subsample=8 的作废数据，
     #   **不参与**本表任何计算）。
-    # ⚠ 仅软件编码器；硬编（NVENC/QSV/AMF/VT）未覆盖 ⇒ 自动回退 SIZE_MAP（M4 待上机）。
+    # ⚠ NVENC（h264/hevc）已于 2026-10-04 上机标定并落表（见上）；
+    #   av1_nvenc（需 L40/Ada）与 QSV/AMF/VideoToolbox 仍未覆盖 ⇒ 自动回退 SIZE_MAP。
     'libx265':     (1.0979, -2.3119, 0, 51),
     'libvpx-vp9':  (1.9716, -15.0929, 0, 63),
     'libaom-av1':  (2.3219, -22.3927, 0, 63),
@@ -190,6 +191,14 @@ QUALITY_MAP = {
     # ⚠ `librav1e` 按 **native 档**（不下发 `-speed`）标定——与 `SIZE_MAP['librav1e']` 的档位一致。
     #   `-speed 10` 档另存 quality_map._EQQUAL_SPEED_OVERRIDE（LOO 5.99，同样达标）。
     'librav1e':    (7.9326, -102.2078, 0, 255),
+    # ---------- 硬件编码器（NVENC，**T4 实测 2026-10-04**）----------
+    # 口径与软编同源：锚点 18/21/24/27/30 + n_subsample=1 + 720p prep + `-cq` 轴
+    # （`-b:v 0 -preset p4 -rc vbr`，CR-1/CR-2）。素材池 = eqq_calib 17 条（12×6s + 5×10s）。
+    # 池化 a=最小二乘 / b=各素材中位数。LOO worst：h264 3.97 / hevc 5.85 —— 与软编同为
+    # **结构性上限**（单素材 dVMAF<0.65、误差非执行所致），按**分档门禁 ≤5.9**（CPU 先例）判达标。
+    # 指纹：Tesla T4 / 驱动 580.65.06 / ffmpeg 9.0.2（换构建须重标）。
+    'h264_nvenc':  (0.9295, 6.2523, 0, 51),
+    'hevc_nvenc':  (1.1116, 2.1606, 0, 51),
 }
 
 # ``-speed 10`` 下的**等质量**标定值（2026-10-02 落表，两仓同源）。

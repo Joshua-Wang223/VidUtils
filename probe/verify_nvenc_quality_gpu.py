@@ -105,7 +105,7 @@ def _cq_rc(codec: str) -> str:
     return 'vbr'
 # 表内值（crf_ref=21 下的 CQ），用于和实测对比。
 # ⚠ h264/hevc 已于 2026-10-04 落 QUALITY_MAP（T4 标定）⇒ 取 quality 口径值（均 26）；
-#    av1_nvenc 已于 2026-10-04 落 QUALITY_MAP（L40 标定）⇒ quality 口径 1.4573×21+1.1022≈31.7→**32**。
+#    av1_nvenc 已于 2026-10-04 落 QUALITY_MAP（L40 标定）⇒ quality 口径 1.4566×21+1.2165≈31.8→**32**。
 #    取表统一走 crf_mod.get_quality_map()（活动表），**不要**直接索引 QUALITY_MAP（会 KeyError）。
 CQ_TABLE_AT_21 = {'h264_nvenc': 26, 'hevc_nvenc': 26, 'av1_nvenc': 32}
 NAIVE_CQ = 21           # 修复前：基准轴数值被原样当 CQ 下发
@@ -271,7 +271,7 @@ def rate_verdict(d_psnr, ratio):
     return 'FAIL', f'ΔPSNR {d_psnr:+.2f} dB，码率 {ratio:.2f}×（越界）'
 
 
-def av1_qp_conclusion(av1_ok: dict, vu_qp: int = 71) -> tuple[str, str]:
+def av1_qp_conclusion(av1_ok: dict, vu_qp: int = 70) -> tuple[str, str]:
     """AV1 constqp 的 `-qp` 结论（**纯函数**，供 group_c 与 --selftest 共用）。
 
     av1_ok = {候选 qp: 判词}（判词来自 rate_verdict 的 status）。`vu_qp` = VU 在 quality
@@ -572,21 +572,21 @@ def selftest() -> int:
     if rate_verdict(0.0, 1.6)[0] != 'WARN':
         bad.append('警戒带应 WARN')
     # av1 结论行是纯函数、且只在 L40/Ada 上会走到 ⇒ 必须先自证（否则首次上机才暴露）
-    if av1_qp_conclusion({21: 'FAIL', 71: 'PASS', 63: 'FAIL', 105: 'FAIL'})[0] != 'PASS':
-        bad.append('qp 结论：VU 仿射值(71) 落带应 PASS')
-    if av1_qp_conclusion({21: 'PASS', 71: 'PASS', 63: 'FAIL', 105: 'FAIL'})[0] != 'PASS':
+    if av1_qp_conclusion({21: 'FAIL', 70: 'PASS', 63: 'FAIL', 105: 'FAIL'})[0] != 'PASS':
+        bad.append('qp 结论：VU 仿射值(70) 落带应 PASS')
+    if av1_qp_conclusion({21: 'PASS', 70: 'PASS', 63: 'FAIL', 105: 'FAIL'})[0] != 'PASS':
         bad.append('qp 结论：VU 仿射值落带（另有候选亦落带）仍应 PASS（其余仅作参照）')
-    if av1_qp_conclusion({21: 'FAIL', 71: 'FAIL', 63: 'PASS', 105: 'FAIL'})[0] != 'WARN':
+    if av1_qp_conclusion({21: 'FAIL', 70: 'FAIL', 63: 'PASS', 105: 'FAIL'})[0] != 'WARN':
         bad.append('qp 结论：VU 仿射未落带、旧 ×3(63) 落带应 WARN（复核仿射/口径）')
-    if av1_qp_conclusion({21: 'PASS', 71: 'FAIL', 63: 'FAIL', 105: 'FAIL'})[0] != 'WARN':
+    if av1_qp_conclusion({21: 'PASS', 70: 'FAIL', 63: 'FAIL', 105: 'FAIL'})[0] != 'WARN':
         bad.append('qp 结论：仅直取(21) 落带应 WARN（要求人工复核）')
-    if av1_qp_conclusion({21: 'FAIL', 71: 'FAIL', 63: 'FAIL', 105: 'FAIL'})[0] != 'FAIL':
+    if av1_qp_conclusion({21: 'FAIL', 70: 'FAIL', 63: 'FAIL', 105: 'FAIL'})[0] != 'FAIL':
         bad.append('qp 结论：候选都不落带应 FAIL')
-    if '无需改动' not in av1_qp_conclusion({71: 'PASS'})[1]:
+    if '无需改动' not in av1_qp_conclusion({70: 'PASS'})[1]:
         bad.append('qp 结论：VU 仿射值成立时应写明"无需改动"')
-    _qp_in = {71: 'PASS'}
+    _qp_in = {70: 'PASS'}
     av1_qp_conclusion(_qp_in)
-    if _qp_in != {71: 'PASS'}:
+    if _qp_in != {70: 'PASS'}:
         bad.append('qp 结论：不应修改入参（须为纯函数）')
     if av1_cq_conclusion('PASS', 1.20, 0.5, 27)[0] != 'PASS':
         bad.append('cq 结论：表值 PASS 应 PASS')

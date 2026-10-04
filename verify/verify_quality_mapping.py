@@ -364,10 +364,27 @@ if (VE_UTILS / 'quality_map.py').is_file() and (VE_UTILS / 'convert_crf.py').is_
     try:
         if str(VE_UTILS) not in sys.path:
             sys.path.insert(0, str(VE_UTILS))
-        _spec = importlib.util.spec_from_file_location('ve_quality_map',
-                                                       VE_UTILS / 'quality_map.py')
-        VE_QM = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(VE_QM)
+        # ⚠ 关键：VE 的 quality_map.py 内部 `from convert_crf import …`。若直接 exec_module，
+        #   `convert_crf` 会命中 sys.modules 里 **VU 的**同名缓存（本文件已 `import vidcrop_*`
+        #   → 触发 VU convert_crf）⇒ VE_QM 拿到的是 **VU 的表**，跨仓「逐条相等」退化为 VU↔VU、
+        #   **从不真正检查 VE**。故临时把 VE 的 convert_crf 以名 'convert_crf' 挂进 sys.modules，
+        #   让 VE_QM 绑定到 **VE 的**表/函数，加载完再还原（VU 侧不受影响）。
+        _ve_cc_spec = importlib.util.spec_from_file_location('convert_crf',
+                                                             VE_UTILS / 'convert_crf.py')
+        _ve_cc = importlib.util.module_from_spec(_ve_cc_spec)
+        _saved_cc = sys.modules.get('convert_crf')
+        sys.modules['convert_crf'] = _ve_cc
+        try:
+            _ve_cc_spec.loader.exec_module(_ve_cc)
+            _spec = importlib.util.spec_from_file_location('ve_quality_map',
+                                                           VE_UTILS / 'quality_map.py')
+            VE_QM = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(VE_QM)
+        finally:
+            if _saved_cc is not None:
+                sys.modules['convert_crf'] = _saved_cc
+            else:
+                sys.modules.pop('convert_crf', None)
     except Exception as _exc:                                     # noqa: BLE001
         print(f'  ℹ VE 侧模块导入失败（跨项目比对降级为 SKIP）：{_exc}')
         VE_QM = None
@@ -404,13 +421,13 @@ if VE_QM is not None:
     if hasattr(VE_QM, 'set_quality_mode'):
         VE_QM.set_quality_mode('size')
     chk("[9] size 模式下 from_x264_crf 与 VE 逐点相等",
-        [H.from_x264_crf(c, r) for c, r in _rt],
+        [VU_CRF.from_x264_crf(c, r) for c, r in _rt],
         [VE_QM.from_x264_crf(c, r) for c, r in _rt])
     VU_CRF.set_quality_mode('quality')
     if hasattr(VE_QM, 'set_quality_mode'):
         VE_QM.set_quality_mode('quality')
     chk("[9] quality 模式下 from_x264_crf 与 VE 逐点相等",
-        [H.from_x264_crf(c, r) for c, r in _rt],
+        [VU_CRF.from_x264_crf(c, r) for c, r in _rt],
         [VE_QM.from_x264_crf(c, r) for c, r in _rt])
     # 默认口径 = quality（用全新加载的模块验证，避免受上面 set_quality_mode 影响）
     _fs = importlib.util.spec_from_file_location('vu_crf_fresh', ROOT / 'convert_crf.py')
@@ -716,10 +733,10 @@ C.set_quality_mode('quality')
 if VE_QM is not None and hasattr(VE_QM, 'set_quality_mode'):
     VE_QM.set_quality_mode('quality')
 _cq21 = int(round(H.from_x264_crf('av1_nvenc', 21)))   # quality 口径 ref21 的 CQ 值（≈32）
-chk("[11] quality 口径 av1 crf-ref21 → -qp = 71（仿射，≠ size ×3 的 63）",
-    H.to_constqp_qp('av1_nvenc', _cq21), 71)
-chk("[11] quality 口径 from_constqp_qp('av1_nvenc', 71) ≈ 21.24（仿射反解）",
-    round(H.from_constqp_qp('av1_nvenc', 71), 2), 21.24)
+chk("[11] quality 口径 av1 crf-ref21 → -qp = 70（仿射，≠ size ×3 的 63）",
+    H.to_constqp_qp('av1_nvenc', _cq21), 70)
+chk("[11] quality 口径 from_constqp_qp('av1_nvenc', 70) ≈ 21.11（仿射反解）",
+    round(H.from_constqp_qp('av1_nvenc', 70), 2), 21.11)
 if VE_QM is not None:
     _qp_strict, _qp_mon = [], []
     for _c in ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc'):

@@ -4269,7 +4269,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         metavar="MP",
         help="NVENC 的 -multipass 档：disabled / qres / fullres。默认不在 CQ 路径下发"
              "（固定 -cq 下实测不升 VMAF）；rc-mode=cbr 或给了 --bitrate 时自动补 fullres，"
-             "可用本参数显式覆盖。fullres 耗时/显存更高，且可能使输出非确定",
+             "可用本参数显式覆盖。fullres 耗时/显存更高（第三方称可能非确定，本机未复现）",
     )
     ap.add_argument(
         "--preset",

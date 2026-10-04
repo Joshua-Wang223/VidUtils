@@ -5485,7 +5485,7 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                         help='NVENC 的 -multipass 档：disabled / qres / fullres。默认不在 CQ '
                              '路径下发（固定 -cq 下实测不升 VMAF）；rc-mode=cbr 或给了 '
                              '--bitrate 时会自动补 fullres，可用本参数显式覆盖。'
-                             'fullres 耗时/显存更高，且可能使输出非确定（等质量标定勿开）')
+                             'fullres 耗时/显存更高（等质量标定勿开；第三方称其可能非确定，本机未复现）')
     parser.add_argument('--preset', default=None,
                         help='编码器预设。默认：CPU 编码器 medium，GPU 编码器 p4；'
                              'NVENC（p1~p7）与 libx264 风格（ultrafast~veryslow）自动双向映射')

@@ -301,7 +301,7 @@ python3 probe/t4_acceptance.py --src '<真实素材>'
 - **固定 `-cq` 下 multipass 不升 VMAF**（上表：fullres −0.006~−0.108、qres −0.067~−0.335，
   码率 ×0.98~0.997）⇒ **标定与生产 CQ 路径都不加**。VE 方案里那条
   `-rc:v vbr_hq → -rc:v vbr -tune hq -multipass fullres` 的迁移路径**不适用于本仓 CQ 路径**：
-  `-tune hq` 冗余、`-multipass` 无收益且会**破坏复现性**（multipass 输出非确定）。
+  `-tune hq` 冗余、`-multipass` 无收益（第三方称其输出可能非确定，**本机复跑未复现**）。
 - multipass 的价值在 **CBR / 紧 VBV**（把实际码率拉近目标）；VU 生产在 `--rc-mode cbr` 或给了
   `--bitrate` 时**自动补 `-multipass fullres`**（显式 `--nvenc-multipass` 优先），CQ 路径不动。
 - ⚠ 别把 `-preset p7` 当 two-pass：现代 `p1~p7` 别名不带 multipass 标记（只有 legacy `slow` 会开两遍）。

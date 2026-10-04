@@ -344,7 +344,8 @@ VU 把 **NVENC 的默认 rc 由 `auto`(=不下发) 改为显式下发**（与 VE
 
 **Why:** 知识依据 `Plan/ffmpeg_nvenc_knowledge.md` §5 / §5.1（该文原「待办」已由本轮 A/B 补上）。
 VE 方案里那条 `-rc:v vbr_hq → -rc:v vbr -tune hq -multipass fullres` 的迁移路径**不适用于本仓
-CQ 路径**：`-tune hq` 冗余、`-multipass` 无收益且输出**非确定**（会破坏等质量标定的复现性）。
+CQ 路径**：`-tune hq` 冗余、`-multipass` 无收益（第三方称其输出可能非确定，**本机 T4 复跑未复现**，
+两遍 byte-identical）。
 
 **How to apply:**
 - 默认路径永远裸 `-rc vbr -cq N -b:v 0 -preset p4`；标定 harness `BASE_LOCK` **不动**。

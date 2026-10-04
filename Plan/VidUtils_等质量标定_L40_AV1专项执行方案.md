@@ -264,7 +264,7 @@ python3 verify/verify_equal_quality.py --src <素材> --duration 6 \
 
 - **`-tune hq` 是 ffmpeg 默认值** ⇒ 别加；需要画质杠杆时用 `--nvenc-tune uhq`（AV1 有）。
 - **固定 `-cq` 下 multipass 不升 VMAF**（T4：fullres −0.006~−0.108 / qres −0.067~−0.335）⇒
-  `av1_nvenc` 的**标定与生产 CQ 路径都别加**；加了还会**破坏等质量标定的可复现性**（multipass 非确定）。
+  `av1_nvenc` 的**标定与生产 CQ 路径都别加**（CQ 无收益 + 额外开销；第三方称 multipass 可能非确定，**本机未复现**）。
 - multipass 只在 **CBR / 紧 VBV** 有意义；VU 生产在 `--rc-mode cbr` / 给了 `--bitrate` 时自动补
   `-multipass fullres`（显式 `--nvenc-multipass` 优先）。
 - L40 侧复跑 AV1 标定时：`BASE_LOCK` 依旧裸 `-rc vbr`，**勿**加 `-tune hq` / `-multipass`。

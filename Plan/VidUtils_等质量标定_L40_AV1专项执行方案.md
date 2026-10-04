@@ -257,6 +257,18 @@ python3 verify/verify_equal_quality.py --src <素材> --duration 6 \
 13. **改表必回跑 ⑨ 组**；**改 `_QP_SCALE` 要两脚本同步 + 复核 `_QP_LIMITS`**。
 14. **上机前查并发负载**（Ada 机 TensorRT 只体现在 `utilization.gpu`）。
 
+### 6.1 `-tune` / `-multipass` 的取舍（2026-10-04；T4 实测 + AV1 特性）
+
+> 依据 `Plan/ffmpeg_nvenc_knowledge.md` §5 / §5.1 / §5.2。h264/hevc 的 A/B 在 T4 实测（见 T4 方案 §6.1）；
+> AV1 同族结论一致，且 **`av1_nvenc` 同样有 `uhq` 档**（uhq 为 hevc / av1 专属）。
+
+- **`-tune hq` 是 ffmpeg 默认值** ⇒ 别加；需要画质杠杆时用 `--nvenc-tune uhq`（AV1 有）。
+- **固定 `-cq` 下 multipass 不升 VMAF**（T4：fullres −0.006~−0.108 / qres −0.067~−0.335）⇒
+  `av1_nvenc` 的**标定与生产 CQ 路径都别加**；加了还会**破坏等质量标定的可复现性**（multipass 非确定）。
+- multipass 只在 **CBR / 紧 VBV** 有意义；VU 生产在 `--rc-mode cbr` / 给了 `--bitrate` 时自动补
+  `-multipass fullres`（显式 `--nvenc-multipass` 优先）。
+- L40 侧复跑 AV1 标定时：`BASE_LOCK` 依旧裸 `-rc vbr`，**勿**加 `-tune hq` / `-multipass`。
+
 ---
 
 ## 7. 风险与坑

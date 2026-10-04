@@ -157,7 +157,7 @@
   只有与 `git diff` 逐字节对比才暴露）
 - [码率控制轴：`--rc-mode` / `--qp` / `--lookahead` / `--bitrate`](project_rate_control_params.md)
   — 四个参数默认值基本 = **不下发**（**CR-2 例外**：2026-10-04 起 NVENC 的 auto 显式下发默认 rc
-  ——h264/hevc=`-rc vbr_hq`、av1=`-rc vbr`，与 VE 一致；软编不变。其余不传时命令逐字不变；第三道回归门
+  ——h264/hevc/av1=`-rc vbr`（FFmpeg 9.0 起 vbr_hq 已删），与 VE 一致；软编不变。其余不传时命令逐字不变；第三道回归门
   `test/dump_enc_options.sh` + `baseline/enc_before.txt` 钉住）；`-rc` / `-qp` 是
   **NVENC 专属**（非 NVENC 告警忽略、hwaccel `strict` 下报错）；`--lookahead` 按编码器映射
   （x264/NVENC 用 `-rc-lookahead`、x265 走 `-x265-params`、vp9/aom 用 `-lag-in-frames`、

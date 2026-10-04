@@ -330,3 +330,26 @@ VU 把 **NVENC 的默认 rc 由 `auto`(=不下发) 改为显式下发**（与 VE
 - 所有探针/门禁/回归用例同步：`_cq_rc()` 统一返回 `vbr`；BASE_LOCK / A4/A7/A8/A9 / ①组 / ⑦组 / ⑩A / ⑩C / verify_borrow ①组 token 全部 `-rc vbr`；selftest 断言更新为 `('vbr','vbr','vbr')`。
 - `verify_rc_lookahead.py` ②组 parse 用例：`vbr_hq`/`cbr_hq`/`cbr_ld_hq`/`qvbr`/`NVENC-VBR_HQ` 从合法值移入非法值（现应抛 ValueError）。
 - CR-2 动机（两仓同一率失真点标定）不变：VE 侧仍是 vbr_hq（ctypes 直连 SDK），VU 向 VE 靠拢的默认 rc 语义仍一致（都是 VBR + 目标质量），只是选项名随 FFmpeg 升级。
+
+## 追加（2026-10-04）：NVENC `--nvenc-tune` / `--nvenc-multipass`（T4 实测）
+
+**事实**：两脚本孪生新增两条 NVENC 调优轴，**默认都不下发**（现有命令逐字不变）：
+- `--nvenc-tune {hq,ll,ull,lossless,uhq}`：`-tune hq` 本就是 ffmpeg 默认值（`-h encoder` 实测
+  `default hq`）⇒ 写了等于没写；`uhq` 是 **hevc/av1 专属**（h264_nvenc 传 uhq → rc=234），
+  显式落到 h264 会**报错退出 2**。`uhq` 会自动开 lookahead + temporal filter（显存更高）。
+- `--nvenc-multipass {disabled,qres,fullres}`：**CQ 路径默认不开** —— T4 固定 CQ 的 A/B 实测
+  multipass **不升 VMAF**（fullres ΔVMAF −0.006~−0.108、qres −0.067~−0.335，码率 ×0.98~0.997）；
+  `--rc-mode cbr` 或给了 `--bitrate` 时**自动补 `fullres`**（显式 `--nvenc-multipass` 优先），
+  `constqp` 下忽略并告知（无码率目标）。
+
+**Why:** 知识依据 `Plan/ffmpeg_nvenc_knowledge.md` §5 / §5.1（该文原「待办」已由本轮 A/B 补上）。
+VE 方案里那条 `-rc:v vbr_hq → -rc:v vbr -tune hq -multipass fullres` 的迁移路径**不适用于本仓
+CQ 路径**：`-tune hq` 冗余、`-multipass` 无收益且输出**非确定**（会破坏等质量标定的复现性）。
+
+**How to apply:**
+- 默认路径永远裸 `-rc vbr -cq N -b:v 0 -preset p4`；标定 harness `BASE_LOCK` **不动**。
+- 想要 `uhq` 画质用 `--nvenc-tune uhq`（hevc/av1）；想提高 CBR/受限码率的命中精度用
+  `--nvenc-multipass`（或让它自动生效）。
+- ⚠ 别把 `-preset p7` 当 two-pass：现代 `p1~p7` 别名不带 multipass 标记。
+- 回归：`verify/verify_rc_lookahead.py` ⑩ F 已钉（cbr 自动 fullres / 显式覆盖 / constqp 忽略 /
+  h264+uhq 忽略告知 / 非 NVENC 忽略告知）；⑩ A 的 cq+`--bitrate` token 期望同步加了 `-multipass fullres`。

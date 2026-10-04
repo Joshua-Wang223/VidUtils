@@ -34,7 +34,7 @@ if not SRC.exists():
 fails = []
 
 RC_FLAGS = ('-rc', '-qp', '-cq', '-crf', '-b:v', '-rc-lookahead', '-lag-in-frames',
-            '-x265-params')
+            '-x265-params', '-tune', '-multipass')
 
 
 def chk(label, got, want):
@@ -263,8 +263,9 @@ chk('⑩ A hwaccel NVENC cq 默认补 -b:v 0',
     '-b:v 0' in tokens(hw('hevc_nvenc', cq=20)[0]), True)
 chk('⑩ A cpu_v2 NVENC cq 默认补 -b:v 0',
     '-b:v 0' in tokens(cv('hevc_nvenc', cq=20)[0]), True)
-chk('⑩ A NVENC cq + --bitrate 不重复下发 -b:v（仍带 CR-2 默认 -rc）',
-    tokens(hw('hevc_nvenc', cq=20, bitrate='8M')[0]), '-cq 20 -b:v 8M -rc vbr')
+chk('⑩ A NVENC cq + --bitrate 不重复下发 -b:v（仍带 CR-2 默认 -rc；受限码率自动 -multipass fullres）',
+    tokens(hw('hevc_nvenc', cq=20, bitrate='8M')[0]),
+    '-cq 20 -b:v 8M -rc vbr -multipass fullres')
 # [B] constqp 下 lookahead 不下发（硬件静默禁用）+ 告知；strict 下抛错。
 for name, (cmd, w) in (('hwaccel', hw('hevc_nvenc', rc_mode='constqp', qp=23, lookahead=40)),
                        ('cpu_v2', cv('hevc_nvenc', rc_mode='constqp', qp=23, lookahead=40))):
@@ -304,6 +305,33 @@ chk('⑩ E --nvenc-aq 给 NVENC 加 -spatial-aq/-temporal-aq',
 _c2, _w2 = hw('libx264', crf=20, nvenc_aq=True)
 chk('⑩ E --nvenc-aq 对非 NVENC 忽略并告知',
     ('-spatial-aq' not in _c2 and 'nvenc-aq' in _w2), True)
+
+# [F] --nvenc-tune / --nvenc-multipass（2026-10-04，依据 Plan/ffmpeg_nvenc_knowledge.md + T4 A/B）
+_default = ' '.join(hw('hevc_nvenc', cq=26)[0])
+chk('⑩ F 默认不下发 -tune / -multipass（-tune hq 是 ffmpeg 默认值）',
+    ('-tune' in _default or '-multipass' in _default), False)
+for _fn, _name in ((hw, 'hwaccel'), (cv, 'cpu_v2')):
+    chk(f'⑩ F {_name} --nvenc-tune uhq → -tune uhq',
+        '-tune uhq' in ' '.join(_fn('hevc_nvenc', cq=26, nvenc_tune='uhq')[0]), True)
+    chk(f'⑩ F {_name} cbr 自动 -multipass fullres',
+        '-multipass fullres' in ' '.join(_fn('hevc_nvenc', rc_mode='cbr', bitrate='8M')[0]), True)
+    chk(f'⑩ F {_name} 受限码率自动 -multipass fullres',
+        '-multipass fullres' in ' '.join(_fn('hevc_nvenc', rc_mode='vbr', cq=26,
+                                             bitrate='8M')[0]), True)
+    chk(f'⑩ F {_name} 显式 --nvenc-multipass 优先于自动',
+        '-multipass disabled' in ' '.join(_fn('hevc_nvenc', rc_mode='cbr', bitrate='8M',
+                                              nvenc_multipass='disabled')[0]), True)
+    chk(f'⑩ F {_name} CQ 路径不自动 multipass',
+        '-multipass' not in ' '.join(_fn('hevc_nvenc', rc_mode='vbr', cq=26)[0]), True)
+_h264, _w264 = hw('h264_nvenc', cq=26, nvenc_tune='uhq')
+chk('⑩ F h264_nvenc 无 uhq 档 → 忽略并告知',
+    ('-tune uhq' not in ' '.join(_h264) and 'uhq' in _w264), True)
+_cs, _ws = hw('libx264', crf=20, nvenc_tune='ll', nvenc_multipass='qres')
+chk('⑩ F 非 NVENC → -tune/-multipass 忽略并告知',
+    ('-tune' not in _cs and '-multipass' not in _cs and 'nvenc-tune' in _ws), True)
+_cq, _wq = hw('hevc_nvenc', rc_mode='constqp', qp=23, nvenc_multipass='fullres')
+chk('⑩ F constqp 无码率目标 → multipass 忽略并告知',
+    ('-multipass' not in _cq and 'multipass' in _wq), True)
 
 print('── ⑪ 借鉴项 [D]：--workers 反推每任务线程预算（cpu_v2 专属）──')
 _w, _t = C.compute_parallelism(8, 'libx264', 8, 32.0, 16.0,

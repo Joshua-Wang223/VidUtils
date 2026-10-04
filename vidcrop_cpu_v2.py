@@ -888,6 +888,20 @@ _RC_MODES_WITH_BITRATE = ("auto",) + tuple(m for m in _RC_MODES if m != "constqp
 # `-rc:v vbr`，VU 同样显式 `-rc vbr`）。
 # 显式 --rc-mode 仍原样下发（不受此表影响）。
 _NVENC_DEFAULT_RC = {"h264_nvenc": "vbr", "hevc_nvenc": "vbr", "av1_nvenc": "vbr"}
+
+# ── NVENC 调优轴（--nvenc-tune / --nvenc-multipass，2026-10-04）──────────────
+# 依据 Plan/ffmpeg_nvenc_knowledge.md + T4 实测（`-h encoder` 与 A/B）：
+#  · `-tune` 的 ffmpeg 默认值就是 `hq` ⇒ 写 hq 等于没写，故**默认不下发**；
+#    `uhq` 是 hevc/av1 专属（h264_nvenc 无此档，实测 rc=234）。
+#  · `-multipass` 默认 disabled。固定 `-cq` 下 A/B（T4 / 720p）：fullres ΔVMAF
+#    −0.01~−0.11、qres −0.07~−0.34，码率 ×0.98~0.997 —— **不升 VMAF** ⇒ CQ 路径
+#    默认不下发；它真正有用的是 CBR / 受限码率，故 rc-mode=cbr 或给了 --bitrate
+#    时自动补 `fullres`（显式值优先）。
+#  · 现代 `p1~p7` 别名**不带** multipass 标记（只有 legacy `slow` 会开两遍）。
+# ⚠ 与 vidcrop_hwaccel.py 的三张表/默认值必须**逐字一致**（孪生约定）。
+_NVENC_TUNE_VALUES = ("hq", "ll", "ull", "lossless", "uhq")
+_NVENC_MULTIPASS_VALUES = ("disabled", "qres", "fullres")
+_NVENC_UHQ_CODECS = {"hevc_nvenc", "av1_nvenc"}   # h264_nvenc 没有 uhq 档
 _LOOKAHEAD_RANGE = (0, 250)
 _QP_RANGE = (0, 51)
 _BITRATE_RE = re.compile(r"^\d+(\.\d+)?[kKmM]?$")
@@ -1443,8 +1457,11 @@ def apply_rc_control_args(codec: str,
                           qp: Optional[int] = None,
                           lookahead: Optional[int] = None,
                           warn: Optional[Callable[[str], None]] = None,
+                          tune: Optional[str] = None,
+                          multipass: Optional[str] = None,
+                          bitrate: Optional[str] = None,
                           ) -> Tuple[List[str], List[str]]:
-    """把 --rc-mode / --qp / --lookahead 落到 ffmpeg 参数上。
+    """把 --rc-mode / --qp / --lookahead / --nvenc-tune / --nvenc-multipass 落到 ffmpeg 参数上。
 
     与 vidcrop_hwaccel.py 的同名函数对应（差别只有：本脚本没有 --fallback-policy，
     故一律"告警 + 忽略"，没有 strict 分支）。
@@ -1527,6 +1544,32 @@ def apply_rc_control_args(codec: str,
         else:
             _ignore(f"--lookahead {lookahead}",
                     f"编码器 {c} 的 lookahead 选项名未经实测，不代为下发")
+
+    # ── NVENC 调优：--nvenc-tune / --nvenc-multipass（依据见文件头常量注释）──
+    # 自动 multipass：只有 CBR / 受限码率场景才有意义；显式给值时不走自动。
+    _mp = multipass
+    if _mp is None and c in NVENC_CODECS and (rc_mode == "cbr" or bitrate):
+        _mp = "fullres"
+    if _mp is not None:
+        if c not in NVENC_CODECS:
+            _ignore(f"--nvenc-multipass {_mp}",
+                    f"-multipass 是 NVENC 专属选项，编码器 {c} 没有这个开关")
+        elif rc_mode == "constqp" or qp == 0:
+            # constqp 无码率目标，驱动会忽略 multipass（NVEncC 文档：仅 vbr/cbr 可用）。
+            _ignore(f"--nvenc-multipass {_mp}",
+                    "-rc constqp 无码率目标，NVENC 会忽略 multipass")
+        else:
+            args += ["-multipass", _mp]
+
+    if tune is not None:
+        if c not in NVENC_CODECS:
+            _ignore(f"--nvenc-tune {tune}",
+                    f"-tune 是 NVENC 专属选项，编码器 {c} 没有这个开关")
+        elif tune == "uhq" and c not in _NVENC_UHQ_CODECS:
+            _ignore(f"--nvenc-tune uhq",
+                    f"{c} 没有 uhq 档（仅 hevc / av1 NVENC 有），已忽略")
+        else:
+            args += ["-tune", tune]
 
     return args, x265_params
 
@@ -3162,6 +3205,8 @@ def build_ffmpeg_cmd(
     qp: Optional[int] = None,
     lookahead: Optional[int] = None,
     bitrate: Optional[str] = None,
+    nvenc_tune: Optional[str] = None,
+    nvenc_multipass: Optional[str] = None,
 ) -> List[str]:
     if codec.lower() == "copy":
         raise ValueError("使用视频滤镜时不能使用 -c:v copy，请改用 libx264 / libx265 等编码器")
@@ -3224,7 +3269,9 @@ def build_ffmpeg_cmd(
     # 码率控制轴（--rc-mode / --qp / --lookahead）：-rc / -qp 只有 NVENC 认，
     # lookahead 按编码器分别下发；libx265 那条必须与 HDR 元数据**合并成同一条**
     # -x265-params，故 rc_x265 交给下面的 build_hdr_args()。
-    rc_args, rc_x265 = apply_rc_control_args(codec, rc_mode, qp, lookahead, warn)
+    rc_args, rc_x265 = apply_rc_control_args(codec, rc_mode, qp, lookahead, warn,
+                                             tune=nvenc_tune, multipass=nvenc_multipass,
+                                             bitrate=bitrate)
     if bitrate:
         cmd += ["-b:v", bitrate]
     cmd += rc_args
@@ -3845,6 +3892,8 @@ def prepare_job_command(
             qp=args.qp,
             lookahead=args.lookahead,
             bitrate=args.bitrate,
+            nvenc_tune=args.nvenc_tune,
+            nvenc_multipass=args.nvenc_multipass,
         )
     except Exception as exc:
         job.status = "failed"
@@ -4205,6 +4254,24 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
              "（200kbps），会告警",
     )
     ap.add_argument(
+        "--nvenc-tune",
+        default=None,
+        choices=list(_NVENC_TUNE_VALUES),
+        metavar="TUNE",
+        help="NVENC 的 -tune 档：hq（ffmpeg 默认值，写不写一样）/ ll / ull / lossless / "
+             "uhq（仅 hevc_nvenc / av1_nvenc 有此档）。默认不发。"
+             "本脚本是纯 CPU 路径，但 --codec *_nvenc 会原样透传，故该轴同样可用",
+    )
+    ap.add_argument(
+        "--nvenc-multipass",
+        default=None,
+        choices=list(_NVENC_MULTIPASS_VALUES),
+        metavar="MP",
+        help="NVENC 的 -multipass 档：disabled / qres / fullres。默认不在 CQ 路径下发"
+             "（固定 -cq 下实测不升 VMAF）；rc-mode=cbr 或给了 --bitrate 时自动补 fullres，"
+             "可用本参数显式覆盖。fullres 耗时/显存更高，且可能使输出非确定",
+    )
+    ap.add_argument(
         "--preset",
         default=None,
         help="编码器预设。默认：CPU 编码器 medium，GPU 编码器 p4。"
@@ -4461,6 +4528,11 @@ def validate_and_finalize_args(args: argparse.Namespace) -> None:
     if args.qp is not None:
         # 量程随生效编码器不同（AV1 族 0~255、VAAPI 0~52、其余 0~51，见 qp_range）。
         check_int_range(args.qp, "--qp", qp_range(args.codec), _QP_HINT)
+    # --nvenc-tune uhq 只在 hevc/av1 NVENC 上有该档；显式落到 h264_nvenc 时报错。
+    if args.nvenc_tune == "uhq" and args.codec == "h264_nvenc":
+        raise ValueError(
+            "--nvenc-tune uhq 不受 h264_nvenc 支持（uhq 仅 hevc_nvenc / av1_nvenc 有）；"
+            "请改用 --nvenc-tune hq 或换编码器。")
     _literal = [n for n, v in (("--crf", args.crf), ("--cq", args.cq)) if v is not None]
     _refs_given = [n for n, v in (("--crf-ref", args.crf_ref),
                                   ("--cq-ref", args.cq_ref)) if v is not None]

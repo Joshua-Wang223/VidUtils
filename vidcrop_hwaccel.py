@@ -421,6 +421,21 @@ _RC_MODES_WITH_BITRATE = ('auto',) + tuple(m for m in _RC_MODES if m != 'constqp
 #   下发 `-rc vbr`，把「不下发 vs 显式」这处**形式差异**也消掉）。
 # 显式 `--rc-mode` 仍原样下发（不受此表影响）。
 _NVENC_DEFAULT_RC = {'h264_nvenc': 'vbr', 'hevc_nvenc': 'vbr', 'av1_nvenc': 'vbr'}
+
+# ── NVENC 调优轴（--nvenc-tune / --nvenc-multipass，2026-10-04）──────────────
+# 依据 Plan/ffmpeg_nvenc_knowledge.md + T4 实测（`-h encoder` 与 A/B）：
+#  · `-tune` 的 ffmpeg 默认值就是 `hq`（h264 1~4 / hevc 1~5，default hq）⇒ 写 hq
+#    等于没写，故**默认不下发**；`uhq` 是 hevc/av1 专属（h264_nvenc 无此档，实测 rc=234）。
+#  · `-multipass` 默认 disabled。固定 `-cq` 下 A/B（T4 / 720p / `-preset p4`）：
+#    fullres ΔVMAF −0.01~−0.11、qres −0.07~−0.34，码率 ×0.98~0.997 —— **不升 VMAF**
+#    ⇒ CQ 路径默认不下发；它真正有用的是 CBR / 受限码率（提升命中精度），故
+#    `--rc-mode cbr` 或给了 `--bitrate` 时自动补 `fullres`（显式值优先）。
+#  · 现代 `p1~p7` 别名**不带** multipass 标记（只有 legacy `slow` 别名会开两遍）
+#    ⇒ 别指望 `-preset p7` 自带 two-pass。
+# ⚠ 两脚本的这三张表与默认值必须**逐字一致**（孪生约定）。
+_NVENC_TUNE_VALUES = ('hq', 'll', 'ull', 'lossless', 'uhq')
+_NVENC_MULTIPASS_VALUES = ('disabled', 'qres', 'fullres')
+_NVENC_UHQ_CODECS = {'hevc_nvenc', 'av1_nvenc'}   # h264_nvenc 没有 uhq 档
 # lookahead 范围：x264 的上限就是 250；NVENC / x265 无上限，250 足够且统一。
 _LOOKAHEAD_RANGE = (0, 250)
 # --qp 是**真实 QP**（基准轴，非 CQ 轴）；量程随编码器不同（见 qp_range()）
@@ -3577,9 +3592,12 @@ def apply_rc_control_args(codec: str,
                           lookahead: Optional[int] = None,
                           policy: str = 'auto',
                           warn: Optional[Callable[[str], None]] = None,
+                          tune: Optional[str] = None,
+                          multipass: Optional[str] = None,
+                          bitrate: Optional[str] = None,
                           ) -> Tuple[List[str], List[str]]:
     """
-    把 --rc-mode / --qp / --lookahead 落到 ffmpeg 参数上。
+    把 --rc-mode / --qp / --lookahead / --nvenc-tune / --nvenc-multipass 落到 ffmpeg 参数上。
 
     Returns:
         (args, x265_params)
@@ -3667,6 +3685,32 @@ def apply_rc_control_args(codec: str,
         else:
             _ignore(f'--lookahead {lookahead}',
                     f'编码器 {c} 的 lookahead 选项名未经实测，不代为下发')
+
+    # ── NVENC 调优：--nvenc-tune / --nvenc-multipass（依据见文件头常量注释）──
+    # 自动 multipass：只有 CBR / 受限码率场景才有意义（提升码率命中精度）；显式给值时不走自动。
+    _mp = multipass
+    if _mp is None and c in NVENC_CODECS and (rc_mode == 'cbr' or bitrate):
+        _mp = 'fullres'
+    if _mp is not None:
+        if c not in NVENC_CODECS:
+            _ignore(f'--nvenc-multipass {_mp}',
+                    f'-multipass 是 NVENC 专属选项，编码器 {c} 没有这个开关')
+        elif rc_mode == 'constqp' or qp == 0:
+            # constqp 没有码率目标，驱动会忽略 multipass（NVEncC 文档：仅 vbr/cbr 可用）。
+            _ignore(f'--nvenc-multipass {_mp}',
+                    '-rc constqp 无码率目标，NVENC 会忽略 multipass')
+        else:
+            args += ['-multipass', _mp]
+
+    if tune is not None:
+        if c not in NVENC_CODECS:
+            _ignore(f'--nvenc-tune {tune}',
+                    f'-tune 是 NVENC 专属选项，编码器 {c} 没有这个开关')
+        elif tune == 'uhq' and c not in _NVENC_UHQ_CODECS:
+            _ignore(f'--nvenc-tune uhq',
+                    f'{c} 没有 uhq 档（仅 hevc / av1 NVENC 有），已忽略')
+        else:
+            args += ['-tune', tune]
 
     return args, x265_params
 
@@ -4095,6 +4139,8 @@ def build_ffmpeg_cmd(
     lookahead: Optional[int] = None,
     bitrate: Optional[str] = None,
     nvenc_aq: bool = False,
+    nvenc_tune: Optional[str] = None,
+    nvenc_multipass: Optional[str] = None,
     threads: int = 0,
 ) -> List[str]:
     """
@@ -4108,6 +4154,10 @@ def build_ffmpeg_cmd(
     nvenc_aq:      True 时给 NVENC 编码器加 -spatial-aq 1 -temporal-aq 1
                    （对照 Video_Enhancement SDK 的 enableAQ/enableTemporalAQ）。
                    非 NVENC 编码器忽略并告警；默认 False（不改变既有输出）。
+    nvenc_tune:    NVENC 的 -tune 档（hq/ll/ull/lossless/uhq）；None=不下发
+                   （ffmpeg 默认即 hq，写了等于没写）。uhq 仅 hevc/av1 NVENC 有。
+    nvenc_multipass: NVENC 的 -multipass 档（disabled/qres/fullres）；None=不在 CQ 路径
+                   下发，但 rc_mode=cbr 或给了 bitrate 时自动 fullres（见常量注释）。
     """
     extra_args = extra_args or []
     if codec.lower() == 'copy' and vf_filter:
@@ -4299,7 +4349,8 @@ def build_ffmpeg_cmd(
     # 降级都会改变它）。libx265 的 lookahead 走 x265_params，必须与 HDR 元数据合并成
     # 同一条 -x265-params，故不在这里直接下发。
     rc_args, rc_x265 = apply_rc_control_args(
-        codec, rc_mode, qp, lookahead, policy, _warn)
+        codec, rc_mode, qp, lookahead, policy, _warn,
+        tune=nvenc_tune, multipass=nvenc_multipass, bitrate=bitrate)
 
     # 质量参数（cq / crf 互斥，由 _resolve_quality_params 决定）。
     # [LOSSLESS] crf/cq == 0 的 0 档改写（对照 Video_Enhancement 的 ffmpeg_io.py
@@ -4746,6 +4797,8 @@ def process_file(
     lookahead: Optional[int] = None,
     bitrate: Optional[str] = None,
     nvenc_aq: bool = False,
+    nvenc_tune: Optional[str] = None,
+    nvenc_multipass: Optional[str] = None,
     chroma_check: bool = True,
     threads: int = 0,
     queue_rest: Optional[float] = None,
@@ -4772,6 +4825,8 @@ def process_file(
                         即与引入这四个参数之前逐字相同。
         nvenc_aq        True 时给 NVENC 策略加 -spatial-aq 1 -temporal-aq 1（逐策略判，
                         非 NVENC 的那条策略会忽略并告警）；默认 False。
+        nvenc_tune      NVENC 的 -tune 档（None=不下发；uhq 仅 hevc/av1），逐策略生效。
+        nvenc_multipass NVENC 的 -multipass 档（None=CQ 路径不下发、CBR/限码率自动 fullres）。
         chroma_check    产物色度自检（默认 True）：策略成功后取样比对源与产物的 U/V，
                         疑似归零则判该策略失败、走既有降级链；--no-chroma-check 关闭
         queue_rest / queue_cur  整批剩余时间的两个构件（秒），透传给进度条常驻
@@ -4968,6 +5023,8 @@ def process_file(
             lookahead=lookahead,
             bitrate=bitrate,
             nvenc_aq=nvenc_aq,
+            nvenc_tune=nvenc_tune,
+            nvenc_multipass=nvenc_multipass,
             threads=threads,
             policy=policy,
         )
@@ -5070,6 +5127,8 @@ def process_file(
                     lookahead=lookahead,
                     bitrate=bitrate,
                     nvenc_aq=nvenc_aq,
+                    nvenc_tune=nvenc_tune,
+                    nvenc_multipass=nvenc_multipass,
                     threads=threads,
                     policy=policy,
                 )
@@ -5416,6 +5475,17 @@ preset 映射（NVENC ↔ libx264 自动转换）：
                              '同码率下画质略升、速度略降（对照 Video_Enhancement 的 '
                              'enableAQ/enableTemporalAQ）。默认关闭；非 NVENC 策略会忽略'
                              '并告警（逐策略判断，因为降级策略的编码器可能不是 NVENC）')
+    parser.add_argument('--nvenc-tune', default=None, choices=list(_NVENC_TUNE_VALUES),
+                        metavar='TUNE',
+                        help='NVENC 的 -tune 档：hq（ffmpeg 默认值，写不写一样）/ ll / ull / '
+                             'lossless / uhq（仅 hevc_nvenc / av1_nvenc 有此档）。默认不发。'
+                             'uhq 会自动启用 lookahead + temporal filter，显存占用更高')
+    parser.add_argument('--nvenc-multipass', default=None, choices=list(_NVENC_MULTIPASS_VALUES),
+                        metavar='MP',
+                        help='NVENC 的 -multipass 档：disabled / qres / fullres。默认不在 CQ '
+                             '路径下发（固定 -cq 下实测不升 VMAF）；rc-mode=cbr 或给了 '
+                             '--bitrate 时会自动补 fullres，可用本参数显式覆盖。'
+                             'fullres 耗时/显存更高，且可能使输出非确定（等质量标定勿开）')
     parser.add_argument('--preset', default=None,
                         help='编码器预设。默认：CPU 编码器 medium，GPU 编码器 p4；'
                              'NVENC（p1~p7）与 libx264 风格（ultrafast~veryslow）自动双向映射')
@@ -5739,6 +5809,14 @@ def main() -> int:
             check_int_range(args.qp, '--qp', qp_range(_qp_codec), _QP_HINT)
     except ValueError as exc:
         print(f'[ERROR] {exc}', file=sys.stderr)
+        return 2
+
+    # --nvenc-tune uhq 只在 hevc/av1 NVENC 上有该档；显式落到 h264_nvenc 时直接报错。
+    # （--codec auto / 逐策略降级拿不到确定编码器，改由 apply_rc_control_args 忽略并告警。）
+    _tune_codec = CODEC_ALIASES.get((args.codec or '').lower(), (args.codec or '').lower())
+    if args.nvenc_tune == 'uhq' and _tune_codec == 'h264_nvenc':
+        print('[ERROR] --nvenc-tune uhq 不受 h264_nvenc 支持（uhq 仅 hevc_nvenc / '
+              'av1_nvenc 有）；请改用 --nvenc-tune hq 或换编码器。', file=sys.stderr)
         return 2
 
     _literal = [n for n, v in (('--crf', args.crf), ('--cq', args.cq)) if v is not None]
@@ -6194,6 +6272,8 @@ def main() -> int:
                 lookahead=args.lookahead,
                 bitrate=args.bitrate,
                 nvenc_aq=args.nvenc_aq,
+                nvenc_tune=args.nvenc_tune,
+                nvenc_multipass=args.nvenc_multipass,
                 chroma_check=args.chroma_check,
                 threads=args.threads_resolved,
                 queue_rest=q_rest,

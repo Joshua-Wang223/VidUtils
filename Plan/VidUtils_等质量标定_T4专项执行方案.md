@@ -284,6 +284,30 @@ python3 probe/t4_acceptance.py --src '<真实素材>'
 13. **改表必回跑 ⑨ 组**；**改落点顺手同步 `A_CASES` 与 `--selftest`**。
 14. **上机前查并发负载**：`pgrep` + `nvidia-smi` 三项 utilization，**不 kill 用户进程**。
 
+### 6.1 `-tune` / `-multipass` 的取舍（2026-10-04 T4 实测）
+
+> 依据 `Plan/ffmpeg_nvenc_knowledge.md` §5 / §5.1 / §5.2 + 本机 A/B（下表）。
+
+| codec | cq | disabled VMAF | qres ΔVMAF | fullres ΔVMAF |
+|---|---|---|---|---|
+| h264_nvenc | 26 | 99.087 | −0.132 | −0.034 |
+| h264_nvenc | 34 | 87.382 | −0.335 | −0.108 |
+| hevc_nvenc | 26 | 99.265 | −0.067 | −0.006 |
+| hevc_nvenc | 34 | 89.930 | −0.243 | −0.048 |
+
+- **`-tune hq` 是 ffmpeg 默认值**（`-h encoder` 实测 `default hq`）⇒ 写了等于没写，**标定/生产都别加**。
+  `uhq` 是 hevc/av1 专属（h264_nvenc 传 uhq → rc=234），是真正的画质杠杆（自动开 lookahead +
+  temporal filter），需要时用 `--nvenc-tune uhq`。
+- **固定 `-cq` 下 multipass 不升 VMAF**（上表：fullres −0.006~−0.108、qres −0.067~−0.335，
+  码率 ×0.98~0.997）⇒ **标定与生产 CQ 路径都不加**。VE 方案里那条
+  `-rc:v vbr_hq → -rc:v vbr -tune hq -multipass fullres` 的迁移路径**不适用于本仓 CQ 路径**：
+  `-tune hq` 冗余、`-multipass` 无收益且会**破坏复现性**（multipass 输出非确定）。
+- multipass 的价值在 **CBR / 紧 VBV**（把实际码率拉近目标）；VU 生产在 `--rc-mode cbr` 或给了
+  `--bitrate` 时**自动补 `-multipass fullres`**（显式 `--nvenc-multipass` 优先），CQ 路径不动。
+- ⚠ 别把 `-preset p7` 当 two-pass：现代 `p1~p7` 别名不带 multipass 标记（只有 legacy `slow` 会开两遍）。
+- 落地：两脚本新增 `--nvenc-tune` / `--nvenc-multipass`（默认不发 ⇒ 现有命令逐字不变）；
+  `probe/calibrate_equal_quality.py` 的 `BASE_LOCK` 仍为裸 `-rc vbr`。
+
 ---
 
 ## 7. 风险与坑

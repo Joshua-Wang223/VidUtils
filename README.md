@@ -1906,7 +1906,7 @@ vidutils/
 │   │   └── enum_cmds.py                     # 无 GPU 时 mock 远程能力、枚举脚本真正下发的命令
 ├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
 ├── Plan/                     # 立项任务书与过程归档（含 vidls 对话记录 .txt）
-│   ├── PROMPT_GPU侧继续测试.md       # **GPU 侧待测项总纲**：P0 先补齐 2026-10-04 缺失的报告（落表只有 memory 断言、无可复核证据）→ 排除「环境假红」→ T4 B1~B5 / NVENC B·C 组 → C-8 扩 ref → 需另机的 QSV/AMF/VT
+│   ├── PROMPT_GPU侧继续测试.md       # **GPU 侧待测项总纲**：P0 先补齐 2026-10-04 缺失的报告（落表只有 memory 断言、无可复核证据）→ 排除「环境假红」→ T4 B1~B5 / NVENC B·C 组 → C-8 扩 ref → 需另机的 QSV/AMF/VT。⚠ 卡型代际不可选：av1_nvenc 必须 Ada/L40，T4（Turing）补不到
 ├── AV1_VP9_UPGRADE_PLAN_v2.md # AV1/VP9 升级方案归档
 ├── docs/                     # （规划）设计文档与性能基准
 └── examples/                 # （规划）示例素材与演示脚本

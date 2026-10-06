@@ -19,10 +19,38 @@
 | 15 个 verify 套件 | 14 个通过；`verify_chroma_hook.py` 因本机无 NVENC 失败（已知项） |
 | `check_readme_refs.sh` | ✓ 引用了全部 53 个工具文件 |
 | 装置自证 | `t4_acceptance.py --selftest`（9 格）、`--local`（4 格）、`verify_nvenc_quality_gpu.py --selftest` |
-| 等质量 CPU 侧 | `verify_equal_quality.py` 主门禁 5/5 达标（ΔVMAF ≤ 1.0），需 12 分钟 |
+| 等质量 CPU 侧 | `verify_equal_quality.py` 主门禁 **5/5 达标**（最大 \|ΔVMAF\| 0.636，2026-10-06 实测两次逐位一致）。实测记录：`Accessory/calib/eqq_evidence/README.md` |
 
 > ⚠ **`verify_chroma_hook.py` 在有 GPU 的机器上会变绿**——它在本机失败是因为
 > 硬写「本机无 CUDA」。**这属于「环境假红」，不是回归**。见 §2 的 P0。
+
+> ⚠ **`verify_equal_quality.py` 的绿灯不能为表值背书**（README:1659）：它跑单素材
+> in-sample（`new5_raw` crf21 就在标定集内），结构上测不到跨素材问题。它是
+> 「表改动后没把软编档改坏」的回归门；落表的前置门禁是 **LOO**。
+
+---
+
+## §0.5 上机前的三件小事（2026-10-06 补）
+
+1. **报告落盘处已改为入库**：`Accessory/verification_report/` 原被整目录 gitignore，
+   但 `verify_nvenc_quality_gpu.py` 自己的用法示例（其 docstring `:50-51`）就把报告
+   写到该目录 ⇒ §1 的 P0 产出无法随仓库分发，与 P0 的目的矛盾。已改为
+   **报告 json/md 入库**，只忽略 `*.tmp` 与 `*.vmaf.json`（帧级中间产物）。
+2. **`verify_equal_quality.py` 的 3 个 NVENC 档在本机是 SKIP 而非 FAIL**，
+   实编探测到 `-22 (Invalid argument)`（判据见 `calibrate_equal_quality.py:219-234`
+   的注释：**只 grep `-encoders` 会误判**，T4 的 `av1_nvenc` 就是「列表里有、
+   实编报错、产物 0 字节」）。上机后它会变实测。
+3. **卡型代际不是可选项**（实测确认）：
+   | 档位 | 需要的卡 | 原因 |
+   |---|---|---|
+   | `h264_nvenc` | 任意 NVENC 卡（Pascal+） | H.264 硬编 |
+   | `hevc_nvenc` | 任意 NVENC 卡（Pascal+） | HEVC 硬编 |
+   | **`av1_nvenc`** | **Ada / L40 及更新（8 代 NVENC）** | **Turing 没有 AV1 硬编** |
+
+   ⇒ **T4 上永远补不到 `av1_nvenc` 那一档**，必须借 L40 或更新的卡。
+   没有 CPU 替身：`probe_lossless_qp0.sh` 的 `LOCALCPU=1` 只验「无损判定装置本身
+   是否可信」，软编替身跑绿对 NVENC 档位**没有证明力**（软硬编的 `-cq`→VMAF
+   关系不同）。
 
 ---
 
@@ -47,9 +75,17 @@
 
 | 编号 | 动作 | 判据 |
 |---|---|---|
-| **P0-1** | 在 T4 上重跑 `probe/verify_nvenc_quality_gpu.py` 的 B 组（h264/hevc `-cq`），**把报告落盘**到 `Accessory/verification_report/`，文件名带日期与口径 | 报告里 `-cq` 值与 `convert_crf.py` 现行表**逐条相等** |
-| **P0-2** | 在 L40（Ada）上重跑 C 组的 av1 格，报告落盘 | 同上，对 `QUALITY_MAP['av1_nvenc']` |
+| **P0-1** | 在 T4 上重跑 `probe/verify_nvenc_quality_gpu.py` 的 B 组（h264/hevc `-cq`），**把报告落盘**：`--json Accessory/verification_report/nvenc_quality_T4_<TS>.json --md Accessory/verification_report/nvenc_quality_T4_<TS>.md` | 报告里 `-cq` 值与 `convert_crf.py` 现行表**逐条相等** |
+| **P0-2** | 在 L40（Ada）上重跑 C 组的 av1 格，报告落盘（同上命令，换卡型前缀） | 同上，对 `QUALITY_MAP['av1_nvenc']` |
 | **P0-3** | 重跑 `probe/t4_acceptance.py` 全 20 格，报告落盘 | `t4_acceptance.py:319-325` 的 rc 与产物双判据 |
+
+**要验的表值现状**（`convert_crf.py` 的 `QUALITY_MAP`，两仓逐字相等）：
+
+| 编码器 | a | b | 量程 | crf21 → cq |
+|---|---|---|---|---|
+| `h264_nvenc` | 0.9295 | 6.2523 | 0~51 | 25.77 |
+| `hevc_nvenc` | 1.1116 | 2.1606 | 0~51 | 25.50 |
+| `av1_nvenc` | 1.4566 | 1.2165 | 0~63 | 31.81 |
 
 **落盘要求**（照 `verify_nvenc_quality_gpu.py` 自己的输出约定）：文件名
 `<脚本名>_<卡型>_<YYYYMMDD_HHMMSS>.{json,md}`，json 里必须含
@@ -58,6 +94,9 @@
 
 > 这正是 memory `feedback_report_accuracy` 记的坑：**锚点不同步才是真问题**。
 > 报告里若不写「本次用的表值口径」，三个月后没人能判断它对应哪一版表。
+
+> ⚠ **报告落盘处已改为入库**（见 §0.5 第 1 条）——原先该目录被整目录 gitignore，
+> 照旧路径落盘会「文件在、但 git add 不进去」，等于没留证据。
 
 ---
 
@@ -212,14 +251,28 @@ verify_equal_quality.py 的 GPU 档（§8）
 ## §8 硬编门禁：GPU 档从 SKIP 变实测
 
 `Accessory/verify/verify_equal_quality.py` 的 `HARD = ('h264_nvenc','hevc_nvenc','av1_nvenc')`
-在无卡机上全部 SKIP。有卡后它会变**实测**：
+在无卡机上全部 SKIP（实测 `-22 Invalid argument`）。有卡后它会变**实测**：
 
 - 主门禁 **|ΔVMAF| ≤ 1.0**（唯一判红口径；PSNR/PSNR-HVS 仅 soft 参考）
 - **全 SKIP ⇒ 退出码 2**（`:39` 注释所述的「空集守卫，防静默通过」）——
   有卡机上若仍 exit 2，说明**表没覆盖该编码器**或**探测失败**，不是「通过」
 
-**前置**：需 12 分钟（真实素材重编码）。参考值（2026-10-04 落表，CPU 侧记录）：
-h264 ΔVMAF = −0.044 / hevc = +0.135。
+**卡型分工**（与 §0.5 第 3 条同源）：
+
+| 卡 | 能补的档 | 不能补的档 |
+|---|---|---|
+| **T4**（Turing） | `h264_nvenc` / `hevc_nvenc` | `av1_nvenc` |
+| **L40**（Ada） | `av1_nvenc`（也能跑前两档） | — |
+
+⇒ 三个档补齐**至少需要两台机**（或一台 Ada 一次跑完三档）。
+
+**预期结果**（2026-10-04 落表时的记录，见 `memory/project_gpu_eqquality_readiness.md:25`）：
+h264 `ΔVMAF` = **−0.044** / hevc **+0.135** / av1 **+0.004**，8 档全绿。
+本次复测若与之相符 ⇒ 表值可复现；不符 ⇒ 表值需重标（并同步两仓 +
+更新 `enc_before.txt` 基线，见 `memory/project_repo_gate_baselines`）。
+
+**耗时**：约 12 分钟（180 帧 × N 档 VMAF 测量，软编 5 档实测 11 分 39 秒）。
+若只跑 NVENC 档，用 `--codecs h264_nvenc,hevc_nvenc,av1_nvenc` 可省时间。
 
 ---
 
@@ -244,11 +297,18 @@ h264 ΔVMAF = −0.044 / hevc = +0.135。
 
 1. **报告落盘**到 `Accessory/verification_report/`，命名
    `<脚本>_<卡型>_<YYYYMMDD_HHMMSS>.{json,md}`；
-   json 必含 **ffmpeg 版本 + 卡名 + 驱动版本 + 落表口径（p 档 / rc 模式）**
+   json 必含 **ffmpeg 版本 + 卡名 + 驱动版本 + 落表口径（p 档 / rc 模式）**。
+   **该目录的报告已改为入库**（§0.5 第 1 条）——落盘后 `git status` 应能看到
+   新文件；若看不到，说明路径被 ignore 规则挡住了，先查 `.gitignore`。
 2. 把报告路径与关键数字**写进 `memory/project_rate_control_params.md`**
    （T4/L40 实测那节）——memory 里目前只有文字描述，没有报告链接
 3. 若表值变了：改 `convert_crf.py`（**两仓逐字相等**），并跑
    `python3 Accessory/verify/verify_quality_mapping.py`（⑨ 组 14/14）
+   **外加 `bash Accessory/test/dump_enc_options.sh` 并同步 `enc_before.txt`** ——
+   换算表一改第三道门就会分叉（这个坑踩过一次：表在 `6c71fed`（2026-10-04
+   T4 标定）改成 `QUALITY_MAP[hevc_nvenc]=(1.1116,2.1606)`，而基线最后一次
+   更新停在 `f617ffe`（2026-10-03），于是 `hevc_nvenc 显式 --cq` 一行
+   `-crf 13 → 15` 一直红到 10-06 才补录）
 4. 若结论推翻了某条 memory：**当场改 memory**，不要只在新提交里提一句
 5. 更新本文档的勾选状态
 

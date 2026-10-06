@@ -1874,8 +1874,10 @@ vidutils/
 │   ├── archive/                       # 不可再生数据全量原件（gitignored）：eqq_calib 34 json、m2_srcs 原片、
 │   │                                   #   手工快照、探针 log、verification_report —— 判据见 archive_manifest.md
 │   ├── calib/                         # 标定的**可复核证据**（入库）；archive/ 是全量原件（gitignored）
-│   │   └── eqq_evidence/              # 精选 5 个 eqq_calib json（127KB / 全组 11.4%）：7 素材×4 编码器 report、
-│   │                                   #   唯一含 psnr_hvs/vif/adm2 的 points 层、两个 rav1e 轮的 report/points。
+│   │   └── eqq_evidence/              # 等质量标定的可复核证据。含 README.md（某次回归的实测记录 +
+│   │                                   #   prep md5 等口径锚点）与精选 5 个 eqq_calib json
+│   │                                   #   （127KB / 全组 11.4%）：7 素材×4 编码器 report、唯一含
+│   │                                   #   psnr_hvs/vif/adm2 的 points 层、两个 rav1e 轮的 report/points。
 │   │                                   #   选入理由与排除依据见 archive_manifest.md。⚠ 不含 LOO 字段
 │   ├── temp/                          # 本机临时目录（gitignored）：测试素材、中间产物、探针日志
 │   ├── verification_report/           # 上机验收报告落盘处（gitignored）
@@ -1933,6 +1935,9 @@ python Accessory/verify/verify_scale_algo.py        # --scale-algo 解析
 python Accessory/verify/verify_pixfmt_bitdepth.py   # --pix-fmt × --bit-depth 的「能落地者赢」
 python Accessory/verify/verify_quality_mapping.py   # 质量参数单点换算：--qp 降级 / -ref→constqp 的 qp / --crf→-cq / 0 值无损 / 下界钳 1
 python Accessory/verify/verify_equal_quality.py     # 等质量表回归（主门禁 ΔVMAF ≤ 1.0；真实素材重编码，较慢）
+                                                    # 最近一次 2026-10-06：CPU 软编 5/5 达标（最大 |ΔVMAF| 0.636），
+                                                    # NVENC 3 档 SKIP（本机无卡）。实测记录见
+                                                    # Accessory/calib/eqq_evidence/README.md（含 prep md5 等锚点）
 python Accessory/verify/verify_cli_parsing.py       # --extra-args 的两种写法（含文档里的 `--` 形式）+ 输出尺寸偶数校验的两脚本一致性
 python Accessory/verify/verify_overview_lockstep.py # 两个概览块的字段序列对齐 + 显示量纲必须与命令一致（`--selftest` 自检判词装置）
 python Accessory/verify/verify_cuda_decode_codec.py # 按源编解码器的硬解确认（AV1）

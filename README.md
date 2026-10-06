@@ -23,6 +23,7 @@
   - [vidcrop_cpu_v2.py — CPU 并发裁剪（推荐）](#vidcrop_cpu_v2py--cpu-并发裁剪推荐)
   - [vidcrop_hwaccel.py — 硬件加速裁剪](#vidcrop_hwaccelpy--硬件加速裁剪)
   - [convert_crf.py — 质量换算表（被上面两个脚本依赖）](#convert_crfpy--质量换算表被上面两个脚本依赖)
+  - [convert_sdr_to_hdr.py — SDR 视频转 HDR10（神经网络 · HDRTVNet++）](#convert_sdr_to_hdrpy--sdr-视频转-hdr10神经网络--hdrtvnet)
   - [interp_2x_safe.sh — 光流插帧 2x（崩溃安全版）](#interp_2x_safesh--光流插帧-2x崩溃安全版)
   - [vidls.sh — ls / ll 替代 + 视频属性探测](#vidlssh--ls--ll--替代--视频属性探测)
   - [Windows 版 vidls — ls / ll 替代（Windows）](#windows-版vidlscmd--vidls_winpy)
@@ -127,7 +128,7 @@
 
 ## 环境要求
 
-- **Python** ≥ 3.8（仅使用标准库，无需 `pip install`）
+- **Python** ≥ 3.8（除 `convert_sdr_to_hdr.py` 外仅使用标准库，无需 `pip install`）
 - **FFmpeg** ≥ 4.4，且 `ffmpeg` / `ffprobe` 在 `PATH` 中可见（或通过 `--ffmpeg-bin` 指定，仅 hwaccel 版支持）
 - **AV1 / VP9 额外需要** FFmpeg 编译时带上对应库（Ubuntu 官方包通常已带；`libsvtav1` 需 FFmpeg ≥ 4.4 且 `--enable-libsvtav1`）：
 
@@ -152,6 +153,24 @@ ffmpeg -hide_banner -encoders 2>/dev/null | grep -E 'libsvtav1|libaom-av1|librav
 ffmpeg -hide_banner -filters | grep nvinterpolate
 nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
 ```
+
+- **`convert_sdr_to_hdr.py` 额外需要**（SDR→HDR，其余工具都不需要第三方 Python 包）：
+  - **必需（跑神经网络时）**：PyTorch。`--no-model` 模式**不需要**，只用 FFmpeg。
+    本机实测 `sudo apt-get install -y python3-torch python3-numpy` 可用（torch 2.9.1 + Python 3.14）；
+    官方 wheel 需 `python3 -m pip install --break-system-packages torch numpy`。
+  - **可选**：`numpy`。没装时帧编解码走纯 Python 兜底路径（能跑通，但 1280x720
+    实测约 0.37 fps；装了 numpy 走向量快路径，差约 40 倍）。装 torch 时会一并带入。
+  - **必需（模型本体）**：HDRTVNet-plus 仓库（MIT），默认放在仓库外的
+    `/mnt/d/Workspace_Python/HDRTVNet-plus`：
+
+    ```bash
+    git clone --depth 1 https://github.com/xiaom233/HDRTVNet-plus.git \
+        /mnt/d/Workspace_Python/HDRTVNet-plus
+    ```
+
+    权重随仓库分发（`pretrained_models/`，约 7MB），无需另行下载。上游是 BasicSR
+    框架但**推理链只 import torch**，所以本脚本不引入 `basicsr`（`basicsr==1.4.2`
+    在 Python 3.12+ 上装不上）。
 
 **检查 FFmpeg 是否具备硬件编译选项：**
 
@@ -417,6 +436,92 @@ qp_range('av1_nvenc')                         # → (0, 255)
 >
 > 用 `--quality-mode size|quality`（**默认 `quality`**）切换；`QUALITY_MAP` 未覆盖的编码器
 > （如硬编，待上机标定）自动回退到 `SIZE_MAP`。
+
+---
+
+### `convert_sdr_to_hdr.py` — SDR 视频转 HDR10（神经网络 · HDRTVNet++）
+
+把 SDR（BT.709）视频逐帧转成 **HDR10（BT.2020 / PQ / 10bit）**，转换网络用
+[HDRTVNet++](https://github.com/xiaom233/HDRTVNet-plus)（MIT）的
+`Ensemble_AGCM_LE` 模型（AGCM 全局色调映射 + LE 局部增强级联为一层，参数量 59 万）。
+
+整条链路是**两个 ffmpeg + 一段 Python**，帧数据全程走 16bit 原始管道：
+
+```
+① ffmpeg -i 源 -f rawvideo -pix_fmt gbrp16le pipe:1     解码出 16bit 帧
+② Ensemble_AGCM_LE 推理                                 逐帧 SDR→HDR
+③ ffmpeg -f rawvideo … -c:v libx265 (HDR10)             编码 + 复用源音轨
+```
+
+**不落中间 PNG、不依赖 OpenCV、不依赖 BasicSR。** 上游是 BasicSR 框架
+（`basicsr==1.4.2` 在 Python 3.12+ 上装不上），但推理链本身只 import torch：
+
+- 直接把 `<repo>/codes` 加进 `sys.path` 后
+  `from models.modules.Ensemble_AGCM_LE_arch import Ensemble_AGCM_LE`
+- `basicsr` / `opencv` / `scipy` / `lmdb` / `piq` / `colour` **只出现在数据集层与
+  训练配置层**，推理用不到，因此整套 BasicSR 依赖被绕开
+- **模型定义不复制代码**：上游升级只需重新 clone，本文件不用同步
+
+| 参数 | 说明 |
+|------|------|
+| `--input` / `-i` | 输入视频（必选） |
+| `--output` / `-o` | 输出视频（必选） |
+| `--model-repo` | HDRTVNet-plus 仓库目录，默认 `/mnt/d/Workspace_Python/HDRTVNet-plus`（仓库外，避免权重进 git） |
+| `--no-model` | **跳过神经网络**，只跑 ①→③ 编码链路 |
+| `--device` | `auto`（默认，有 CUDA 用 cuda）/ `cpu` / `cuda` |
+| `--threads` | torch CPU 线程数（默认 0 = 不干预） |
+| `--tile` / `--tile-overlap` | 分块推理边长与重叠（默认 0 = 整帧；4K 建议 1024，最小 24） |
+| `--crf` | x265 CRF，默认 20 |
+| `--preset` | x265 preset，默认 `slow` |
+| `--bit-depth` | 输出位深，默认 10（唯一可选值；SDR→HDR 必须 10bit） |
+| `--master-display` | mastering display 元数据；`--no-master-display` 可关闭 |
+| `--max-cll` | MaxCLL,MaxFALL，默认 `1000,400` |
+| `--audio` | `copy`（默认，流复制源音轨）/ `none` |
+| `--no-mod-crop` | 关闭向内裁到 8 的倍数（默认开） |
+| `--duration` / `--frames` | 只处理前 N 秒 / 前 N 帧（冒烟用） |
+| `--overwrite` | 覆盖已存在的输出 |
+| `--dry-run` | 只打印阶段计划与两条 ffmpeg 命令 |
+| `--log` | 全部输出追加写入日志文件 |
+| `--extra-args` | 追加任意 ffmpeg 参数（插在输出路径之前） |
+
+退出码：`0` 正常 / `1` ffmpeg 或推理失败 / `2` 参数错误
+
+**常用流程**
+
+```bash
+# 1) 克隆模型仓库（仓库外，与 VidUtils 同级）
+git clone --depth 1 https://github.com/xiaom233/HDRTVNet-plus.git \
+    /mnt/d/Workspace_Python/HDRTVNet-plus
+
+# 2) 先看命令，不实际处理（不碰模型、不耗 CPU）
+python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --dry-run
+
+# 3) 无 GPU / 无 torch 时先验证编码链路
+python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --no-model
+
+# 4) 完整流程
+python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4
+
+# 5) 冒烟：前 6 帧、CPU 推理
+python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --frames 6 --device cpu
+```
+
+**`--no-model` 的两个用途**（它不是「偷懒模式」）：验证 ①→③ 编码链路本身
+（抽帧、色彩标签、HDR10 静态元数据、mux），以及作为「网络到底带来了什么」的对照基线。
+它把 SDR 的 gamma 值经幂函数提亮后当 PQ 值用 —— 严格说这不是 HDR（动态范围没变），
+只保证链路能跑通、画面亮度可辨。
+
+**⚠️ 分块推理不等价于整帧。** AGCM 的条件网络 `Color_Condition` 结尾是
+`AdaptiveAvgPool2d(1)`，即每块各算一个「全局」色调映射向量。分块后每块的条件向量不同，
+块间色调会有差异（实测 320x240 整帧 vs 分块 32 无重叠，最大差 0.17）。它是
+「4K 整帧塞不进内存」的取舍，不是无损优化；1080p 及以下建议 `--tile 0`。
+
+**依赖**：`--no-model` 只需 FFmpeg（numpy 可选，有则快 ~40 倍）；跑网络需额外装 torch。
+本机实测 `apt-get install python3-torch python3-numpy`（torch 2.9.1 / Python 3.14 可用）。
+
+**尺寸约束**：模型下采样三次，宽高须为 8 的倍数，`--mod-crop`（默认）自动向内裁齐；
+`--tile` 最小 24（条件网络要 4 次 stride-2 池化，块太小会让末层退化成 1x1，
+InstanceNorm 报错）。源若已是 HDR 会告警——HDR 源应直接用 `vidcrop_hwaccel.py` 转封装。
 
 ---
 
@@ -1752,6 +1857,7 @@ vidutils/
 ├── vidcrop_cpu_v2.py         # CPU 并发裁剪增强版（推荐；AV1/VP9、别名、preset 映射、-ref 基准）
 ├── vidcrop_hwaccel.py        # 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL，6 级策略链）
 ├── convert_crf.py            # 质量换算表（被 v2 / hwaccel 依赖，单一事实来源）
+├── convert_sdr_to_hdr.py     # SDR→HDR10 转换（神经网络 HDRTVNet++ Ensemble_AGCM_LE；--no-model 只跑编码链路）
 ├── interp_2x_safe.sh         # 光流插帧 2x · GPU 专版（nvinterpolate + hevc_nvenc；环境探测 + -j 并行 + --SS/--TO/-T + TS 分片 + 断点恢复）
 ├── interp_2x_safe_v1.sh      # 同上的通用版（多一条 CPU 回退 minterpolate + libx265 与 --backend/--cpu-preset）
 ├── vidls.sh                  # ls / ll 替代（启动器；--install 把自己接进 PATH）
@@ -1821,8 +1927,19 @@ python verify/verify_chroma_hook.py       # 产物色度自检的阈值 / 取样
 python verify/verify_rc_lookahead.py      # --rc-mode / --qp / --lookahead / --bitrate
 python verify/verify_borrow_enhancement.py # 从 Video_Enhancement 借鉴的那批：恒定质量/0 档无损/AQ/降档重试 + --flag→--suffix 更名
 python verify/verify_ratio_single_dim.py  # --crop-ratio + 单维度 → 按比例补全（三模式 + 两脚本 lockstep）
+python verify/verify_sdr_to_hdr.py        # SDR→HDR10：gbrp16le 往返/双路径一致 + HDR10 单条 -x265-params + token 顺序 + 真编码 + 模型推理
 bash   verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
 ```
+
+> `verify_sdr_to_hdr.py` 的六组里，前五组**不需要 GPU 也不需要 torch**（⑤ 会真跑一遍
+> 2s 短切片编码再用 ffprobe 校验产物的 HEVC Main10 / bt2020nc / smpte2084 / pc 与帧级
+> mastering display）；第 ⑥ 组需要 torch + 模型仓库，缺任一项自动跳过。
+> 开关：`--no-encode` 跳过真编码、`--no-model-test` 跳过模型推理。
+>
+> 其中 ① 的「numpy 快路径与纯 Python 兜底路径必须给出相同字节」是 2026-10-06 实测
+> 补的：numpy 路径的 `frame_to_raw` 曾把三通道堆到最后一维（HWC 交错 = `rgb48` 布局）
+> 而非 gbrp 要求的平面布局，纯 Python 路径却是对的 —— **两条路径不一致、而端到端测试
+> 全绿**，只有这条断言能抓到。
 
 > 第三道门（`dump_enc_options.sh`）是专门为码率控制那组参数加的：`dump_filter_chains.sh`
 > 只比滤镜链、`dump_cmd_default.sh` 只比 `-hwaccel*`，而 `--rc-mode` / `--qp` /

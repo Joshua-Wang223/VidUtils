@@ -56,7 +56,11 @@ def err_first(text):
 
 
 if not SRC.exists():
-    print(f'✗ 缺素材 {SRC}（先跑一次 test/dump_filter_chains.sh 生成）')
+    print(f'✗ 缺素材 {SRC}')
+    print('  它由 verify_color_tagging.py（或任一带 if not exists 守卫的 verify）自建：')
+    print('      python3 Accessory/verify/verify_color_tagging.py')
+    print('  或直接手搓：ffmpeg -f lavfi -i testsrc2=size=1920x1080:rate=25:duration=1 '
+          '-c:v libx264 -preset ultrafast -pix_fmt yuv420p <路径>')
     sys.exit(2)
 
 BASE = ['--input', str(SRC), '--output', str(temp_root() / 'verify_cli' / 'o'),

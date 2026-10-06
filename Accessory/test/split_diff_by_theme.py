@@ -57,7 +57,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from _paths import repo_root
+from _paths import repo_root, temp_root
 ROOT = repo_root()
 # ── 规则文件模板（JSON 不支持注释，故模板由本文件提供）────────────────────
 RULES_TEMPLATE = {
@@ -500,7 +500,7 @@ SELFTEST_RULES = {
 
 def selftest() -> int:
     """在 temp/ 里造一个临时仓库，跑完整流程并断言分类结果 + 无损性。"""
-    work = ROOT / "temp" / "split_selftest"
+    work = temp_root() / "split_selftest"
     _rmtree(work)
     repo = work / "repo"
     repo.mkdir(parents=True, exist_ok=True)
@@ -646,7 +646,7 @@ def main() -> int:
     if args.report:
         return 0
 
-    out = Path(args.out or (ROOT / "temp" / "split" / "a.patch"))
+    out = Path(args.out or (temp_root() / "split" / "a.patch"))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(a_patch.encode("utf-8"))
     print(f"\nA 侧补丁已写出：{out}")
@@ -654,7 +654,7 @@ def main() -> int:
           "  →  提交 A  →  git add <files>  →  提交 B")
 
     if args.verify:
-        ok, msg = verify_lossless(files, a_patch, ROOT / "temp", base_rev=args.rev)
+        ok, msg = verify_lossless(files, a_patch, temp_root(), base_rev=args.rev)
         print(("✓ " if ok else "✘ ") + msg)
         return 0 if ok else 1
     return 0

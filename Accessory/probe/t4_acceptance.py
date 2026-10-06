@@ -43,7 +43,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from _paths import repo_root
+from _paths import repo_root, temp_root
 ROOT = repo_root()
 HW = ROOT / "vidcrop_hwaccel.py"
 # 本脚本与 probe_lossless_qp0.sh 同在 Accessory/probe/（2026-06 起从仓库根迁入），
@@ -264,7 +264,7 @@ def main() -> int:
             print(f"[ERROR] 找不到 {t}", file=sys.stderr)
             return 2
 
-    src = Path(a.src) if a.src else ROOT / "temp" / "fixture_1080p.mp4"
+    src = Path(a.src) if a.src else temp_root() / "fixture_1080p.mp4"
     if not src.exists():
         if a.src:
             print(f"[ERROR] 素材不存在：{src}", file=sys.stderr)
@@ -275,7 +275,7 @@ def main() -> int:
                         "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=25:duration=1",
                         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                         str(src)], check=False)
-    out_root = ROOT / "temp" / "t4_acceptance"
+    out_root = temp_root() / "t4_acceptance"
     out_root.mkdir(parents=True, exist_ok=True)
 
     print(f"素材      : {src}")

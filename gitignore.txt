@@ -18,6 +18,8 @@ interp_2x/
 # 2026-10-06：temp/ 与 verification_report/ 迁进 Accessory/，规则改成带前缀，
 # 否则旧规则只对仓库根生效、新路径完全不受约束。
 Accessory/temp/
+# 归档区：不可再生的结论数据（内容不入库，只入 archive_manifest.md 这份清单）
+Accessory/archive/
 Accessory/verification_report/
 tmp/
 # 探针的工作目录（SELFTEST / 运行产物会真写 mp4/mkv）。正常指向 Accessory/temp/ 下，

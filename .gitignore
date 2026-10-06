@@ -27,6 +27,8 @@ interp_2x/
 # 否则旧规则只对仓库根生效、新路径完全不受约束（实测 Accessory/probe/*.log
 # 就是这么被顺手带进库的）。
 Accessory/temp/
+# 归档区：不可再生的结论数据（内容不入库，只入 archive_manifest.md 这份清单）
+Accessory/archive/
 Accessory/verification_report/
 tmp/
 # 探针的工作目录（SELFTEST / 运行产物会真写 mp4/mkv）。正常指向 Accessory/temp/ 下，

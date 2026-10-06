@@ -20,7 +20,9 @@ interp_2x/
 Accessory/temp/
 # 归档区：不可再生的结论数据（内容不入库，只入 archive_manifest.md 这份清单）
 Accessory/archive/
-Accessory/verification_report/
+Accessory/verification_report/*
+!Accessory/verification_report/nvenc_quality_T4_20260928_062328.json
+!Accessory/verification_report/nvenc_quality_T4_20260928_062328.md
 tmp/
 # 探针的工作目录（SELFTEST / 运行产物会真写 mp4/mkv）。正常指向 Accessory/temp/ 下，
 # 这几条是兜底：WORK 被改回脚本目录、或有人手工在仓库里跑探针时，产物也不会入库。

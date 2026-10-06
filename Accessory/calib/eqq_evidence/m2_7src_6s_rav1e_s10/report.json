@@ -1,0 +1,363 @@
+{
+  "ffmpeg": "ffmpeg version 8.0.1-+vmaf Copyright (c) 2000-2025 the FFmpeg developers",
+  "project_root": "<repo_root>",
+  "width": 1280,
+  "height": 720,
+  "duration": 6.0,
+  "tiers": [
+    "librav1e@10"
+  ],
+  "lock": {
+    "librav1e@10": [
+      "-speed",
+      "10"
+    ]
+  },
+  "anchors": [
+    18,
+    21,
+    24,
+    27,
+    30
+  ],
+  "tol_vmaf": 1.5,
+  "subsample": 1,
+  "with_filters": false,
+  "max_resid": {
+    "librav1e@10": 5.0
+  },
+  "metric_sources": {
+    "vmaf": "libvmaf pooled_metrics.vmaf.mean",
+    "psnr_hvs": "libvmaf feature=name=psnr_hvs",
+    "psnr": "standalone psnr filter average:",
+    "ssim": "standalone ssim filter All:",
+    "xpsnr": "standalone xpsnr filter"
+  },
+  "per_material": {
+    "new5_raw.mp4": {
+      "src_md5": "ccc937d2617028859b140a72a7234492",
+      "prep_md5": "0209b9e62a8b740031b4a890dc88cbb5",
+      "frames": 180,
+      "fps": 30.0,
+      "hdr": false,
+      "eqq": {
+        "librav1e@10": {
+          "points": [
+            [
+              18,
+              50.57529551036267
+            ],
+            [
+              21,
+              73.37319286294708
+            ],
+            [
+              24,
+              100.19334543456557
+            ],
+            [
+              27,
+              121.98571627217603
+            ],
+            [
+              30,
+              141.245458481392
+            ]
+          ],
+          "monotonic_violation": 0.0,
+          "method": "raw",
+          "a": 7.6650949783762545,
+          "b": -86.48767776874145,
+          "max_resid_param": 2.7187437222768978,
+          "max_delta_vmaf": 0.8455305396244484,
+          "model": "linear"
+        }
+      }
+    },
+    "new4_raw.mp4": {
+      "src_md5": "ff284dae8be8cfb2a3ce3aece41927e5",
+      "prep_md5": "2c4c656d95902f885fc4af280183f0c4",
+      "frames": 180,
+      "fps": 30.0,
+      "hdr": true,
+      "eqq": {
+        "librav1e@10": {
+          "points": [
+            [
+              18,
+              49.50830521880866
+            ],
+            [
+              21,
+              71.83620674957001
+            ],
+            [
+              24,
+              97.33145324913912
+            ],
+            [
+              27,
+              118.32214979385557
+            ],
+            [
+              30,
+              138.17817525419457
+            ]
+          ],
+          "monotonic_violation": 0.0,
+          "method": "raw",
+          "a": 7.460856103835247,
+          "b": -84.02528843893234,
+          "max_resid_param": 2.2961951960255362,
+          "max_delta_vmaf": 0.6085558899490593,
+          "model": "linear"
+        }
+      }
+    },
+    "cc_anim_300s.mkv": {
+      "src_md5": "42cd3f751357110a9bb6e1e0ad627845",
+      "prep_md5": "f66f20eaf6bebd9e087681ef9882655a",
+      "frames": 144,
+      "fps": 24.0,
+      "hdr": false,
+      "eqq": {
+        "librav1e@10": {
+          "points": [
+            [
+              18,
+              39.38857399525183
+            ],
+            [
+              21,
+              62.49185597712132
+            ],
+            [
+              24,
+              93.2151594412391
+            ],
+            [
+              27,
+              116.37070215559527
+            ],
+            [
+              30,
+              139.5662799518094
+            ]
+          ],
+          "monotonic_violation": 0.0,
+          "method": "raw",
+          "a": 8.474475269719637,
+          "b": -113.1808921690679,
+          "max_resid_param": 3.008645137035714,
+          "max_delta_vmaf": 0.3332708368962187,
+          "model": "linear"
+        }
+      }
+    },
+    "cc_subs_105s.mp4": {
+      "src_md5": "cba13619eca9221a4589b973cdc2ef91",
+      "prep_md5": "35320453f11b17bc52e2994a53f732bf",
+      "frames": 144,
+      "fps": 24.0,
+      "hdr": false,
+      "eqq": {
+        "librav1e@10": {
+          "points": [
+            [
+              18,
+              33.92396637604321
+            ],
+            [
+              21,
+              51.75898618780556
+            ],
+            [
+              24,
+              79.39147686245019
+            ],
+            [
+              27,
+              106.02332717730769
+            ],
+            [
+              30,
+              127.58491372551156
+            ]
+          ],
+          "monotonic_violation": 0.0,
+          "method": "raw",
+          "a": 8.052874522947961,
+          "b": -113.53245448492746,
+          "max_resid_param": 3.8189243091741787,
+          "max_delta_vmaf": 0.2191194219560657,
+          "model": "linear"
+        }
+      }
+    },
+    "earth_dark_80s.mp4": {
+      "src_md5": "ac06070806767a4c25e1911d33ffe121",
+      "prep_md5": "eabb1d7cdc6e1c3d01d53a2fdda955a1",
+      "frames": 284,
+      "fps": 47.952,
+      "hdr": false,
+      "eqq": {
+        "librav1e@10": {
+          "points": [
+            [
+              18,
+              54.97886781659007
+            ],
+            [
+              21,
+              81.86757310315176
+            ],
+            [
+              24,
+              108.52153277826253
+            ],
+            [
+              27,
+              130.61306748429152
+            ],
+            [
+              30,
+              150.362333302044
+            ]
+          ],
+          "monotonic_violation": 0.0,
+          "method": "raw",
+          "a": 7.9837475117349195,
+          "b": -86.34126538477011,
+          "max_resid_param": 3.2528578813945614,
+          "max_delta_vmaf": 0.8546048376247484,
+          "model": "linear"
+        }
+      }
+    },
+    "ui_screen_10s.mp4": {
+      "src_md5": "3979f904f74a84ff19ef2780667034a1",
+      "prep_md5": "7fbe5b67f1be4194a017625917152345",
+      "frames": 180,
+      "fps": 30.0,
+      "hdr": false,
+      "eqq": {
+        "librav1e@10": {
+          "points": [
+            [
+              18,
+              20.3521221507799
+            ],
+            [
+              21,
+              38.05727181828476
+            ],
+            [
+              24,
+              56.504154342651354
+            ],
+            [
+              27,
+              91.67273660318672
+            ],
+            [
+              30,
+              117.24266652456421
+            ]
+          ],
+          "monotonic_violation": 0.0,
+          "method": "raw",
+          "a": 8.246551784415686,
+          "b": -133.15145253808308,
+          "max_resid_param": 8.261635945242041,
+          "max_delta_vmaf": 0.4387635586182057,
+          "model": "linear",
+          "piecewise": {
+            "segments": [
+              [
+                6.025338698645243,
+                -88.22759656764475,
+                18,
+                24
+              ],
+              [
+                10.123085363652145,
+                -184.85011899514046,
+                24,
+                30
+              ]
+            ],
+            "max_delta_vmaf": 0.2341644030725405
+          },
+          "needs_piecewise": false
+        }
+      }
+    },
+    "natgeo_grass_40s.mp4": {
+      "src_md5": "a8e962b4c4bb8478918e0e6598c93c37",
+      "prep_md5": "27017175d1d3ee1092502a5b48c6cae5",
+      "frames": 148,
+      "fps": 25.0,
+      "hdr": false,
+      "eqq": {
+        "librav1e@10": {
+          "points": [
+            [
+              18,
+              30.898867678352225
+            ],
+            [
+              21,
+              44.24513443407217
+            ],
+            [
+              24,
+              62.595096567132586
+            ],
+            [
+              27,
+              94.54703515823331
+            ],
+            [
+              30,
+              118.64642693896174
+            ]
+          ],
+          "monotonic_violation": 0.0,
+          "method": "raw",
+          "a": 7.526567308179339,
+          "b": -110.45110324095373,
+          "max_resid_param": 7.591415588217828,
+          "max_delta_vmaf": 0.813049843919984,
+          "model": "linear",
+          "piecewise": {
+            "segments": [
+              [
+                5.282704814796727,
+                -65.02376821754561,
+                18,
+                24
+              ],
+              [
+                9.341888395304858,
+                -160.3014671184553,
+                24,
+                30
+              ]
+            ],
+            "max_delta_vmaf": 0.41294946991229153
+          },
+          "needs_piecewise": false
+        }
+      }
+    }
+  },
+  "table": {
+    "librav1e@10": [
+      7.9157,
+      -97.9059,
+      0,
+      255
+    ]
+  },
+  "_note_project_root": "原值是本机周挂载绝对路径，入库前改为占位；其余字段未动。"
+}

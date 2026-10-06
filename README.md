@@ -1870,6 +1870,15 @@ vidutils/
 ├── Accessory/                # 附件区：验证套件 / 回归工装 / 探针 / 本机临时产物（2026-10-06 从根下移入）
 │   ├── _paths.py                      # 仓库根与 temp/ 定位（向上搜 .git / convert_crf.py；被下面三个子目录的脚本共用）
 │   ├── _paths.sh                     # 同上，.sh 版
+│   ├── archive_manifest.md            # **归档清单（入库）**：temp/ 里哪些不可再生、为何、重建命令；archive/ 内容本身 gitignored
+│   ├── archive/                       # 不可再生数据全量原件（gitignored）：eqq_calib 34 json、m2_srcs 原片、
+│   │                                   #   手工快照、探针 log、verification_report —— 判据见 archive_manifest.md
+│   ├── calib/                         # 标定的**可复核证据**（入库）；archive/ 是全量原件（gitignored）
+│   │   └── eqq_evidence/              # 精选 5 个 eqq_calib json（127KB / 全组 11.4%）：7 素材×4 编码器 report、
+│   │                                   #   唯一含 psnr_hvs/vif/adm2 的 points 层、两个 rav1e 轮的 report/points。
+│   │                                   #   选入理由与排除依据见 archive_manifest.md。⚠ 不含 LOO 字段
+│   ├── temp/                          # 本机临时目录（gitignored）：测试素材、中间产物、探针日志
+│   ├── verification_report/           # 上机验收报告落盘处（gitignored）
 │   ├── test/                         # 全部回归测试与工装（基线在 Accessory/test/baseline/，见「回归与验证」）
 │   │   ├── dump_filter_chains.sh            # 裁剪脚本：滤镜链回归（16 行基线）
 │   │   ├── dump_cmd_default.sh              # 裁剪脚本：命令级回归（7 用例基线）
@@ -1893,10 +1902,9 @@ vidutils/
 │   │   ├── loo_equal_quality.py             # LOO 留一交叉验证：等质量表的**过拟合门禁**（ΔVMAF < 1.0 是唯一判红口径）
 │   │   ├── convert_points_cache.py          # 标定数据迁移：旧 points_cache.json（整素材缓存）→ 新 points.json（逐点）
 │   │   └── enum_cmds.py                     # 无 GPU 时 mock 远程能力、枚举脚本真正下发的命令
-│   ├── temp/                     # 本机临时目录（gitignored）：测试素材、中间产物、探针日志
-│   └── verification_report/      # 上机验收报告落盘处（gitignored）
 ├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
 ├── Plan/                     # 立项任务书与过程归档（含 vidls 对话记录 .txt）
+│   ├── PROMPT_GPU侧继续测试.md       # **GPU 侧待测项总纲**：P0 先补齐 2026-10-04 缺失的报告（落表只有 memory 断言、无可复核证据）→ 排除「环境假红」→ T4 B1~B5 / NVENC B·C 组 → C-8 扩 ref → 需另机的 QSV/AMF/VT
 ├── AV1_VP9_UPGRADE_PLAN_v2.md # AV1/VP9 升级方案归档
 ├── docs/                     # （规划）设计文档与性能基准
 └── examples/                 # （规划）示例素材与演示脚本

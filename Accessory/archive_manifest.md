@@ -32,8 +32,40 @@
 VIF / ADM2 / kbps）、`vmaf.json`（libvmaf 帧级日志，内嵌 ffmpeg 版本戳）、
 `points_cache.json`（旧格式）。
 
-**为何不可再生**：重跑整套要数十小时 VMAF 测量；且 `vmaf.json` 内嵌
-`ffmpeg version 8.0.1` 戳，换版本即得不同数字——无法与历史逐点比对。
+**为何不可再生**：重跑整套要数十小时 VMAF 测量；且 `report.json` 头部的
+`ffmpeg version 8.0.1-+vmaf` 戳会随 libvmaf/ffmpeg 版本失效 —— 换版本后
+无法与历史逐点比对。
+
+> ⚠ **本节曾把版本戳的位置写错**：帧级 `vmaf.json` 里**没有** ffmpeg 字样
+> （只有 libvmaf 自己的 `version: 2.3.1`），`ffmpeg version 8.0.1` 戳在
+> **`report.json`** 里。已按实测更正（这也是「报告断言必须核实」的一个实例）。
+
+#### 已精选入库的 5 个（2026-10-06）
+
+34 个 json 里绝大多数是**中间轮次**或**帧级日志**，全量入库既臃肿又无价值
+（`vmaf.json` 占全组 82.4% 体积、每个只覆盖单素材单档位、结论已被 report 覆盖）。
+故只入库 5 个（127KB，占 11.4%）：
+
+| 文件 | 字节 | 留它的理由 |
+|---|---|---|
+| `m2_7src/report.json` | 37433 | 唯一 7 素材 × 4 编码器、252 条逐档实测，含完整 `src_md5`/`prep_md5` 溯源链 |
+| `m2_7src/points_cache.json` | 40480 | 唯一含 `psnr_hvs`/`vif`/`adm2`/`xpsnr`/`kbps` 的层（report 里这些实测为 `False`） |
+| `m2_7src_6s_rav1e/report.json` | 8313 | 7 素材 rav1e native；Δa=+0.0095，距现行表最近 |
+| `m2_7src_6s_rav1e/points.json` | 32458 | 60 点原始层，带 `material_md5` 校验 |
+| `m2_7src_6s_rav1e_s10/report.json` | 8375 | 唯一记录 `-speed 10` 档口径，支撑 `RAV1E_SPEED_MAP` 分支 |
+
+> ⚠ 轮次名里的 `s10` 是 **`-speed 10` 不是 `subsample=10`**（实测
+> `"tiers": ["librav1e@10"]`、`"lock": {"librav1e@10": ["-speed","10"]}`、
+> `"subsample": 1`）。两个 rav1e 轮的 subsample 都是 1，口径没问题。
+
+**排除依据**：`vmaf.json` 15 个（920KB）帧级日志覆盖率极低（252 条里只覆盖 1 条）、
+结论已池化进 report、且内嵌 libvmaf 版本戳换机即失效；`w2_*`/`w_*`/`s1b`/`p0_*`/
+`chunk_*` 的 report 全是**单素材先导轮**，结论被 7 素材版取代且偏离现行表更远
+（Δb 最大 +22.4）；`s1_all/points_cache.json`（769B，仅 4 个锚点 key）是中断轮次的残片。
+
+> ⚠ 这批 json **不含任何 LOO 字段**（11 个 report 全字段扫过，无 `loo`/`holdout`/`cv`）。
+> 即：入库的是「原始测量层」，**不是「LOO 判定依据」**——后者只活在
+> `convert_crf.py` 的注释里。若要复核 LOO 结论，需另找依据。
 
 轮次目录：`m1_2src_10s` `m2_7src` `m2_7src_6s_rav1e` `m2_7src_6s_rav1e_s10`
 `m2_anchorA` `p0_rav1e_native` `s1_all` `s1b` `w2_aom` `w2_rav1e` `w2_svtav1`
@@ -132,6 +164,17 @@ memory `project_hdrtvnet_plus.md`）。
 ### `verification_report/` — T4 上机验收报告 · 2 文件 / 12KB
 
 `nvenc_quality_T4_20260928_062328.json` / `.md`。
+
+> ⚠ **这两份是入库的，且 `.gitignore` 对它们无效** —— 它们在 `439183a`
+> （2026-09-28）就被提交了，**早于**忽略规则；而 git 不对**已跟踪**文件套用
+> `.gitignore`，所以「`Accessory/verification_report/` 全部忽略」那条规则
+> 从一开始就没能约束它们。2026-10-06 已把规则显式改成
+> `Accessory/verification_report/*` + 两条 `!` 例外，把这个事实写进规则本身，
+> 免得后人以为忽略生效了。
+>
+> **保留它们入库是有意的**：这是**唯一的 T4 验收原始证据**，而
+> `Plan/PROMPT_GPU侧继续测试.md` 正是靠它论证「旧报告（p5 / `-cq 28`）口径
+> 不可与现表逐条对比」。删了就失去这条论据。体量仅 12K。
 
 ## 已丢弃的可再生产物（159MB）
 

@@ -28,8 +28,8 @@
   - [vidls.sh — ls / ll 替代 + 视频属性探测](#vidlssh--ls--ll--替代--视频属性探测)
   - [Windows 版 vidls — ls / ll 替代（Windows）](#windows-版vidlscmd--vidls_winpy)
   - [vidll — vidls -l 的快捷方式（Linux + Windows）](#vidll--vidls--l-的快捷方式linux--windows)
-  - [test/test_interp_2x_lock.sh — 回归测试（并发与锁）](#testtest_interp_2x_locksh--回归测试并发与锁)
-  - [test/test_interp_2x_orphan.sh — 回归测试（中断收尾与孤儿 ffmpeg）](#testtest_interp_2x_orphansh--回归测试中断收尾与孤儿-ffmpeg)
+  - [Accessory/test/test_interp_2x_lock.sh — 回归测试（并发与锁）](#testtest_interp_2x_locksh--回归测试并发与锁)
+  - [Accessory/test/test_interp_2x_orphan.sh — 回归测试（中断收尾与孤儿 ffmpeg）](#testtest_interp_2x_orphansh--回归测试中断收尾与孤儿-ffmpeg)
 - [快速上手](#快速上手)
 - [常见场景配方](#常见场景配方)
 - [硬件加速说明](#硬件加速说明)
@@ -714,7 +714,7 @@ csv 列序是结构体固定序、跟你 `-show_entries` 里写的顺序无关�
 | 拼接失败 | 分片都还在，可手工重拼，或直接重跑 |
 | 被杀 / 断电 | 已成名的 `.ts` 分片保留；临时文件下次持锁启动时自动清理 |
 | Ctrl+C / SIGTERM | `trap` 会把在跑的 ffmpeg 一起收掉再退出（130/143）。收尾是**有界且有日志**的：`TERM → 最多 3s → SIGKILL`（实测 ffmpeg 捕获了 INT/TERM 但要 11–13s 才真退出，而半成品 .part 反正要丢，不值得等）。注意 Ctrl+C 只发给**终端前台进程组**：`setsid` / `&` 起的任务收不到，要用 `kill -TERM <脚本pid>` 或 `kill -TERM -<pgid>` |
-| 留下孤儿 ffmpeg（脚本被 `kill -9`） | 走不到 trap，在飞的 ffmpeg 变成 **PPID=1 的孤儿**继续写盘烧 CPU。更麻烦的是 `exec 9>"$LOCK"` 的 fd **被子 shell 与 ffmpeg 继承** → 孤儿自己占着锁，下次同 `-w` 启动会先撞「另一个实例正在跑」，**"启动清孤儿"那段代码永远走不到**（实测事故：两次重跑都撞锁） | 根因已修：run_job 子 shell / 试编码 subshell 里 `exec 9>&-`，**锁只留在脚本本体** → 脚本一死锁立刻释放，孤儿交给启动时的 `残留` 清理（`TERM → 3s → KILL`）+ 清 `.part`。撞锁另有兜底：只有 ffmpeg 持有 → 收掉再接管锁；否则报错并给出持有者 pid/启动时间/命令行。回归测试：`test/test_interp_2x_orphan.sh` |
+| 留下孤儿 ffmpeg（脚本被 `kill -9`） | 走不到 trap，在飞的 ffmpeg 变成 **PPID=1 的孤儿**继续写盘烧 CPU。更麻烦的是 `exec 9>"$LOCK"` 的 fd **被子 shell 与 ffmpeg 继承** → 孤儿自己占着锁，下次同 `-w` 启动会先撞「另一个实例正在跑」，**"启动清孤儿"那段代码永远走不到**（实测事故：两次重跑都撞锁） | 根因已修：run_job 子 shell / 试编码 subshell 里 `exec 9>&-`，**锁只留在脚本本体** → 脚本一死锁立刻释放，孤儿交给启动时的 `残留` 清理（`TERM → 3s → KILL`）+ 清 `.part`。撞锁另有兜底：只有 ffmpeg 持有 → 收掉再接管锁；否则报错并给出持有者 pid/启动时间/命令行。回归测试：`Accessory/test/test_interp_2x_orphan.sh` |
 
 **注意**
 
@@ -723,15 +723,15 @@ csv 列序是结构体固定序、跟你 `-show_entries` 里写的顺序无关�
 
 ---
 
-### `test/test_interp_2x_lock.sh` — 回归测试（并发与锁）
+### `Accessory/test/test_interp_2x_lock.sh` — 回归测试（并发与锁）
 
 守住 `interp_2x_safe.sh` 的**单实例锁与并发安全**，也就是上面那个"两边都白跑"的原始 bug；
 同时把分片复用、残留清理、`--overwrite` 早退、检查顺序等不变量一起钉住。
 
 ```bash
-bash test/test_interp_2x_lock.sh                                  # 自动找小素材
-SUT=./interp_2x_safe.sh bash test/test_interp_2x_lock.sh
-TEST_INPUT=/path/small.mp4 bash test/test_interp_2x_lock.sh
+bash Accessory/test/test_interp_2x_lock.sh                                  # 自动找小素材
+SUT=./interp_2x_safe.sh bash Accessory/test/test_interp_2x_lock.sh
+TEST_INPUT=/path/small.mp4 bash Accessory/test/test_interp_2x_lock.sh
 ```
 
 > 耗时取决于**被测脚本用的后端**：GPU（`nvinterpolate`）几分钟内跑完；若把 `SUT` 指向通用版
@@ -759,7 +759,7 @@ TEST_INPUT=/path/small.mp4 bash test/test_interp_2x_lock.sh
 | 6 实例内并行 `-j 2` | 产出与顺序模式等价（每片切法逐片校验）；`-j` 不进 recipe → 换 `-j` 复用旧目录全 skip；并行下删掉一片只重编那一片 |
 | 全局 | 所有日志都不该出现 `mv: cannot stat` |
 
-### `test/test_interp_2x_orphan.sh` — 回归测试（中断收尾与孤儿 ffmpeg）
+### `Accessory/test/test_interp_2x_orphan.sh` — 回归测试（中断收尾与孤儿 ffmpeg）
 
 守住 2026-09-15 那次事故：**按了 Ctrl+C 任务"还在跑"，随后脚本本体没了，却留下一个 PPID=1 的
 孤儿 ffmpeg 继续往 `parts/` 写盘**。根因两条：Ctrl+C 只发给终端前台进程组（`setsid`/`&` 起的
@@ -767,9 +767,9 @@ TEST_INPUT=/path/small.mp4 bash test/test_interp_2x_lock.sh
 而旧代码 `kill -TERM` 之后就 `wait`。
 
 ```bash
-bash test/test_interp_2x_orphan.sh                                # 现场生成 1080p 素材
-SUT=./interp_2x_safe_v1.sh bash test/test_interp_2x_orphan.sh
-SRC=/path/small1080p.mp4 bash test/test_interp_2x_orphan.sh       # 省掉现场生成
+bash Accessory/test/test_interp_2x_orphan.sh                                # 现场生成 1080p 素材
+SUT=./interp_2x_safe_v1.sh bash Accessory/test/test_interp_2x_orphan.sh
+SRC=/path/small1080p.mp4 bash Accessory/test/test_interp_2x_orphan.sh       # 省掉现场生成
 ```
 
 | 环境变量 | 默认 | 说明 |
@@ -1086,7 +1086,7 @@ bash interp_2x_safe.sh /path/in.mp4 -w /tmp/demo -L 4 --cap 12
 bash interp_2x_safe.sh /path/in.mp4 /tmp/head.mp4 --cap 600
 
 # 锁与并发安全的回归测试（退出码 0/1/2；GPU 后端几分钟，CPU 后端约 12 分钟）
-bash test/test_interp_2x_lock.sh
+bash Accessory/test/test_interp_2x_lock.sh
 ```
 
 ---
@@ -1512,13 +1512,13 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
 > 同一轮负向对照 `-qp 18` 是 43443/43448（装置有分辨力），而同一装置在本机的
 > libx265 / libx264 `-crf 0` 上是 **0/50**（⇒ 那个"≠0"是真测量，不是装置恒假）。
 > **要真无损请改用 `--codec libx265`（或 libx264）的 `-crf 0`。**
-> 探针 `probe/probe_lossless_qp0.sh`（含负向对照）、验收 `probe/t4_acceptance.py` C 组。
+> 探针 `Accessory/probe/probe_lossless_qp0.sh`（含负向对照）、验收 `Accessory/probe/t4_acceptance.py` C 组。
 
 反过来，**非无损换算的结果一律钳到 ≥1**：线性表在低端会把小值算成 0 从而**意外命中"无损"**
 （`--cq 4 --codec libx264` 曾得到 `-crf 0` = 真无损、文件巨大；现在是 `-crf 1`）。
 ⚠ 低端取值（如 `--cq 1~5` 落到 `libx264` / `libvpx-vp9`）会被钳到同一个最小值，
 **在等效表里分辨不出来** —— 这是线性表的固有低端饱和，不是 bug。
-两条规则都由 `verify/verify_quality_mapping.py` 钉住（含"非无损换算永不落到 0"的扫描）。
+两条规则都由 `Accessory/verify/verify_quality_mapping.py` 钉住（含"非无损换算永不落到 0"的扫描）。
 
 ### 等效换算表（`convert_crf.py`）
 
@@ -1541,7 +1541,7 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
 > `libx265` / `libvpx-vp9` / `libaom-av1` / `libsvtav1` / `librav1e` 的 a、b 是
 > 2026-09-29（V9）用真实素材（`input_videos/new5_raw.mp4`，1080p→720p，**等体积**标定）
 > 重算的；线性残差 ≤0.11 / ≤0.49 / ≤0.58 / ≤0.76 档。⚠ **等体积 ≠ 等质量**，且标定
-> 素材单一，换素材应复核（`probe/calibrate_soft_offsets_nocache.py` 可复现）。
+> 素材单一，换素材应复核（`Accessory/probe/calibrate_soft_offsets_nocache.py` 可复现）。
 >
 > **QSV / VideoToolbox**：2026-09-28 实测本机 `h264_qsv` / `hevc_qsv` / `av1_qsv` 无 `-cq`/`-crf`/`-qp`，
 > `-preset` 仅收 `veryfast..veryslow`（整数 0~7）⇒ 移出 CQ 集，preset 走 x264 档名映射。
@@ -1574,7 +1574,7 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
 ### 等质量换算表（`QUALITY_MAP`，`--quality-mode quality`）
 
 `SIZE_MAP` 按**等体积**标定（同文件大小）；`QUALITY_MAP` 按**等质量**标定
-（同 VMAF，2026-09-30 起，标定脚本 `probe/calibrate_equal_quality.py`）。
+（同 VMAF，2026-09-30 起，标定脚本 `Accessory/probe/calibrate_equal_quality.py`）。
 ⚠ 两表名已互换语序（原名 `QUALITY_MAP` = 等体积、`QUALITY_MAP_QUALITY` = 等质量）。
 
 | 口径 | 标定判据 | 适用场景 | 开关 |
@@ -1599,7 +1599,7 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
 - 等质量表首版**只覆盖软件编码器**（libx265 / libvpx-vp9 / libaom-av1 / libsvtav1 / librav1e）；
   硬编（NVENC / QSV / AMF / VideoToolbox）**回退等体积表**，待上机标定（M5）。
 - ⚠ `librav1e` 表值只对已声明的 `-speed` 档成立（本仓固定 `-speed 10`）。
-- 回归判据：`verify/verify_equal_quality.py`（**主门禁 `|ΔVMAF| ≤ 1.0`，唯一判红**；
+- 回归判据：`Accessory/verify/verify_equal_quality.py`（**主门禁 `|ΔVMAF| ≤ 1.0`，唯一判红**；
   `|ΔPSNR| ≤ 0.3 dB`、`|ΔPSNR-HVS| ≤ 0.5 dB` 为**交叉参考，soft WARN 不判红** —— 等质量表以
   VMAF 定标，同 VMAF 不蕴含同 PSNR，紧 PSNR 判红属跨轴假阳性，2026-09-30 定案）。
 
@@ -1704,9 +1704,9 @@ Video_Enhancement 一致，见下 `--rc-mode` 行）：`h264_nvenc` / `hevc_nven
    语义是"受码率约束的恒定质量"（`-b:v` 作上限；VP9 下即 constrained quality），会给提示。
 3. **`--lookahead` 在 libx265 上必须与 HDR 元数据合并成同一条 `-x265-params`**。实测
    `-x265-params A -x265-params B` 是**后者整条覆盖前者**，各发一条会让后发的那条**静默抹掉
-   HDR 静态元数据**；现在统一由 `build_hdr_args()` 合并（`verify/verify_rc_lookahead.py` 第 ④ 组钉住）。
+   HDR 静态元数据**；现在统一由 `build_hdr_args()` 合并（`Accessory/verify/verify_rc_lookahead.py` 第 ④ 组钉住）。
 
-**质量问题**（与码率控制轴相邻，容易踩坑；同样由 `verify/verify_rc_lookahead.py` 第 ⑩ 组与 `verify/verify_borrow_enhancement.py` 钉住）：
+**质量问题**（与码率控制轴相邻，容易踩坑；同样由 `Accessory/verify/verify_rc_lookahead.py` 第 ⑩ 组与 `Accessory/verify/verify_borrow_enhancement.py` 钉住）：
 
 - **NVENC 的 `-cq` 默认配 `-b:v 0`**：不配的话 ffmpeg 会用默认码率上限约束 CQ，语义退化成
   "受码率约束的恒定质量"而非纯恒定质量（对照 Video_Enhancement 的 `-cq:v N -b:v 0`）。
@@ -1759,26 +1759,26 @@ Video_Enhancement 一致，见下 `--rc-mode` 行）：`h264_nvenc` / `hevc_nven
 | **软解 + `hwupload_cuda` 只在高位深且真缩放时划算** | 上载 / 回下载开销固定，而 p010le 的 CPU 缩放比 8bit 贵得多。T4 两批共 12 组素材实测：**源 ≥10bit 且真在缩放 → +14~25%**；8bit 真缩放 → **+0.4% ~ −14%**；**恒等缩放（无论位深）→ −1.6% ~ −34.7%**（注意 10bit 恒等也是 −22%）。绝对值上软解链路整体 44~46s，而硬解零拷贝只要 12.8s | 有硬解时永远该走硬解。`--scale-algo auto` 只在显式 `--decode cpu` 下才自动走它，且要过两道关：**功能探针**（链真能跑通）+ **值不值**（≥10bit 且非恒等）；不满足时会打印具体理由。要强制使用请显式写 `--scale-algo cuda-lanczos` |
 | 显式 `cuda-*` 执行失败要等到运行期才发现 | `--scale-algo cuda-*` **不跑功能探针**（按设计直接执行） | `--fallback-policy auto`（默认）会自动降级到 `libswscale-<同档>`；要"不可用就报错"用 `strict` |
 | **零拷贝 CUDA 链不能传 `-pix_fmt`** | 该链上 `-hwaccel_output_format cuda` 时帧是 CUDA 帧，`-pix_fmt` 设的是 `AVFrame.format`（= `AV_PIX_FMT_CUDA`）而非 `sw_format`，传 `nv12` / `yuv420p` 实测都报 `Impossible to convert` | 已按链型分别落地：零拷贝链改用 `scale_cuda=format=` + `-profile:v`，只有软件帧链才下发 `-pix_fmt`。用户请求 `scale_cuda` 不支持的格式时按 `--fallback-policy` 降级或报错 |
-| **色彩标签曾把产物写坏（已修，2026-09-22）** | 输出端 `-colorspace`（如 SD 源推出的 `smpte170m`）与解码帧的 `csp:unknown` 不一致时，ffmpeg 会在滤镜链尾与编码器之间**自动插入一个 CPU `scale`**（debug 日志里的 `auto_scale_0`）去凑 codec context；在「硬解 + NVENC」链上这个转换会把 **U/V 清零** → 下游 YUV→RGB 得 RGB(0,255,0)、成品全绿。实测**单加 `-colorspace smpte170m` 即复现**，其余三参单独都无害；`bt709` 也会插转换、只是不归零（色度仍有偏移）。源侧正常、字节合法、能解码，只是像素被写坏 | 现已用 `setparams` 把色彩属性**标到帧上**（GPU 编码器同样下发，与 v2 的既有行为对齐；链尾还在显存里时不加），帧属性与输出端一致后 ffmpeg 不再插转换；输出端四参保留（写容器 colr box，`h264_nvenc` 的 primaries/transfer 标签也因此补全）。另加产物色度自检作防复发钩子（`--no-chroma-check` 可关），判据见 `verify/verify_color_tagging.py` 与 `test/test_green_chroma_regression.sh` |
+| **色彩标签曾把产物写坏（已修，2026-09-22）** | 输出端 `-colorspace`（如 SD 源推出的 `smpte170m`）与解码帧的 `csp:unknown` 不一致时，ffmpeg 会在滤镜链尾与编码器之间**自动插入一个 CPU `scale`**（debug 日志里的 `auto_scale_0`）去凑 codec context；在「硬解 + NVENC」链上这个转换会把 **U/V 清零** → 下游 YUV→RGB 得 RGB(0,255,0)、成品全绿。实测**单加 `-colorspace smpte170m` 即复现**，其余三参单独都无害；`bt709` 也会插转换、只是不归零（色度仍有偏移）。源侧正常、字节合法、能解码，只是像素被写坏 | 现已用 `setparams` 把色彩属性**标到帧上**（GPU 编码器同样下发，与 v2 的既有行为对齐；链尾还在显存里时不加），帧属性与输出端一致后 ffmpeg 不再插转换；输出端四参保留（写容器 colr box，`h264_nvenc` 的 primaries/transfer 标签也因此补全）。另加产物色度自检作防复发钩子（`--no-chroma-check` 可关），判据见 `Accessory/verify/verify_color_tagging.py` 与 `Accessory/test/test_green_chroma_regression.sh` |
 | **`tonemap_cuda` 上游不存在** | 实测 `ffmpeg -h filter=tonemap_cuda` → `Unknown filter`（与 `crop_cuda` 同款，非编译选项问题）。CUDA 侧没有硬件 HDR→SDR | `--hdr sdr` 走 CPU 的 `zscale` + `tonemap`；CUDA 链本来就先 `hwdownload` 成软件帧，直接接在链尾即可。滤镜缺失时会降级为 `--hdr drop` 并提示 |
 | `--hdr sdr` 的 tone mapping 未实测 | 这是全新能力：滤镜配方、desat、各算法（hable / mobius / reinhard）的观感差异都还没有 T4 数据 | 先在真实 HDR 片源（如 HLG 的 `new4_raw`）上验一遍再用于生产；算法可换（`--hdr sdr:hable`） |
 | `crop-cover` 不走 CUDA 缩放 | 它必须先裁剪，而裁剪只能在 CPU（无 `crop_cuda`）→ GPU 缩放要额外一次 `hwupload_cuda` | 保留 CPU 侧 `crop,scale`（该路径未实测）；要用 CUDA 缩放请改用 `--mode cover` |
 | CPU 侧缩放是 lanczos（比旧版慢） | `cover` / `crop-cover` 默认用 `flags=lanczos`（原先是 libswscale 默认的 bicubic），抽头更多 → CPU 侧吞吐略降 | 这是为了与 GPU 侧同档、避免降级时画质变软。换档用 `--scale-algo`（如 `--scale-algo bicubic`） |
 | v0 / v1 与 v2/hwaccel 的缩放档位不同 | v0/v1 仍吃 libswscale 的默认 `bicubic`（它们定位是"对照旧行为"，这次没跟着改） | 要同档用 v2 / hwaccel；要对照旧输出用 v0/v1 |
 | `--scale-algo` 的裸名字在 v2 与 hwaccel 上不完全等价 | v2 只有一个后端 → **任何 libswscale 算法都能省前缀**（`--scale-algo spline` 可用）；hwaccel 有两个后端 → 裸名字要求两表都认，`spline` 这类只有 libswscale 有的**必须**写成 `libswscale-spline`，否则报错 | 想让同一条命令两边都能跑就统一带前缀（`libswscale-<algo>`）；只在 v2 上用才可省 |
-| ~~`--crop-ratio` + 只给一个维度~~（**已修，2026-09-23**） | 旧行为：互斥判据是"两个维度都给才算同时指定"，只给一个不算 → 那个维度被**静默忽略**。踩过的坑：`--mode cover --crop-ratio 16:9 --output-height 1080` 作用在**本身就是 16:9** 的源上时，目标被算成"源的 16:9 最大化裁剪"= 源尺寸 → 直接命中同尺寸跳过｜**不报错、不转码**，把 1080p 请求变成 no-op | 现在**三个模式**统一：`--crop-ratio` + 单维度 → 按比例补全另一个（比例定形状、尺寸定分辨率），并打印补全结果；`crop` 模式下补全后若超过源尺寸仍按"目标不得大于源"跳过。两个都给才仍报错。判据 `verify/verify_ratio_single_dim.py` |
+| ~~`--crop-ratio` + 只给一个维度~~（**已修，2026-09-23**） | 旧行为：互斥判据是"两个维度都给才算同时指定"，只给一个不算 → 那个维度被**静默忽略**。踩过的坑：`--mode cover --crop-ratio 16:9 --output-height 1080` 作用在**本身就是 16:9** 的源上时，目标被算成"源的 16:9 最大化裁剪"= 源尺寸 → 直接命中同尺寸跳过｜**不报错、不转码**，把 1080p 请求变成 no-op | 现在**三个模式**统一：`--crop-ratio` + 单维度 → 按比例补全另一个（比例定形状、尺寸定分辨率），并打印补全结果；`crop` 模式下补全后若超过源尺寸仍按"目标不得大于源"跳过。两个都给才仍报错。判据 `Accessory/verify/verify_ratio_single_dim.py` |
 | 「跳过行」的**格式**两边不同（**既有，保留**） | 同一份文件记跳过时，hwaccel 打印 `  ⏭  跳过：<消息>`，cpu_v2 打印 `⏭  跳过 <文件名>: <消息>`（多了文件名、缩进与冒号不同）。**消息文本与记账口径已对齐**（2026-09-23） | 这是 v2 顺序执行器对**所有**跳过原因的统一样式（「已存在」等同款），只改这一条反而变成不一致。crop 模式「目标大于源」现两边都记**跳过**、退出码 0（原先 v2 记失败、rc=1） |
 | hwaccel 不校验 `--original-width/height` | 只有 `vidcrop_cpu_v2.py` 校验正整数；hwaccel 传负值会一路带进尺寸计算 | 手填源尺寸时自己保证为正；不确定就用默认的 ffprobe 探测 |
 | `librav1e` 无 `-crf` | 编码器本身只支持 `-qp` | 脚本自动换算（实测标定） |
 | `--rc-mode` / `--qp` 只在 NVENC 上生效 | `-rc` / `-qp` 是 NVENC 专属选项；libx264 / libx265 没有"码率控制模式"这个开关（它们用 `-crf` / `-b:v` / `-qp` 的组合表达），libsvtav1 的 `-qp` 语义也不同（"初始 QP"、量程 0–63） | CPU 编码器要限码率用 `--bitrate`；要 `-rc` 就换 `*_nvenc`。给了不生效的参数会打印告警，不会静默；hwaccel 的 `strict` 下直接报错。⚠ **`--qp` 的质量值不会丢**：落到 CPU 编码器时按等效表换算成 `-crf`（2026-09-24 起；此前是静默丢弃、回落默认 CRF 21） |
 | **QVBR（质量定义可变码率）在 ffmpeg CLI 上拿不到，且与 ffmpeg 版本无关** | QVBR 是 **NVENC SDK 的能力**（`NV_ENC_PARAMS_RC_QVBR`），只有直编 SDK 才能设——Video_Enhancement 的 SDK 路径能设（`nvenc_sdk.py` 里 `rc_ptr[1] = 64`），它的 ffmpeg 路径也把 `qvbr` 映射回 `vbr`。而 **ffmpeg 的 nvenc 没有把 `qvbr` 注册进 `-rc` 取值**：本机 `N-122480`（2026-01，晚于 7.1）实测 `-rc qvbr` 直接 `Unable to parse "rc" option value "qvbr"`（`ffmpeg 9.0.2 -h encoder=h264_nvenc` 的 `-rc` 枚举只剩 `constqp / vbr / cbr`），master 的 `libavcodec/nvenc.h` 里也没有 `qvbr`/`QVBR` 字样。⚠ **不是"老版本不支持、升到 7.1+ 就行"**——别照这个前提去改 | 本工具是**纯 ffmpeg CLI**，故**不提供 `qvbr`**。要"质量优先、码率随内容浮动"就用 `--rc-mode vbr --cq N`（ffmpeg 侧即 `-rc:v vbr -cq:v N -b:v 0`，VBR + 质量目标，与 QVBR 语义最接近；`-b:v 0` 由脚本自动补）。真要 QVBR 只能走 NVENC SDK 直编，那不是本工具的形态 |
 | `--lookahead` 的默认值三边不同 | NVENC 的 `-rc-lookahead` 默认 **0（关闭）**、x265 默认 **20**、x264 由自身决定（ffmpeg 侧默认 -1 = 交给 x264）。两个脚本默认编码器不同（hwaccel `h264_nvenc` / v2 `libx264`），所以"都不写"时同一批素材的前向预测深度本来就不一样 | 要一致就显式给 `--lookahead N`。本参数默认**不下发**，不改变现有行为 |
-| NVENC 的 `-cq` 现在默认配 `-b:v 0` | 过去只发 `-cq`，ffmpeg 会用默认码率上限约束 CQ（语义是受限质量）；现在补齐 `-b:v 0` 得到纯恒定质量。**这是相对旧版的行为变化**（NVENC + `--cq` 的命令多了一个 `-b:v 0`） | 想要旧的"受码率约束"语义就显式 `--bitrate 8M`；三个 dump 基线已按新行为更新（`test/baseline/enc_before.txt`） |
-| `--crf 0` / `--cq 0` 的「0 档」 | `libx265` 的 `-crf 0` **不是**逐位无损（只是近无损），需 `lossless=1`；NVENC 的 `-cq 0` / `-qp 0` **也不是**（T4 实测 43417/43448 帧不同）。过去直接下发会有"以为无损、实为有损"的落差 | 现在自动改写：x265 → `lossless=1`（本机实测**逐位无损**）；NVENC（hwaccel、`rc auto`）→ `-rc constqp -qp 0 -b:v 0`（**最高质量档**，非逐位无损）；改不了时告警并指路。⚠ **要真无损只能用 CPU 编码器的 `-crf 0`**（libx265 / libx264，本机 framemd5 已证）。探针 `probe/probe_lossless_qp0.sh` |
-| **质量参数的 `0` = 0 档（2026-09-24 统一）** | 各编码器的 `0` 都是「极值档」（**CPU 编码器上实测逐位无损；NVENC 只是最高质量档**），而线性换算表把 `0` 当普通下界 → 后果有三：`cq 0~5` 全部算成同一个值；`--cq 4 --codec libx264` **意外得到 `-crf 0`**（真无损、文件巨大）；`--qp 0` / `--cq 0` 降级到 libx265 只得到 `-crf 3`（**不是无损**） | 现在 5 路 0 值输入（`--crf` / `--cq` / `--qp` / `--crf-ref` / `--cq-ref`）**统一投影成目标编码器的无损档**（`-crf 0 [+ -x265-params lossless=1]` / `-rc constqp -qp 0 -b:v 0` / `-qp 0`(rav1e)），且**非无损换算结果一律钳到 ≥1**。⚠ 低端取值（如 `--cq 1~5` 落到 libx264 / libvpx-vp9）在等效表里分辨不出来（被钳到同一个最小值）——这是线性表的固有低端饱和，不是 bug。判据 `verify/verify_quality_mapping.py` |
-| **两脚本的 `-threads` / `-pix_fmt` 已统一（2026-09-24）** | 此前 cpu_v2 恒发 `-threads`（含硬件编码器）且恒发 `-pix_fmt yuv420p`——后者在 8bit 源上把 4:2:2 / 4:4:4 **静默降色度**（实测 yuv444p 源：hwaccel 出 yuv444p、cpu_v2 出 yuv420p）；hwaccel 则两个都不发 | 现在一致：`-threads` 只对**软件编码器**下发（`0`=自动，按 cgroup 配额算核数，不超订）；`--pix-fmt auto` + 8bit 源两边都**不下发** `-pix_fmt`。同一条逻辑请求下两脚本的完整命令已逐字可比（第四道门 `test/dump_cmd_full.sh`，17 用例）。⚠ **NVENC 轴仍不同**：hwaccel 会真降级到 CPU 编码器、cpu_v2 是原样透传 NVENC——能力差异，不是分叉 |
-| **奇数输出尺寸现在两脚本都拒绝**（2026-09-24 补齐） | hwaccel 的 `validate_output_dimensions()` 此前**零调用点**（死代码）⇒ `--output-width 641` 会一路带到 ffmpeg、直到编码器初始化才报错；cpu_v2 早就有这道校验 | 现在两脚本的退出码与报错首行一致（`[ERROR] 像素格式 yuv420p 要求输出宽高均为偶数；当前为 641x360`）。⚠ `--crop-ratio` 推导出的尺寸天然是偶数（`derive_even_dimension`），不受影响。判据 `verify/verify_cli_parsing.py` |
-| **`--extra-args -- <参数>`（文档教的写法）曾报 `unrecognized`**（2026-09-24 已修） | argparse 的 `nargs=REMAINDER` **从 Python 3.12 起不再容忍开头的 `--`** ⇒ `--extra-args -- -max_muxing_queue_size 4096` 直接报错，`normalize_extra_args()` 里剥 `--` 的那段因此长期是死代码 | 现在自己预切 argv（`_split_extra_args`）：带 `--` 与不带两种写法都能用，且 `--help` 里的选项说明不受影响。判据 `verify/verify_cli_parsing.py`；第四道门里那一格用的就是文档写法 |
+| NVENC 的 `-cq` 现在默认配 `-b:v 0` | 过去只发 `-cq`，ffmpeg 会用默认码率上限约束 CQ（语义是受限质量）；现在补齐 `-b:v 0` 得到纯恒定质量。**这是相对旧版的行为变化**（NVENC + `--cq` 的命令多了一个 `-b:v 0`） | 想要旧的"受码率约束"语义就显式 `--bitrate 8M`；三个 dump 基线已按新行为更新（`Accessory/test/baseline/enc_before.txt`） |
+| `--crf 0` / `--cq 0` 的「0 档」 | `libx265` 的 `-crf 0` **不是**逐位无损（只是近无损），需 `lossless=1`；NVENC 的 `-cq 0` / `-qp 0` **也不是**（T4 实测 43417/43448 帧不同）。过去直接下发会有"以为无损、实为有损"的落差 | 现在自动改写：x265 → `lossless=1`（本机实测**逐位无损**）；NVENC（hwaccel、`rc auto`）→ `-rc constqp -qp 0 -b:v 0`（**最高质量档**，非逐位无损）；改不了时告警并指路。⚠ **要真无损只能用 CPU 编码器的 `-crf 0`**（libx265 / libx264，本机 framemd5 已证）。探针 `Accessory/probe/probe_lossless_qp0.sh` |
+| **质量参数的 `0` = 0 档（2026-09-24 统一）** | 各编码器的 `0` 都是「极值档」（**CPU 编码器上实测逐位无损；NVENC 只是最高质量档**），而线性换算表把 `0` 当普通下界 → 后果有三：`cq 0~5` 全部算成同一个值；`--cq 4 --codec libx264` **意外得到 `-crf 0`**（真无损、文件巨大）；`--qp 0` / `--cq 0` 降级到 libx265 只得到 `-crf 3`（**不是无损**） | 现在 5 路 0 值输入（`--crf` / `--cq` / `--qp` / `--crf-ref` / `--cq-ref`）**统一投影成目标编码器的无损档**（`-crf 0 [+ -x265-params lossless=1]` / `-rc constqp -qp 0 -b:v 0` / `-qp 0`(rav1e)），且**非无损换算结果一律钳到 ≥1**。⚠ 低端取值（如 `--cq 1~5` 落到 libx264 / libvpx-vp9）在等效表里分辨不出来（被钳到同一个最小值）——这是线性表的固有低端饱和，不是 bug。判据 `Accessory/verify/verify_quality_mapping.py` |
+| **两脚本的 `-threads` / `-pix_fmt` 已统一（2026-09-24）** | 此前 cpu_v2 恒发 `-threads`（含硬件编码器）且恒发 `-pix_fmt yuv420p`——后者在 8bit 源上把 4:2:2 / 4:4:4 **静默降色度**（实测 yuv444p 源：hwaccel 出 yuv444p、cpu_v2 出 yuv420p）；hwaccel 则两个都不发 | 现在一致：`-threads` 只对**软件编码器**下发（`0`=自动，按 cgroup 配额算核数，不超订）；`--pix-fmt auto` + 8bit 源两边都**不下发** `-pix_fmt`。同一条逻辑请求下两脚本的完整命令已逐字可比（第四道门 `Accessory/test/dump_cmd_full.sh`，17 用例）。⚠ **NVENC 轴仍不同**：hwaccel 会真降级到 CPU 编码器、cpu_v2 是原样透传 NVENC——能力差异，不是分叉 |
+| **奇数输出尺寸现在两脚本都拒绝**（2026-09-24 补齐） | hwaccel 的 `validate_output_dimensions()` 此前**零调用点**（死代码）⇒ `--output-width 641` 会一路带到 ffmpeg、直到编码器初始化才报错；cpu_v2 早就有这道校验 | 现在两脚本的退出码与报错首行一致（`[ERROR] 像素格式 yuv420p 要求输出宽高均为偶数；当前为 641x360`）。⚠ `--crop-ratio` 推导出的尺寸天然是偶数（`derive_even_dimension`），不受影响。判据 `Accessory/verify/verify_cli_parsing.py` |
+| **`--extra-args -- <参数>`（文档教的写法）曾报 `unrecognized`**（2026-09-24 已修） | argparse 的 `nargs=REMAINDER` **从 Python 3.12 起不再容忍开头的 `--`** ⇒ `--extra-args -- -max_muxing_queue_size 4096` 直接报错，`normalize_extra_args()` 里剥 `--` 的那段因此长期是死代码 | 现在自己预切 argv（`_split_extra_args`）：带 `--` 与不带两种写法都能用，且 `--help` 里的选项说明不受影响。判据 `Accessory/verify/verify_cli_parsing.py`；第四道门里那一格用的就是文档写法 |
 | `--rc-mode constqp` 下 `--lookahead` 不生效 | constqp 模式下 NVENC **静默禁用** lookahead | 现在会告警并**不下发** `-rc-lookahead`（`--fallback-policy strict` 下报错）；要用 lookahead 就换 `vbr*` / `cbr*` |
 | cpu_v2：`--workers` 与 `--threads` 的乘积可能超订 | 原算法只在 workers 自动推导时用 CPU 核数约束并发；显式 `--workers` 时不再回头压每任务线程数（8 核 + CODEC_PROFILE 默认 4 线程 + `--workers 4` = 16 线程抢 8 核） | 现在显式 `--workers` 且**未显式给 `--threads`** 时，自动把每任务线程钳到 `cpu // workers`（≥1）；显式给了 `--threads` 则尊重用户意图，不覆盖 |
 | `cbr*` 模式没给码率 → 会落到 ffmpeg 默认 200kbps | `--rc-mode cbr` 是恒定码率模式，码率由 `-b:v` 决定；不给就是 ffmpeg 的默认值（200kbps，画质会很难看） | 脚本会告警提示补 `--bitrate 8M` 之类；要恒定质量请用 `vbr` 或默认的 `auto` |
@@ -1823,8 +1823,8 @@ VidUtils 规划作为一个**命令行优先 / Python 原生**的视频工程工
 | `convert_crf.py` | ✅ 已发布 | 质量换算单一事实来源 |
 | `interp_2x_safe.sh` | ✅ 已发布 | 光流插帧 2x **GPU 专版**（`nvinterpolate` + `hevc_nvenc`，**无 CPU 回退**；**cgroup 感知的环境自动探测** + **分片级并行 `-j`** + **时间段截取 `--SS/--TO/-T`** + `setsid` + TS 分片 + 断点恢复 + 单实例锁） |
 | `interp_2x_safe_v1.sh` | ✅ 已发布 | 同上的**通用版**：多一条 CPU 回退后端（`minterpolate` + `libx265`）与 `--backend` / `--cpu-preset`；其余特性（环境探测 / `-j` / `--SS/--TO/-T`）与 GPU 专版一致，两者的 `recipe.txt` 兼容、可互相接管分片目录 |
-| `test/test_interp_2x_lock.sh` | ✅ 已发布 | 上面两版的回归测试（单实例锁 / 并发安全，退出码 0/1/2），默认 `SUT` 为 `interp_2x_safe.sh` |
-| `test/test_interp_2x_orphan.sh` | ✅ 已发布 | 上面两版的回归测试（中断收尾 / 孤儿 ffmpeg 自愈，退出码 0/1/2），默认 `SUT` 为 `interp_2x_safe.sh` |
+| `Accessory/test/test_interp_2x_lock.sh` | ✅ 已发布 | 上面两版的回归测试（单实例锁 / 并发安全，退出码 0/1/2），默认 `SUT` 为 `interp_2x_safe.sh` |
+| `Accessory/test/test_interp_2x_orphan.sh` | ✅ 已发布 | 上面两版的回归测试（中断收尾 / 孤儿 ffmpeg 自愈，退出码 0/1/2），默认 `SUT` 为 `interp_2x_safe.sh` |
 | `vidls.sh` + `vidls.py`（另有 `vidll.sh`） | ✅ 已发布 | `ls` / `ll` 替代品（`vidll` == `vidls -l`）：非视频按原生 `ls` 版式（实测逐字节一致），视频追加分辨率 / 帧率 / 比特率 / 编码器 / 容器 / 时长（帧数为可选列 `--show frames`）；帧数四级降级链（包头 → 硬解 → 包数 → 估算）+ cgroup 感知的自动并行 + `--install` 自检装机 |
 | `vidls.cmd` + `vidls_win.py`（另有 `vidll.cmd`） | ✅ 已发布 | 上面的 Windows 移植（Linux 版原样保留、两者互不 import）：非视频版式在 Git Bash 下与 coreutils ls 8.32 **逐字节一致**（1040 组随机布局实测）+ 同样的四级降级链 + 控制台编码自适应 + 写启动器进 PATH 的 `--install` |
 | `vidscale_*.py` | 🚧 规划中 | 视频缩放：双三次 / Lanczos / `scale_cuda` / `scale_npp` |
@@ -1858,6 +1858,7 @@ vidutils/
 ├── vidcrop_hwaccel.py        # 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL，6 级策略链）
 ├── convert_crf.py            # 质量换算表（被 v2 / hwaccel 依赖，单一事实来源）
 ├── convert_sdr_to_hdr.py     # SDR→HDR10 转换（神经网络 HDRTVNet++ Ensemble_AGCM_LE；--no-model 只跑编码链路）
+├── git-sync.sh               # 提交同步 shortcuts（fetch / pull origin main --no-rebase）
 ├── interp_2x_safe.sh         # 光流插帧 2x · GPU 专版（nvinterpolate + hevc_nvenc；环境探测 + -j 并行 + --SS/--TO/-T + TS 分片 + 断点恢复）
 ├── interp_2x_safe_v1.sh      # 同上的通用版（多一条 CPU 回退 minterpolate + libx265 与 --backend/--cpu-preset）
 ├── vidls.sh                  # ls / ll 替代（启动器；--install 把自己接进 PATH）
@@ -1866,33 +1867,39 @@ vidutils/
 ├── vidls.cmd                 # 同上 Windows 版启动器（纯 ASCII + CRLF：cmd.exe 按 ANSI 代码页解析批处理）
 ├── vidll.cmd                 # Windows 版 vidll（只转发给 vidls.cmd）
 ├── vidls_win.py              # Windows 版内核：版式判据按实测重写、控制台编码自适应、写启动器的 --install
-├── test/                     # 全部回归测试与工装（基线在 test/baseline/，见「回归与验证」）
-│   ├── dump_filter_chains.sh            # 裁剪脚本：滤镜链回归（16 行基线）
-│   ├── dump_cmd_default.sh              # 裁剪脚本：命令级回归（7 用例基线）
-│   ├── dump_enc_options.sh              # 裁剪脚本：编码/质量/码率控制 token 回归（enc_before.txt）
-│   ├── dump_cmd_full.sh                 # 裁剪脚本：两脚本**完整命令**逐字相等门禁（自带断言；20 用例；SELFTEST=1 自检）
-│   ├── test_green_chroma_regression.sh  # 裁剪脚本：色度归零端到端回归（含删 setparams 的红灯自检）
-│   ├── split_diff_by_theme.py           # 分提交工装：按主题拆分同一文件里的两条改动线
-│   ├── check_readme_refs.sh             # 收尾核对：README 必须引用每个工具文件名
-│   ├── baseline/                        # 各 dump_*.sh 的逐字基线
-│   ├── test_interp_2x_lock.sh           # 插帧脚本：单实例锁 / 并发安全
-│   └── test_interp_2x_orphan.sh         # 插帧脚本：中断收尾 / 孤儿 ffmpeg 自愈
-├── verify/                   # 裁剪脚本的验证套件（单测 + CLI 层，都不需要 GPU；清单见「回归与验证」）
-├── probe/                    # 上机探针（无 GPU 时只能跑 SELFTEST=1）
-│   ├── probe_green_chroma.sh            # 色度归零归因：解码层 / 编码层 / 命令级二分
-│   ├── probe_scale_cuda_crop.sh         # CUDA 缩放裁剪：计时与画质 A/B/C/D/Q
-│   ├── probe_lossless_qp0.sh            # 「-qp 0 / -crf 0 到底是不是数学无损」（恒等裁剪 + 逐帧哈希；本机可 LOCALCPU=1 自证）
-│   ├── t4_acceptance.py                 # T4 上机验收（落点 / 运行期 / 无损三组；--local 本机降级自证、--selftest 验装置）
-│   ├── verify_nvenc_quality_gpu.py      # NVENC 质量轴上机验收（B 组 -cq 偏移 / C 组 constqp -qp 尺度；--quick 只跑 A 组逻辑、--expect-av1 要求本卡能编 AV1 否则 exit 2）
-│   ├── calibrate_soft_offsets.py        # 软编等效表「等体积」标定（⚠ prep.mp4 按文件名复用，换素材前须先删，否则会静默沿用上一条素材）
-│   ├── calibrate_soft_offsets_nocache.py # 同上，但每次运行独立工作目录 + 打印 prep 的 md5（可审计）；--dense 把 libaom 扫描加密到 3 档间隔
-│   └── enum_cmds.py                     # 无 GPU 时 mock 远程能力、枚举脚本真正下发的命令
+├── Accessory/                # 附件区：验证套件 / 回归工装 / 探针 / 本机临时产物（2026-10-06 从根下移入）
+│   ├── _paths.py                      # 仓库根与 temp/ 定位（向上搜 .git / convert_crf.py；被下面三个子目录的脚本共用）
+│   ├── _paths.sh                     # 同上，.sh 版
+│   ├── test/                         # 全部回归测试与工装（基线在 Accessory/test/baseline/，见「回归与验证」）
+│   │   ├── dump_filter_chains.sh            # 裁剪脚本：滤镜链回归（16 行基线）
+│   │   ├── dump_cmd_default.sh              # 裁剪脚本：命令级回归（7 用例基线）
+│   │   ├── dump_enc_options.sh              # 裁剪脚本：编码/质量/码率控制 token 回归（enc_before.txt）
+│   │   ├── dump_cmd_full.sh                 # 裁剪脚本：两脚本**完整命令**逐字相等门禁（自带断言；20 用例；SELFTEST=1 自检）
+│   │   ├── test_green_chroma_regression.sh  # 裁剪脚本：色度归零端到端回归（含删 setparams 的红灯自检）
+│   │   ├── split_diff_by_theme.py           # 分提交工装：按主题拆分同一文件里的两条改动线
+│   │   ├── check_readme_refs.sh             # 收尾核对：README 必须引用每个工具文件名
+│   │   ├── baseline/                        # 各 dump_*.sh 的逐字基线
+│   │   ├── test_interp_2x_lock.sh           # 插帧脚本：单实例锁 / 并发安全
+│   │   └── test_interp_2x_orphan.sh         # 插帧脚本：中断收尾 / 孤儿 ffmpeg 自愈
+│   ├── verify/                   # 验证套件（单测 + CLI 层，都不需要 GPU；清单见「回归与验证」）
+│   ├── probe/                    # 上机探针（无 GPU 时只能跑 SELFTEST=1）
+│   │   ├── probe_green_chroma.sh            # 色度归零归因：解码层 / 编码层 / 命令级二分
+│   │   ├── probe_scale_cuda_crop.sh         # CUDA 缩放裁剪：计时与画质 A/B/C/D/Q
+│   │   ├── probe_lossless_qp0.sh            # 「-qp 0 / -crf 0 到底是不是数学无损」（恒等裁剪 + 逐帧哈希；本机可 LOCALCPU=1 自证）
+│   │   ├── t4_acceptance.py                 # T4 上机验收（落点 / 运行期 / 无损三组；--local 本机降级自证、--selftest 验装置）
+│   │   ├── verify_nvenc_quality_gpu.py      # NVENC 质量轴上机验收（B 组 -cq 偏移 / C 组 constqp -qp 尺度；--quick 只跑 A 组逻辑、--expect-av1 要求本卡能编 AV1 否则 exit 2）
+│   │   ├── calibrate_soft_offsets.py        # 软编等效表「等体积」标定（⚠ prep.mp4 按文件名复用，换素材前须先删，否则会静默沿用上一条素材）
+│   │   ├── calibrate_soft_offsets_nocache.py # 同上，但每次运行独立工作目录 + 打印 prep 的 md5（可审计）；--dense 把 libaom 扫描加密到 3 档间隔
+│   │   ├── loo_equal_quality.py             # LOO 留一交叉验证：等质量表的**过拟合门禁**（ΔVMAF < 1.0 是唯一判红口径）
+│   │   ├── convert_points_cache.py          # 标定数据迁移：旧 points_cache.json（整素材缓存）→ 新 points.json（逐点）
+│   │   └── enum_cmds.py                     # 无 GPU 时 mock 远程能力、枚举脚本真正下发的命令
+│   ├── temp/                     # 本机临时目录（gitignored）：测试素材、中间产物、探针日志
+│   └── verification_report/      # 上机验收报告落盘处（gitignored）
 ├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
 ├── Plan/                     # 立项任务书与过程归档（含 vidls 对话记录 .txt）
 ├── AV1_VP9_UPGRADE_PLAN_v2.md # AV1/VP9 升级方案归档
 ├── docs/                     # （规划）设计文档与性能基准
-├── examples/                 # （规划）示例素材与演示脚本
-└── temp/                     # 本机临时目录（gitignored）：测试素材、中间产物、探针日志
+└── examples/                 # （规划）示例素材与演示脚本
 ```
 
 ---
@@ -1903,32 +1910,32 @@ vidutils/
 
 ```bash
 # 1) 回归门：不传新参数时命令必须逐字不变
-bash test/dump_filter_chains.sh > /tmp/after.txt
-diff test/baseline/chains_before.txt /tmp/after.txt     # 16 行（8 用例 × 2 脚本）
-bash test/dump_cmd_default.sh > /tmp/after2.txt
-diff test/baseline/cmd_before.txt /tmp/after2.txt       # 7 个命令级用例
-bash test/dump_enc_options.sh > /tmp/after3.txt
-diff test/baseline/enc_before.txt /tmp/after3.txt       # 12 行（6 用例 × 2 脚本）编码/质量/码率控制 token
-bash test/dump_cmd_full.sh > /tmp/after4.txt            # 第四道门：两脚本完整命令逐字相等（自带断言，exit 1 = 有分叉）
-diff test/baseline/cmd_full.txt /tmp/after4.txt         # 40 行（20 用例 × 2 脚本）完整 ffmpeg 命令；含 3 格 10bit 源
+bash Accessory/test/dump_filter_chains.sh > /tmp/after.txt
+diff Accessory/test/baseline/chains_before.txt /tmp/after.txt     # 16 行（8 用例 × 2 脚本）
+bash Accessory/test/dump_cmd_default.sh > /tmp/after2.txt
+diff Accessory/test/baseline/cmd_before.txt /tmp/after2.txt       # 7 个命令级用例
+bash Accessory/test/dump_enc_options.sh > /tmp/after3.txt
+diff Accessory/test/baseline/enc_before.txt /tmp/after3.txt       # 12 行（6 用例 × 2 脚本）编码/质量/码率控制 token
+bash Accessory/test/dump_cmd_full.sh > /tmp/after4.txt            # 第四道门：两脚本完整命令逐字相等（自带断言，exit 1 = 有分叉）
+diff Accessory/test/baseline/cmd_full.txt /tmp/after4.txt         # 40 行（20 用例 × 2 脚本）完整 ffmpeg 命令；含 3 格 10bit 源
 
 # 2) 验证套件
-python verify/verify_cuda_scale.py        # CUDA 缩放链 + 策略生成
-python verify/verify_scale_algo.py        # --scale-algo 解析
-python verify/verify_pixfmt_bitdepth.py   # --pix-fmt × --bit-depth 的「能落地者赢」
-python verify/verify_quality_mapping.py   # 质量参数单点换算：--qp 降级 / -ref→constqp 的 qp / --crf→-cq / 0 值无损 / 下界钳 1
-python verify/verify_equal_quality.py     # 等质量表回归（主门禁 ΔVMAF ≤ 1.0；真实素材重编码，较慢）
-python verify/verify_cli_parsing.py       # --extra-args 的两种写法（含文档里的 `--` 形式）+ 输出尺寸偶数校验的两脚本一致性
-python verify/verify_overview_lockstep.py # 两个概览块的字段序列对齐 + 显示量纲必须与命令一致（`--selftest` 自检判词装置）
-python verify/verify_cuda_decode_codec.py # 按源编解码器的硬解确认（AV1）
-python verify/verify_hwupload_worth.py    # auto 缩放的 hwupload 门槛
-python verify/verify_color_tagging.py     # 色彩属性标到帧上（setparams），命令级
-python verify/verify_chroma_hook.py       # 产物色度自检的阈值 / 取样 / 降级链
-python verify/verify_rc_lookahead.py      # --rc-mode / --qp / --lookahead / --bitrate
-python verify/verify_borrow_enhancement.py # 从 Video_Enhancement 借鉴的那批：恒定质量/0 档无损/AQ/降档重试 + --flag→--suffix 更名
-python verify/verify_ratio_single_dim.py  # --crop-ratio + 单维度 → 按比例补全（三模式 + 两脚本 lockstep）
-python verify/verify_sdr_to_hdr.py        # SDR→HDR10：gbrp16le 往返/双路径一致 + HDR10 单条 -x265-params + token 顺序 + 真编码 + 模型推理
-bash   verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
+python Accessory/verify/verify_cuda_scale.py        # CUDA 缩放链 + 策略生成
+python Accessory/verify/verify_scale_algo.py        # --scale-algo 解析
+python Accessory/verify/verify_pixfmt_bitdepth.py   # --pix-fmt × --bit-depth 的「能落地者赢」
+python Accessory/verify/verify_quality_mapping.py   # 质量参数单点换算：--qp 降级 / -ref→constqp 的 qp / --crf→-cq / 0 值无损 / 下界钳 1
+python Accessory/verify/verify_equal_quality.py     # 等质量表回归（主门禁 ΔVMAF ≤ 1.0；真实素材重编码，较慢）
+python Accessory/verify/verify_cli_parsing.py       # --extra-args 的两种写法（含文档里的 `--` 形式）+ 输出尺寸偶数校验的两脚本一致性
+python Accessory/verify/verify_overview_lockstep.py # 两个概览块的字段序列对齐 + 显示量纲必须与命令一致（`--selftest` 自检判词装置）
+python Accessory/verify/verify_cuda_decode_codec.py # 按源编解码器的硬解确认（AV1）
+python Accessory/verify/verify_hwupload_worth.py    # auto 缩放的 hwupload 门槛
+python Accessory/verify/verify_color_tagging.py     # 色彩属性标到帧上（setparams），命令级
+python Accessory/verify/verify_chroma_hook.py       # 产物色度自检的阈值 / 取样 / 降级链
+python Accessory/verify/verify_rc_lookahead.py      # --rc-mode / --qp / --lookahead / --bitrate
+python Accessory/verify/verify_borrow_enhancement.py # 从 Video_Enhancement 借鉴的那批：恒定质量/0 档无损/AQ/降档重试 + --flag→--suffix 更名
+python Accessory/verify/verify_ratio_single_dim.py  # --crop-ratio + 单维度 → 按比例补全（三模式 + 两脚本 lockstep）
+python Accessory/verify/verify_sdr_to_hdr.py        # SDR→HDR10：gbrp16le 往返/双路径一致 + HDR10 单条 -x265-params + token 顺序 + 真编码 + 模型推理
+bash   Accessory/verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
 ```
 
 > `verify_sdr_to_hdr.py` 的六组里，前五组**不需要 GPU 也不需要 torch**（⑤ 会真跑一遍
@@ -1955,8 +1962,8 @@ bash   verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
 > cpu_v2 是原样透传 NVENC，两者本就该不同（能力差异，不是分叉）。⚠ 10bit 源的 `-pix_fmt`
 > 差异**就是这一轴的一部分**（CPU 轴上两边都是 `yuv420p10le`，门里已有 3 格 10bit 用例）；
 > 此前"10bit 两边不同、排除在门外"的说法方向反了、成因也记错了，已更正。
-> 装置自检：`SELFTEST=1 bash test/dump_cmd_full.sh`（正/负/空三格判词）；
-> 负向对照：`SABOTAGE=1 bash test/dump_cmd_full.sh`（期望 exit 1）。
+> 装置自检：`SELFTEST=1 bash Accessory/test/dump_cmd_full.sh`（正/负/空三格判词）；
+> 负向对照：`SABOTAGE=1 bash Accessory/test/dump_cmd_full.sh`（期望 exit 1）。
 
 > ⚠ `verify_decode_axis.sh` 第 ⑦ 组与 `verify_cuda_decode_codec.py` 第 ⑥ 组硬写了
 > 「本机无 CUDA / 无 N 卡」，**在有 GPU 的机器上必然失败**（T4 上实测如此，与本次改动无关）。
@@ -1965,44 +1972,44 @@ bash   verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
 色度回归（**需要 NVIDIA GPU**，端到端；没有 NVENC 会打印 SKIP 退出 0）：
 
 ```bash
-bash test/test_green_chroma_regression.sh
+bash Accessory/test/test_green_chroma_regression.sh
 # 含"红灯自检"：把命令里的 setparams 删掉必须复现 U/V<16，否则测试本身算失效
-REAL_SRC=<真实原片> bash test/test_green_chroma_regression.sh   # 指定真片（默认 Dora S02E01）
-SKIP_REAL=1 bash test/test_green_chroma_regression.sh           # 跳过真片那一步
+REAL_SRC=<真实原片> bash Accessory/test/test_green_chroma_regression.sh   # 指定真片（默认 Dora S02E01）
+SKIP_REAL=1 bash Accessory/test/test_green_chroma_regression.sh           # 跳过真片那一步
 ```
 
 插帧脚本的回归（**需要 GPU + `nvinterpolate`**，会抢一点 GPU；退出码 0/1/2）：
 
 ```bash
-bash test/test_interp_2x_lock.sh      # 单实例锁 / 并发安全
-bash test/test_interp_2x_orphan.sh    # 中断收尾 / 孤儿 ffmpeg 自愈
+bash Accessory/test/test_interp_2x_lock.sh      # 单实例锁 / 并发安全
+bash Accessory/test/test_interp_2x_orphan.sh    # 中断收尾 / 孤儿 ffmpeg 自愈
 ```
 
 上机探针（**需要 NVIDIA GPU**；没有就只能跑装置自检）：
 
 ```bash
-SELFTEST=1 bash probe/probe_scale_cuda_crop.sh             # 只验计时/汇总装置，CPU-only
-PROBE_VMAF=1 bash probe/probe_scale_cuda_crop.sh <源视频>   # 完整判据 A/B/C/D/Q
+SELFTEST=1 bash Accessory/probe/probe_scale_cuda_crop.sh             # 只验计时/汇总装置，CPU-only
+PROBE_VMAF=1 bash Accessory/probe/probe_scale_cuda_crop.sh <源视频>   # 完整判据 A/B/C/D/Q
 
-SELFTEST=1 bash probe/probe_green_chroma.sh                # 色度探针装置自检，CPU-only
-SRC=<源视频> bash probe/probe_green_chroma.sh               # 色度归零归因（目标默认 768x432）
-SRC=<源视频> OUT_W=640 OUT_H=360 bash probe/probe_green_chroma.sh   # 自定义目标尺寸
+SELFTEST=1 bash Accessory/probe/probe_green_chroma.sh                # 色度探针装置自检，CPU-only
+SRC=<源视频> bash Accessory/probe/probe_green_chroma.sh               # 色度归零归因（目标默认 768x432）
+SRC=<源视频> OUT_W=640 OUT_H=360 bash Accessory/probe/probe_green_chroma.sh   # 自定义目标尺寸
 
-SELFTEST=1 bash probe/probe_lossless_qp0.sh                        # 无损探针装置自检（6 格判词），CPU-only
-LOCALCPU=1 SRC=temp/fixture_1080p.mp4 bash probe/probe_lossless_qp0.sh   # 本机替身自证（libx265/libx264）
-SRC=<源视频> bash probe/probe_lossless_qp0.sh                      # 验 NVENC 的 `-qp 0` 到底是不是数学无损
+SELFTEST=1 bash Accessory/probe/probe_lossless_qp0.sh                        # 无损探针装置自检（6 格判词），CPU-only
+LOCALCPU=1 SRC=Accessory/temp/fixture_1080p.mp4 bash Accessory/probe/probe_lossless_qp0.sh   # 本机替身自证（libx265/libx264）
+SRC=<源视频> bash Accessory/probe/probe_lossless_qp0.sh                      # 验 NVENC 的 `-qp 0` 到底是不是数学无损
 
-python probe/t4_acceptance.py --selftest                           # 验收脚本装置自检（9 格：判词/解析/空集），CPU-only
-python probe/t4_acceptance.py --local                              # 本机降级自证：只跑本机成立的格，GPU 专属格显式跳过
-python3 probe/t4_acceptance.py --src '<源视频>'                     # T4 上机验收：落点 / 运行期 / 无损 三组
+python Accessory/probe/t4_acceptance.py --selftest                           # 验收脚本装置自检（9 格：判词/解析/空集），CPU-only
+python Accessory/probe/t4_acceptance.py --local                              # 本机降级自证：只跑本机成立的格，GPU 专属格显式跳过
+python3 Accessory/probe/t4_acceptance.py --src '<源视频>'                     # T4 上机验收：落点 / 运行期 / 无损 三组
 
-python3 probe/verify_nvenc_quality_gpu.py --quick                  # NVENC 质量轴装置自检（A 组纯逻辑 + 打印 GPU 能力探测）
-python3 probe/verify_nvenc_quality_gpu.py --src '<源视频>'          # 上机验收：B 组 -cq 偏移 / C 组 constqp -qp 尺度（av1 在 T4 会 SKIP）
-python3 probe/verify_nvenc_quality_gpu.py --expect-av1 --src '<源视频>'   # L40/Ada 交接：要求本卡真能编 AV1，否则 exit 2（防把静默 SKIP 当成"AV1 已验"）
-python3 probe/verify_nvenc_quality_gpu.py --src '<源视频>' --json verification_report/nvenc_quality.json --md verification_report/nvenc_quality.md   # 落报告
+python3 Accessory/probe/verify_nvenc_quality_gpu.py --quick                  # NVENC 质量轴装置自检（A 组纯逻辑 + 打印 GPU 能力探测）
+python3 Accessory/probe/verify_nvenc_quality_gpu.py --src '<源视频>'          # 上机验收：B 组 -cq 偏移 / C 组 constqp -qp 尺度（av1 在 T4 会 SKIP）
+python3 Accessory/probe/verify_nvenc_quality_gpu.py --expect-av1 --src '<源视频>'   # L40/Ada 交接：要求本卡真能编 AV1，否则 exit 2（防把静默 SKIP 当成"AV1 已验"）
+python3 Accessory/probe/verify_nvenc_quality_gpu.py --src '<源视频>' --json verification_report/nvenc_quality.json --md verification_report/nvenc_quality.md   # 落报告
 ```
 
-> `probe/t4_acceptance.py` 是那轮改动**剩下的验收面**的收口（A 落点 / B 运行期 / C 无损）。
+> `Accessory/probe/t4_acceptance.py` 是那轮改动**剩下的验收面**的收口（A 落点 / B 运行期 / C 无损）。
 > 每格都带一列**「本机状态」**（本机已验 / 只能单元级 / 需上机）—— 它回答"跑完是绿的是否等于
 > 结论成立"；失败时补一行「⇒ 说明」写清红了意味着什么。判据只用 **framemd5**（见下）。
 > ⚠ **没有 `--local` 就在无 GPU 机器上跑它会大量报红（实测 8 过 11 红）**，这是有意的：
@@ -2020,21 +2027,21 @@ python3 probe/verify_nvenc_quality_gpu.py --src '<源视频>' --json verificatio
 > 探针会**直接终止**并提示换源或调 `OUT_W`/`OUT_H`（确实要测恒等 crop 才加
 > `ALLOW_IDENTITY_CROP=1`）。
 
-> 测试素材与探针工作目录都在 `temp/`（gitignored），**不入库**；
+> 测试素材与探针工作目录都在 `Accessory/temp/`（gitignored），**不入库**；
 > `verify/*.py` 需要 fixture 时会用 lavfi 按需生成。
 
-### 按主题拆分同一个文件里的两条改动线（`test/split_diff_by_theme.py`）
+### 按主题拆分同一个文件里的两条改动线（`Accessory/test/split_diff_by_theme.py`）
 
 同一个文件里压着两条互不相关的改动线时（例：`vidcrop_hwaccel.py` 既有「色度归零修复」
 又有「码率控制四参数」），提交要按主题拆 —— 难点不是 `git add -p`（逐 hunk），
 而是**一个 hunk 里就混着两条线的改动**。本工具把"怎么分"外置成规则 JSON：
 
 ```bash
-python test/split_diff_by_theme.py --selftest                  # 工装自证（临时仓库，不碰本仓）
-python test/split_diff_by_theme.py --print-rules > rules.json  # 规则模板（照抄改成你的两条线）
-python test/split_diff_by_theme.py --rules rules.json --report # 只看分类报告
-python test/split_diff_by_theme.py --rules rules.json --out temp/split/a.patch --verify
-# 然后：git apply --cached --recount temp/split/a.patch → 提交 A → git add <files> → 提交 B
+python Accessory/test/split_diff_by_theme.py --selftest                  # 工装自证（临时仓库，不碰本仓）
+python Accessory/test/split_diff_by_theme.py --print-rules > rules.json  # 规则模板（照抄改成你的两条线）
+python Accessory/test/split_diff_by_theme.py --rules rules.json --report # 只看分类报告
+python Accessory/test/split_diff_by_theme.py --rules rules.json --out Accessory/temp/split/a.patch --verify
+# 然后：git apply --cached --recount Accessory/temp/split/a.patch → 提交 A → git add <files> → 提交 B
 ```
 
 判定顺序：**整块覆盖 → 逐行规则 → 关键词 → 沿用上一段**；判定不出的一律**标记 `?` 待复核**
@@ -2046,28 +2053,28 @@ python test/split_diff_by_theme.py --rules rules.json --out temp/split/a.patch -
 > 无关键词的替换组要**显式标记待复核**；`@@` 头重算时**换行与两侧计数**都不能丢
 > （丢了会 `patch does not apply`，而 `git apply --recount` 会把这个计数 bug 掩盖掉）。
 
-### 收尾核对：README 是否漏登工具文件（`test/check_readme_refs.sh`）
+### 收尾核对：README 是否漏登工具文件（`Accessory/test/check_readme_refs.sh`）
 
 入库新工具（`probe/` `verify/` `test/` 下的脚本、仓库根的 `*.py`/`*.sh`/`*.cmd`）后跑一遍，
-确认 README 里提到了每一个文件名 —— 漏登过的有 `probe/enum_cmds.py`、`test/` 目录结构树的
+确认 README 里提到了每一个文件名 —— 漏登过的有 `Accessory/probe/enum_cmds.py`、`test/` 目录结构树的
 三个脚本、以及 memory/ 索引（后者另有 `memory/MEMORY.md` 把关）：
 
 ```bash
-bash test/check_readme_refs.sh              # 漏登的逐条列出并 exit 1
-SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（五格，不碰本仓 README）
+bash Accessory/test/check_readme_refs.sh              # 漏登的逐条列出并 exit 1
+SELFTEST=1 bash Accessory/test/check_readme_refs.sh   # 自检判据本身（五格，不碰本仓 README）
 ```
 
 > 自检覆盖五个分支：正向（引用齐全）/ 漏登（列 `MISS` + exit 1）/ **子目录**（从 `sub/` 跑
 > 仍须扫到仓库根）/ **空集**（一个工具文件都没扫到 → exit 2，防"过滤规则写错或
 > `git ls-files` 失败"被报成"全部引用齐全"）/ README 缺失（exit 2）。它不依赖本仓 README，
-> 在 `temp/` 里造临时仓库跑。
+> 在 `Accessory/temp/` 里造临时仓库跑。
 >
 > 两条实测踩出来的坑：① `git ls-files` **按当前目录裁剪路径** —— 必须 `git -C "$ROOT"`
 > （否则从 `test/` 跑只扫到 8 个文件却照样报 ✓ exit 0，即"部分漏扫"型的假绿）；
 > ② 自检调子进程时**必须显式 `SELFTEST=0`** —— 否则子进程继承 `SELFTEST=1` 会再进自检、
 > 无限递归建目录（实测：拿掉那行 15s 内递归到 7 层并超时；有它则 3.4s 跑完）。
 
-> 范围与例外写在脚本头部；`test/baseline/` 夹具、`Plan/`、`*.md` 文档、`.gitignore` 等
+> 范围与例外写在脚本头部；`Accessory/test/baseline/` 夹具、`Plan/`、`*.md` 文档、`.gitignore` 等
 > 基础设施不在检查范围内。
 
 ---
@@ -2087,7 +2094,7 @@ SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（五格，不�
   CPU auto 并行度按实测收敛到「每路 1 核」（三轮 4→2→1：插帧滤镜串行、单片 ≈1 核）并感知 cgroup 已有负载；
   `--threads` 翻成 `-x265-params pools=N`（`-threads` 只改 frame threads、`-filter_complex_threads` 对 minterpolate 无效）；`-w` 相对路径的坑已修；
   中断收尾改为有界（TERM→3s→SIGKILL）并能在下次启动自愈孤儿 ffmpeg（ffmpeg 对 TERM 要 11–13s 才退，实测）；
-  并发度按「剩余待编片数」再收敛、撞锁报错打印持有者 pid/启动时间/命令行、新增 test/test_interp_2x_orphan.sh；
+  并发度按「剩余待编片数」再收敛、撞锁报错打印持有者 pid/启动时间/命令行、新增 Accessory/test/test_interp_2x_orphan.sh；
   另有一条实测教训：**别"原位"改正在被执行的脚本**（bash 会按字节偏移重读、把跑完的循环再跑一遍）
 - [bash 并行调度的四个坑](memory/project_bash_parallel_pitfalls.md)
   —— `wait -n` 会提前返回、不能当完成信号；`while read < <(tail)` 能永久卡死在 pipe_read（0% CPU）；
@@ -2112,9 +2119,9 @@ SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（五格，不�
   **AV1 硬解硬编都没有**（`av1_cuvid` 在列表里，运行时报 not supported）；
   「本机 AV1 完全编不出来」这条已更正为：custom `ffmpeg` 7.1 没有 AV1 软编，
   但系统 `ffmpeg` 6.1.1 有 `libsvtav1`/`libaom-av1`；零拷贝管线里 `-pix_fmt` 无效；
-  ⚠ **有 GPU 的机器上跑 `verify/` 与 `test/dump_cmd_full.sh` 会有一批「环境假设过时」的假红**
+  ⚠ **有 GPU 的机器上跑 `verify/` 与 `Accessory/test/dump_cmd_full.sh` 会有一批「环境假设过时」的假红**
   （4 处 verify + 2 个默认档用例；`--decode cpu` 只强制 CPU 解码/缩放、**不强制编码器降级**），
-  已用 `git worktree` 在改动前提交复跑证明非回归；另 `probe/t4_acceptance.py` 的 A 组期望值
+  已用 `git worktree` 在改动前提交复跑证明非回归；另 `Accessory/probe/t4_acceptance.py` 的 A 组期望值
   是硬编码的，落点有意变更后会滞后成假红 —— 清单与判法见该记忆文件末
 - [解码/缩放/编码三轴模型（`--hwaccel` 已硬更名 `--decode`）](memory/project_three_axis_model.md)
   —— 把 `--hwaccel` 拆成三个正交轴（`--decode` / `--scale-algo` / `--codec`）外加纯策略开关
@@ -2162,7 +2169,7 @@ SELFTEST=1 bash test/check_readme_refs.sh   # 自检判据本身（五格，不�
 - [GPU 等质量标定（M5）准备已收口，等待硬件](memory/project_gpu_eqquality_readiness.md)
   —— 准备阶段（harness GPU 支持 / 跨仓契约 CR-1 preset p4 + CR-2 rc / 探针 / 门禁 / 基线）
   2026-10-04 全部收口；**唯一待办 = 上机跑标定**（T4 与 L40/AV1 分列两份专项方案）
-- [按主题拆分同一文件里的两条改动线（`test/split_diff_by_theme.py`）](memory/project_commit_split_tool.md)
+- [按主题拆分同一文件里的两条改动线（`Accessory/test/split_diff_by_theme.py`）](memory/project_commit_split_tool.md)
   —— 分提交时的 hunk 手术固化成规则驱动工具（判定顺序 **整块覆盖 → 逐行规则 → 关键词 →
   沿用上一段**，判不出来标 `?` + 告警，绝不静默分错线）；**只出 A 侧补丁**，B 侧 = 工作区减去
   已提交的 A（反过来先造「对着 HEAD 的 B 补丁」再在 A 之后应用必然冲突）；`--verify` 在
@@ -2325,7 +2332,7 @@ x265 是 **20**、x264 由自身决定；`-rc` 的默认是"不覆盖 preset"。
 （会告警；确实需要就用 `--extra-args` 手工指定）。
 
 四个参数的默认值都表示"不下发任何相关选项"，因此不传时命令与引入它们之前**逐字相同**；
-回归门见[回归与验证](#回归与验证)（`test/dump_enc_options.sh` + `verify/verify_rc_lookahead.py` + `verify/verify_borrow_enhancement.py`）。
+回归门见[回归与验证](#回归与验证)（`Accessory/test/dump_enc_options.sh` + `Accessory/verify/verify_rc_lookahead.py` + `Accessory/verify/verify_borrow_enhancement.py`）。
 
 ---
 

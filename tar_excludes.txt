@@ -1,4 +1,4 @@
-temp
+Accessory/temp
 tmp
 logs
 output
@@ -20,6 +20,7 @@ archive
 core.*
 *.tar.gz
 __pycache__
+Accessory/probe/*.log
 probe/*.log
 *.pyc
 *.pyo

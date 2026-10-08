@@ -1,0 +1,15 @@
+── 等质量回归判据 ──
+源: Earth.at.Night.in.Color.S02E03.Kangaroo.Valley.2160p.mp4  30s  锚点 libx264 CRF 21
+等质量表覆盖: ['av1_nvenc', 'h264_nvenc', 'hevc_nvenc', 'libaom-av1', 'librav1e', 'libsvtav1', 'libvpx-vp9', 'libx265']
+prep: md5=e79fa4d9c9c393ee23a74527ce9d9cc0  frames=720  hdr=False
+  锚点 libx264 crf 21: vmaf=95.514 psnr=48.524 hvs=49.727 ssim=0.9931 xpsnr=41.445
+  ✓ ⚠ av1_nvenc   q=  32  vmaf=95.693  ΔVMAF=+0.179  ΔPSNR=+0.470  ΔPSNR-HVS=-0.608  | ssim=0.9931 xpsnr=40.744  (参考门限 0.3/0.5，不判红)
+  ✓ ⚠ h264_nvenc  q=  26  vmaf=95.619  ΔVMAF=+0.105  ΔPSNR=+0.129  ΔPSNR-HVS=-0.510  | ssim=0.9926 xpsnr=40.813  (参考门限 0.3/0.5，不判红)
+  ✓ ⚠ hevc_nvenc  q=  26  vmaf=95.551  ΔVMAF=+0.038  ΔPSNR=+0.375  ΔPSNR-HVS=-0.498  | ssim=0.9928 xpsnr=40.971  (参考门限 0.3/0.5，不判红)
+
+结果: 3/3 达标（主门禁 ΔVMAF）
+  ⚠ 参考指标超界 4 项（不影响退出码）:
+    · av1_nvenc: |ΔPSNR|=0.47 > 0.3（参考，不判红）
+    · av1_nvenc: |ΔPSNR-HVS|=0.61 > 0.5（参考，不判红）
+    · h264_nvenc: |ΔPSNR-HVS|=0.51 > 0.5（参考，不判红）
+    · hevc_nvenc: |ΔPSNR|=0.37 > 0.3（参考，不判红）

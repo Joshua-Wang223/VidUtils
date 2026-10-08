@@ -1,0 +1,269 @@
+{
+  "gpu": "NVIDIA L40",
+  "source": "/workspace/input_videos/eqq_calib/10s/live_texture_frog_src1280x720.mp4",
+  "rows": [
+    {
+      "id": "A1-h264_nvenc",
+      "group": "A",
+      "title": "h264_nvenc -cq 量程：表 0~51 vs ffmpeg 0~51 (规格 0~51)",
+      "status": "PASS",
+      "detail": "一致（规格 0~51）",
+      "evidence": [
+        "ffmpeg: -cq (from 0 to 51)",
+        "NVIDIA 规格: 0~51"
+      ]
+    },
+    {
+      "id": "A1-hevc_nvenc",
+      "group": "A",
+      "title": "hevc_nvenc -cq 量程：表 0~51 vs ffmpeg 0~51 (规格 0~51)",
+      "status": "PASS",
+      "detail": "一致（规格 0~51）",
+      "evidence": [
+        "ffmpeg: -cq (from 0 to 51)",
+        "NVIDIA 规格: 0~51"
+      ]
+    },
+    {
+      "id": "A1-av1_nvenc",
+      "group": "A",
+      "title": "av1_nvenc -cq 量程：表 0~63 vs ffmpeg 0~63 (规格 0~63)",
+      "status": "PASS",
+      "detail": "一致（规格 0~63）",
+      "evidence": [
+        "ffmpeg: -cq (from 0 to 63)",
+        "NVIDIA 规格: 0~63"
+      ]
+    },
+    {
+      "id": "A1-av1-qp",
+      "group": "A",
+      "title": "av1_nvenc 的 -qp 是 0~255（qindex，≠ H.264 的 0~51）",
+      "status": "PASS",
+      "detail": "实测 -1~255 ⇒ constqp 下必须乘 QP 尺度，不能直取基准轴",
+      "evidence": [
+        "对照：h264_nvenc -qp (-1 to 51)"
+      ]
+    },
+    {
+      "id": "A2-h264_nvenc",
+      "group": "A",
+      "title": "crf_ref 21 → h264_nvenc 的 -cq 表值",
+      "status": "PASS",
+      "detail": "25.7718（下发 26，期望 26）",
+      "evidence": []
+    },
+    {
+      "id": "A2-hevc_nvenc",
+      "group": "A",
+      "title": "crf_ref 21 → hevc_nvenc 的 -cq 表值",
+      "status": "PASS",
+      "detail": "25.5042（下发 26，期望 26）",
+      "evidence": []
+    },
+    {
+      "id": "A2-av1_nvenc",
+      "group": "A",
+      "title": "crf_ref 21 → av1_nvenc 的 -cq 表值",
+      "status": "PASS",
+      "detail": "31.7055（下发 32，期望 32）",
+      "evidence": []
+    },
+    {
+      "id": "A3-av1-high",
+      "group": "A",
+      "title": "av1_nvenc 在 crf_ref 51 处不被 51 截断",
+      "status": "PASS",
+      "detail": "crf_ref 51 → 63（hi 已修为 63）",
+      "evidence": []
+    },
+    {
+      "id": "A4-libvpx-vp9",
+      "group": "A",
+      "title": "libvpx-vp9 的饱和档数（低端/高端）",
+      "status": "WARN",
+      "detail": "低端 8/52、高端 12/52 个基准值落到同一档",
+      "evidence": [
+        "表：1.9716 × crf + -15.0929，夹到 [0, 63]"
+      ]
+    },
+    {
+      "id": "A4-libsvtav1",
+      "group": "A",
+      "title": "libsvtav1 的饱和档数（低端/高端）",
+      "status": "WARN",
+      "detail": "低端 9/52、高端 16/52 个基准值落到同一档",
+      "evidence": [
+        "表：2.3961 × crf + -21.3615，夹到 [0, 63]"
+      ]
+    },
+    {
+      "id": "A4-av1_nvenc",
+      "group": "A",
+      "title": "av1_nvenc 的饱和档数（低端/高端）",
+      "status": "WARN",
+      "detail": "低端 0/52、高端 9/52 个基准值落到同一档",
+      "evidence": [
+        "表：1.4573 × crf + 1.1022，夹到 [0, 63]"
+      ]
+    },
+    {
+      "id": "B-h264_nvenc-表值",
+      "group": "B",
+      "title": "h264_nvenc -cq:v 26（表值，crf_ref 21）",
+      "status": "PASS",
+      "detail": "ΔPSNR -0.13 dB，码率 1.17×（带内）",
+      "evidence": [
+        "PSNR 45.63 dB  SSIM 0.9902  1509 kbps  VMAF 96.87",
+        "参照 libx264 crf21：PSNR 45.76 dB  1293 kbps"
+      ]
+    },
+    {
+      "id": "B-h264_nvenc-朴素值",
+      "group": "B",
+      "title": "h264_nvenc -cq:v 21（朴素值，crf_ref 21）",
+      "status": "WARN",
+      "detail": "ΔPSNR +2.69 dB，码率 2.24×（越界）",
+      "evidence": [
+        "PSNR 48.45 dB  SSIM 0.994  2897 kbps  VMAF 97.68",
+        "参照 libx264 crf21：PSNR 45.76 dB  1293 kbps"
+      ]
+    },
+    {
+      "id": "B-hevc_nvenc-表值",
+      "group": "B",
+      "title": "hevc_nvenc -cq:v 26（表值，crf_ref 21）",
+      "status": "PASS",
+      "detail": "ΔPSNR -0.12 dB，码率 1.17×（带内）",
+      "evidence": [
+        "PSNR 45.64 dB  SSIM 0.99  1508 kbps  VMAF 96.96",
+        "参照 libx264 crf21：PSNR 45.76 dB  1293 kbps"
+      ]
+    },
+    {
+      "id": "B-hevc_nvenc-朴素值",
+      "group": "B",
+      "title": "hevc_nvenc -cq:v 21（朴素值，crf_ref 21）",
+      "status": "WARN",
+      "detail": "ΔPSNR +2.75 dB，码率 2.30×（越界）",
+      "evidence": [
+        "PSNR 48.51 dB  SSIM 0.994  2975 kbps  VMAF 97.73",
+        "参照 libx264 crf21：PSNR 45.76 dB  1293 kbps"
+      ]
+    },
+    {
+      "id": "B-av1_nvenc-表值",
+      "group": "B",
+      "title": "av1_nvenc -cq:v 32（表值，crf_ref 21）",
+      "status": "PASS",
+      "detail": "ΔPSNR -0.34 dB，码率 0.96×（带内）",
+      "evidence": [
+        "PSNR 45.42 dB  SSIM 0.9898  1239 kbps  VMAF 96.72",
+        "参照 libx264 crf21：PSNR 45.76 dB  1293 kbps"
+      ]
+    },
+    {
+      "id": "B-av1_nvenc-朴素值",
+      "group": "B",
+      "title": "av1_nvenc -cq:v 21（朴素值，crf_ref 21）",
+      "status": "WARN",
+      "detail": "ΔPSNR +4.02 dB，码率 3.10×（越界）",
+      "evidence": [
+        "PSNR 49.78 dB  SSIM 0.9951  4002 kbps  VMAF 97.89",
+        "参照 libx264 crf21：PSNR 45.76 dB  1293 kbps"
+      ]
+    },
+    {
+      "id": "B-summary",
+      "group": "B",
+      "title": "表值 vs 朴素值的码率比",
+      "status": "PASS",
+      "detail": "见上逐格 evidence（朴素值码率比 > 表值 ⇒ 偏移方向正确）",
+      "evidence": []
+    },
+    {
+      "id": "B-av1-结论",
+      "group": "B",
+      "title": "av1_nvenc 的 -cq 表值结论",
+      "status": "PASS",
+      "detail": "表值 32 落带内（ΔPSNR -0.34 dB / 码率 0.96×）⇒ 偏移方向成立；若幅度也满意则不改表",
+      "evidence": []
+    },
+    {
+      "id": "C-av1-qp21",
+      "group": "C",
+      "title": "av1_nvenc -rc constqp -qp 21（直取基准轴（naive））",
+      "status": "WARN",
+      "detail": "ΔPSNR +3.50 dB，码率 2.69×（越界）",
+      "evidence": [
+        "PSNR 49.26 dB  3473 kbps  码率比 2.69×"
+      ]
+    },
+    {
+      "id": "C-av1-qp71",
+      "group": "C",
+      "title": "av1_nvenc -rc constqp -qp 71（VU quality 仿射（CR-4；7.9338·ref−97.5136 @ref21））",
+      "status": "WARN",
+      "detail": "质量下探 -1.70 dB（超 1.5 dB）",
+      "evidence": [
+        "PSNR 44.05 dB  919 kbps  码率比 0.71×"
+      ]
+    },
+    {
+      "id": "C-av1-qp63",
+      "group": "C",
+      "title": "av1_nvenc -rc constqp -qp 63（过原点 ×3（旧 / size 口径））",
+      "status": "PASS",
+      "detail": "ΔPSNR -1.14 dB，码率 0.81×（带内）",
+      "evidence": [
+        "PSNR 44.62 dB  1044 kbps  码率比 0.81×"
+      ]
+    },
+    {
+      "id": "C-av1-qp105",
+      "group": "C",
+      "title": "av1_nvenc -rc constqp -qp 105（×5）",
+      "status": "WARN",
+      "detail": "质量下探 -4.09 dB（超 1.5 dB）",
+      "evidence": [
+        "PSNR 41.67 dB  505 kbps  码率比 0.39×"
+      ]
+    },
+    {
+      "id": "C-av1-结论",
+      "group": "C",
+      "title": "AV1 的 -qp 结论",
+      "status": "WARN",
+      "detail": "VU 仿射值未落带、旧 ×3(63) 落带 ⇒ 复核仿射行/口径（size vs quality）",
+      "evidence": []
+    },
+    {
+      "id": "C-h264_nvenc",
+      "group": "C",
+      "title": "h264_nvenc -rc constqp -qp 21（= 基准轴直取）",
+      "status": "PASS",
+      "detail": "ΔPSNR -0.29 dB，码率 1.05×（带内）",
+      "evidence": [
+        "PSNR 45.46 dB  1362 kbps  码率比 1.05×"
+      ]
+    },
+    {
+      "id": "C-hevc_nvenc",
+      "group": "C",
+      "title": "hevc_nvenc -rc constqp -qp 21（= 基准轴直取）",
+      "status": "PASS",
+      "detail": "ΔPSNR -0.33 dB，码率 1.02×（带内）",
+      "evidence": [
+        "PSNR 45.43 dB  1316 kbps  码率比 1.02×"
+      ]
+    }
+  ],
+  "tol": {
+    "psnr": 1.5,
+    "vmaf": 2.0,
+    "rate_pass": [
+      0.65,
+      1.5
+    ]
+  }
+}

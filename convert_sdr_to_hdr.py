@@ -86,7 +86,8 @@ from typing import Dict, List, Optional, Tuple
 VERSION = "1.0"
 
 # 仓库外默认位置：与 VidUtils 同级，避免把模型权重纳入 git
-DEFAULT_MODEL_REPO = "/mnt/d/Workspace_Python/HDRTVNet-plus"
+# 相对脚本位置：../HDRTVNet-plus（兼容开发/生产环境）
+DEFAULT_MODEL_REPO = str(Path(__file__).resolve().parent.parent / "HDRTVNet-plus")
 
 # 帧在原始管道里的字节数：gbrp16le = 平面 G/B/R，各 16bit 大端无关（ffmpeg 侧小端）
 RAW_PIX_FMT = "gbrp16le"
@@ -158,6 +159,39 @@ def torch_install_hint() -> str:
         "      python3 -m pip install --break-system-packages torch numpy\n"
         "  · 或先用 --no-model 只验证编码链路（不需要 torch）"
     )
+
+
+def check_model_repo(model_repo: Path) -> Tuple[bool, str]:
+    """
+    检查模型仓库是否就绪。
+    Returns: (ready, message)
+    """
+    codes = model_repo / "codes"
+    weights = model_repo / "pretrained_models" / "Ensemble_AGCM_LE.pth"
+    
+    if not codes.is_dir():
+        return False, f"模型仓库不完整：{codes} 不存在"
+    if not weights.is_file():
+        return False, f"缺少预训练权重：{weights} 不存在"
+    return True, "模型仓库就绪"
+
+
+def check_torch_cuda() -> Tuple[bool, str]:
+    """
+    检查 torch 与 CUDA 可用性。
+    Returns: (available, message)
+    """
+    try:
+        import torch
+    except ImportError:
+        return False, "PyTorch 未安装"
+    
+    if torch.cuda.is_available():
+        name = torch.cuda.get_device_name(0)
+        mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        return True, f"CUDA 可用：{name} ({mem:.1f} GB)"
+    else:
+        return False, f"PyTorch 已安装 ({torch.__version__}) 但无 CUDA，将回退到 CPU 推理"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1012,9 +1046,36 @@ def _terminate(*procs) -> None:
 # ═══════════════════════════════════════════════════════════════════
 #  入口
 # ═══════════════════════════════════════════════════════════════════
+def print_env_status(args: argparse.Namespace) -> None:
+    """启动时打印环境状态，不自动安装、不自动 clone（生产环境策略）"""
+    print("── 环境检查 ──")
+
+    # FFmpeg
+    for tool in ("ffmpeg", "ffprobe"):
+        path = shutil.which(tool)
+        print(f"  {tool}: {'✓ ' + path if path else '✗ 未找到'}")
+
+    # PyTorch & CUDA
+    torch_ok, torch_msg = check_torch_cuda()
+    print(f"  PyTorch: {'✓ ' + torch_msg if torch_ok else '✗ ' + torch_msg}")
+
+    # 模型仓库
+    if not args.no_model:
+        repo = Path(args.model_repo)
+        repo_ok, repo_msg = check_model_repo(repo)
+        print(f"  模型仓库 ({repo}): {'✓ ' + repo_msg if repo_ok else '✗ ' + repo_msg}")
+        if not repo_ok:
+            print(f"    如需获取：git clone --depth 1 https://github.com/xiaom233/HDRTVNet-plus.git {repo}")
+    else:
+        print(f"  模型仓库: 跳过检查（--no-model）")
+
+    print()
+
+
 def main() -> int:
     check_tools()
 
+    # 先解析参数以便知道 --no-model 等标志
     try:
         # `--extra-args` 的取值自己切（Python 3.12 的 argparse 不吃开头的 `--`，
         # 见 _split_extra_args 的注释）；没写该参数时不动 argparse 给的默认值。
@@ -1029,6 +1090,9 @@ def main() -> int:
 
     if args.log:
         setup_log(args.log)
+
+    # 打印环境状态（dry-run 时也显示，方便确认）
+    print_env_status(args)
 
     src = Path(args.input)
     out = Path(args.output)

@@ -462,29 +462,96 @@ qp_range('av1_nvenc')                         # → (0, 255)
   训练配置层**，推理用不到，因此整套 BasicSR 依赖被绕开
 - **模型定义不复制代码**：上游升级只需重新 clone，本文件不用同步
 
-| 参数 | 说明 |
-|------|------|
-| `--input` / `-i` | 输入视频（必选） |
-| `--output` / `-o` | 输出视频（必选） |
-| `--model-repo` | HDRTVNet-plus 仓库目录，默认 `/mnt/d/Workspace_Python/HDRTVNet-plus`（仓库外，避免权重进 git） |
-| `--no-model` | **跳过神经网络**，只跑 ①→③ 编码链路 |
-| `--device` | `auto`（默认，有 CUDA 用 cuda）/ `cpu` / `cuda` |
-| `--threads` | torch CPU 线程数（默认 0 = 不干预） |
-| `--tile` / `--tile-overlap` | 分块推理边长与重叠（默认 0 = 整帧；4K 建议 1024，最小 24） |
-| `--crf` | x265 CRF，默认 20 |
-| `--preset` | x265 preset，默认 `slow` |
-| `--bit-depth` | 输出位深，默认 10（唯一可选值；SDR→HDR 必须 10bit） |
-| `--master-display` | mastering display 元数据；`--no-master-display` 可关闭 |
-| `--max-cll` | MaxCLL,MaxFALL，默认 `1000,400` |
-| `--audio` | `copy`（默认，流复制源音轨）/ `none` |
-| `--no-mod-crop` | 关闭向内裁到 8 的倍数（默认开） |
-| `--duration` / `--frames` | 只处理前 N 秒 / 前 N 帧（冒烟用） |
-| `--overwrite` | 覆盖已存在的输出 |
-| `--dry-run` | 只打印阶段计划与两条 ffmpeg 命令 |
-| `--log` | 全部输出追加写入日志文件 |
-| `--extra-args` | 追加任意 ffmpeg 参数（插在输出路径之前） |
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--input` / `-i`、`--output` / `-o` | — | 输入视频**文件或目录** / 输出文件或目录（必选） |
+| `--recursive` / `-r` | 关 | 递归扫描输入目录（批量模式） |
+| `--model-repo` | 与仓库同级的 `../HDRTVNet-plus` | HDRTVNet-plus 仓库目录（仓库外，避免权重进 git） |
+| `--no-model` | 关 | **跳过神经网络**，只跑 ①→③ 编码链路 |
+| `--device` | `auto` | 推理设备 `auto`（有 CUDA 用 cuda）/ `cpu` / `cuda` |
+| `--torch-threads` | `0` | torch CPU 线程数（0 = 不干预）。⚠ 旧版的 `--threads` 是这个含义，已改名 |
+| `--tile` / `--tile-overlap` | `0` / `0` | 分块推理边长与重叠（默认 0 = 整帧；4K 建议 1024，最小 24） |
+| `--codec` | `libx265` | 视频编码器（别名 `x265`/`hevc`/`svtav1`/`av1`… 自动归一）。可用 GPU 编码器但需**显式**指定，见下 |
+| `--decode` | `cpu` | 解码后端 `cpu` / `cuda` / `auto`（探测到 CUDA 才用） |
+| `--fallback-policy` | `auto` | 硬件不可用/失败时 `auto` 自动降级到 CPU 等价物并告警；`strict` 直接报错（退出码 2） |
+| `--crf` / `--cq` | 由基准轴换算 | 字面量质量值（原样下发；落到不支持该量纲的编码器时按等效表换算） |
+| `--crf-ref` / `--cq-ref` | — | 以统一基准轴（libx264 CRF / h264_nvenc CQ）给出质量，按等效表换算（与 `--crf`/`--cq` 互斥） |
+| `--quality-mode` | `quality` | 换算口径：`quality` 等质量（`QUALITY_MAP`）/ `size` 等体积（`SIZE_MAP`） |
+| `--qp` | — | 恒定 QP（只在 `--rc-mode constqp` 下生效；量程随编码器不同，AV1 为 0~255） |
+| `--rc-mode` | `auto` | NVENC 码率控制 `auto`/`constqp`/`vbr`/`cbr`（非 NVENC 编码器下告警忽略） |
+| `--lookahead` | — | 前向预测帧数 0~250（按编码器分别下发：x264/NVENC 用 `-rc-lookahead`，x265 写进 `-x265-params`，vp9/aom 用 `-lag-in-frames`） |
+| `--bitrate` | — | 目标码率（如 `8M`）；与质量参数并存 = 受码率约束的恒定质量（constqp 下不允许） |
+| `--nvenc-aq` | 关 | NVENC 自适应量化（`-spatial-aq 1 -temporal-aq 1`），仅在 `*_nvenc` 下生效 |
+| `--nvenc-tune` / `--nvenc-multipass` | — | NVENC 的 `-tune`（hq/ll/ull/lossless/uhq）与 `-multipass`（disabled/qres/fullres） |
+| `--preset` | 按编码器取 | CPU 软编 `medium`、GPU 硬编 `p4`、`libsvtav1` `8`；支持 x264 风格与 NVENC 风格双向映射 |
+| `--container` | 按编码器推导 | 输出容器扩展名（如 `.mp4` / `.mkv`） |
+| `--suffix` | `_hdr` | 批量/目录输出时自动生成名的后缀（如 `--suffix _HDR10`） |
+| `--color-range` | `pc` | 输出 color_range：`pc`（HDR10/PQ 交付惯例）/ `tv` |
+| `--audio` | `copy` | `copy` 流复制源音轨 / `none` 丢弃 |
+| `--audio-codec` / `--audio-bitrate` | `copy` / `128k` | 音频编码器与重编码码率（仅 `--audio-codec` 非 copy 时生效） |
+| `--bit-depth` | `10` | 输出位深，唯一可选值（SDR→HDR 必须 10bit） |
+| `--master-display` / `--no-master-display` / `--max-cll` | 见右 | mastering display 元数据（默认 BT.2020 常规值）/ 关闭它 / `MaxCLL,MaxFALL`（默认 `1000,400`） |
+| `--no-mod-crop` | 关（即默认裁齐） | 关闭向内裁到 8 的倍数 |
+| `--duration` / `--frames` | — | 只处理前 N 秒 / 前 N 帧（冒烟用；分段并行下禁用） |
+| `--workers` | `0`=自动 | 并行任务数（文件级） |
+| `--threads` | `0`=自动 | **每任务 FFmpeg 编码线程数**（只对软件编码器下发） |
+| `--mem-per-job` | `0`=按画像 | 单任务估计内存 GB（编码器画像 + NN 开销） |
+| `--sequential` | 关 | 强制顺序执行，显示单文件细粒度进度条 |
+| `--split-mode` | `auto` | 单文件并行路径：`auto`/`segment`/`workers`/`off`，见下 |
+| `--overwrite` | 关 | 覆盖已存在的输出（批量时已存在的文件默认**跳过**） |
+| `--dry-run` | 关 | 只打印环境/概览/计划与两条 ffmpeg 命令 |
+| `--log` | — | 全部输出追加写入日志文件 |
+| `--extra-args` | — | 追加任意 ffmpeg 参数（插在输出路径之前，输出路径永远是最后一个 token） |
 
 退出码：`0` 正常 / `1` ffmpeg 或推理失败 / `2` 参数错误
+
+> ⚠️ **本版有三处默认值变更**（升级时请注意，均为有意为之）：
+> ① `--crf` 默认从字面量 `20` 改为「按统一基准 `DEFAULT_REF=21` 逐编码器换算」
+> （`libx265` → CRF 21）；② `--preset` 默认从 `slow` 改为按编码器取（`libx265` → `medium`，
+> 与两个 vidcrop 脚本一致，见 CR-1）；③ `--threads` 现在是**每任务 ffmpeg 线程数**，
+> 原来的 torch 线程数旋钮改名为 `--torch-threads`。
+
+**批量与并行**
+
+输入给目录（配 `-r` 递归）即进入批量模式：按 `--workers`（默认按 CPU 核数与内存自动探测）
+并行处理多个文件，输出目录**保留源目录结构**、文件名加 `--suffix`（默认 `_hdr`）。
+单个大文件则由 `--split-mode` 决定是否在文件内并行：
+
+| 取值 | 行为 |
+|------|------|
+| `auto`（默认） | 多文件 → 文件级并行；**单文件且时长 ≥ 20s → 按 `segment` 切段并行**；否则不做 |
+| `segment` | 按时间均分 N 段，每段独立跑 ①→③，最后 `concat` 拼接（`-c copy`） |
+| `workers` | 单解码进程 + N 个推理**进程**（有序队列）+ 单编码进程；码率分配全局最优 |
+| `off` | 不做单文件并行（仅保留 `--tile` 的帧内分块） |
+
+> ⚠️ 两条路径各有取舍：`segment` 实现直接、能线性加速，但**各段独立编码 ⇒ 码率分配不是
+> 全局最优**，段边界可能有极小接缝、时长有 ~0.02s 量级的漂移；`workers` 无这些代价，但要走
+> 进程间传原始帧（每帧 `宽×高×6` 字节）且**每个推理进程各持一份 torch 模型**（内存 ×N），
+> 因此它在 CUDA 推理下被禁用（多进程各持一份 CUDA 上下文易崩）——那时请用 `segment`。
+
+**GPU 编解码与自动降级**
+
+`--codec hevc_nvenc` / `av1_nvenc` 可用，`--decode cuda` 可试硬件解码。默认**都不用**：
+`libx265` 是唯一能写完整 HDR10 静态元数据的交付编码器；而源是 SDR，解码在整条链里占比小，
+且硬解输出必须 `hwdownload` 回 CPU 再转 `gbrp16le`（`scale_cuda` 白名单无 16bit、
+`hwdownload` 无 `p016le`），收益有限。
+
+硬件路径不可用（无卡/驱动不匹配）或运行中失败时，按 `--fallback-policy auto` **自动降级**
+到 CPU 等价物并告警——降级时质量值会**按新编码器重新换算**（如 `--codec hevc_nvenc --cq 26`
+降级到 `libx265` 后得到 `-crf 21`，而不是把 CQ 值丢掉）。`strict` 则直接报错退出 2。
+
+> ⚠️ **NVENC 写不了 HDR10 静态元数据**（mastering display / MaxCLL，属编码器封装限制；
+> 色彩三参数与 10bit 位深仍保留）。显式用 `hevc_nvenc` 等时会显著告警；要完整 HDR10
+> 元数据请用 `libx265`。另：`--codec h264_nvenc` 会被**直接拒绝**（它只做 8bit，
+> 而 PQ 传输函数必须 10bit）。
+
+**输出信息**
+
+启动打印环境检查与概览（编码器/质量/解码/系统资源与并行度），逐文件显示进度条与 ETA，
+结束后打印汇总（完成/失败/跳过、累计用时、均速、峰值 fps）。每个成功的文件还会打印一张
+**转换前后的结构化对比**（分辨率、编码、像素格式、位深、色彩四参数、HDR 静态元数据、
+时长、帧数、音频、字幕、体积），`≠` 标出与源不同的项——SDR→HDR10 的正确性主要靠这些
+字段判断，而它们恰恰最难肉眼发现。
 
 **常用流程**
 
@@ -499,11 +566,23 @@ python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --dry-run
 # 3) 无 GPU / 无 torch 时先验证编码链路
 python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --no-model
 
-# 4) 完整流程
+# 4) 完整流程（默认 libx265 / 软解 / 单文件顺序）
 python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4
 
 # 5) 冒烟：前 6 帧、CPU 推理
 python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --frames 6 --device cpu
+
+# 6) 用统一基准轴给质量（libx264 CRF 21 的等质量换算；--quality-mode size 则等体积）
+python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --crf-ref 21
+
+# 7) NVENC 硬件编码（会告警 HDR10 静态元数据丢失）
+python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --codec hevc_nvenc --cq 26 --nvenc-aq
+
+# 8) 批量目录 + 文件级并行（输出加 _HDR 后缀、保留目录结构）
+python3 convert_sdr_to_hdr.py -i ./videos -o ./out -r --workers 2 --suffix _HDR
+
+# 9) 单文件切段并行（大文件；示意用 4 路）
+python3 convert_sdr_to_hdr.py -i big.mp4 -o big_hdr.mp4 --split-mode segment --workers 4
 ```
 
 **`--no-model` 的两个用途**（它不是「偷懒模式」）：验证 ①→③ 编码链路本身
@@ -518,6 +597,8 @@ python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --frames 6 --device cpu
 
 **依赖**：`--no-model` 只需 FFmpeg（numpy 可选，有则快 ~40 倍）；跑网络需额外装 torch。
 本机实测 `apt-get install python3-torch python3-numpy`（torch 2.9.1 / Python 3.14 可用）。
+GPU 编解码路径**额外需要**带对应编码器/加速器的 FFmpeg 与可用的显卡驱动（FFmpeg
+`-encoders` 只反映编译期选项，本脚本会在用时真跑一次探针确认）。
 
 **尺寸约束**：模型下采样三次，宽高须为 8 的倍数，`--mod-crop`（默认）自动向内裁齐；
 `--tile` 最小 24（条件网络要 4 次 stride-2 池化，块太小会让末层退化成 1x1，
@@ -1857,7 +1938,7 @@ vidutils/
 ├── vidcrop_cpu_v2.py         # CPU 并发裁剪增强版（推荐；AV1/VP9、别名、preset 映射、-ref 基准）
 ├── vidcrop_hwaccel.py        # 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL，6 级策略链）
 ├── convert_crf.py            # 质量换算表（被 v2 / hwaccel 依赖，单一事实来源）
-├── convert_sdr_to_hdr.py     # SDR→HDR10 转换（神经网络 HDRTVNet++ Ensemble_AGCM_LE；--no-model 只跑编码链路）
+├── convert_sdr_to_hdr.py     # SDR→HDR10 转换（HDRTVNet++ Ensemble_AGCM_LE；批量/并行/GPU 编解码/质量轴/自动降级，--no-model 只跑编码链路）
 ├── git-sync.sh               # 提交同步 shortcuts（fetch / pull origin main --no-rebase）
 ├── interp_2x_safe.sh         # 光流插帧 2x · GPU 专版（nvinterpolate + hevc_nvenc；环境探测 + -j 并行 + --SS/--TO/-T + TS 分片 + 断点恢复）
 ├── interp_2x_safe_v1.sh      # 同上的通用版（多一条 CPU 回退 minterpolate + libx265 与 --backend/--cpu-preset）
@@ -1947,14 +2028,19 @@ python Accessory/verify/verify_chroma_hook.py       # 产物色度自检的阈�
 python Accessory/verify/verify_rc_lookahead.py      # --rc-mode / --qp / --lookahead / --bitrate
 python Accessory/verify/verify_borrow_enhancement.py # 从 Video_Enhancement 借鉴的那批：恒定质量/0 档无损/AQ/降档重试 + --flag→--suffix 更名
 python Accessory/verify/verify_ratio_single_dim.py  # --crop-ratio + 单维度 → 按比例补全（三模式 + 两脚本 lockstep）
-python Accessory/verify/verify_sdr_to_hdr.py        # SDR→HDR10：gbrp16le 往返/双路径一致 + HDR10 单条 -x265-params + token 顺序 + 真编码 + 模型推理
+python Accessory/verify/verify_sdr_to_hdr.py        # SDR→HDR10 八组：帧往返/双路径一致 · 单条 -x265-params · token 顺序 · 参数校验 · 真编码 · 模型推理 · 新 CLI 面（质量轴/降级/rc 轴/容器） · 批处理与单文件并行
 bash   Accessory/verify/verify_decode_axis.sh       # CLI 层三轴正交（15 项）
 ```
 
-> `verify_sdr_to_hdr.py` 的六组里，前五组**不需要 GPU 也不需要 torch**（⑤ 会真跑一遍
-> 2s 短切片编码再用 ffprobe 校验产物的 HEVC Main10 / bt2020nc / smpte2084 / pc 与帧级
-> mastering display）；第 ⑥ 组需要 torch + 模型仓库，缺任一项自动跳过。
-> 开关：`--no-encode` 跳过真编码、`--no-model-test` 跳过模型推理。
+> `verify_sdr_to_hdr.py` 的八组里，①②③④⑦ **不需要 GPU 也不需要 torch**（③ 校验 token
+> 顺序与 HDR10 标签、⑦ 覆盖新的质量轴/编解码器/rc 轴/容器参数与降级路径）；⑤⑧ 会真跑一遍
+> 短切片编码（⑤ 用 ffprobe 校验产物的 HEVC Main10 / bt2020nc / smpte2084 / pc 与帧级
+> mastering display；⑧ 校验批量目录产出、`--suffix`、已存在跳过，以及分段并行的**帧数守恒**
+> 与拼接后 HDR10 标签不丢）；第 ⑥ 组需要 torch + 模型仓库，缺任一项自动跳过。
+> 开关：`--no-encode` 跳过真跑（⑤⑧）、`--no-model-test` 跳过模型推理（⑥）。
+>
+> ⚠️ GPU 相关的新路径（`--decode cuda` 的 hwdownload 转换、`hevc_nvenc` 实际编码、
+> `--nvenc-*` 轴、运行中降档重试）**本机无卡，只做了代码级与降级路径验证**，属待上机项。
 >
 > 其中 ① 的「numpy 快路径与纯 Python 兜底路径必须给出相同字节」是 2026-10-06 实测
 > 补的：numpy 路径的 `frame_to_raw` 曾把三通道堆到最后一维（HWC 交错 = `rgb48` 布局）

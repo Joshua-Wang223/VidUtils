@@ -355,6 +355,186 @@ else:
                 chk_true(f'⑥ 分块 {tile}+{ov} 无未写入的空洞',
                          np.isfinite(got).all(), '存在 NaN/Inf')
 
+# ═══════════════════════════════════════════════════════════════════
+print('── ⑦ 新 CLI 面：质量轴 / 编解码器 / rc 轴 / 容器（纯 CPU，dry-run）──')
+
+def enc_cmd(args):
+    """跑一次 dry-run，返回（退出码, 输出全文, 编码命令字符串）。"""
+    rc, out = run_script(['--input', str(SRC), '--output', str(WORK / 'o7.mp4'),
+                          '--no-model', '--dry-run'] + args)
+    return rc, out, cmd_of(out, 2)
+
+
+# ① 基准轴换算：quality（默认）与 size 两种口径必须给出不同的 libx265 CRF
+def enc_crf(args):
+    """跑 dry-run，取编码命令里 `-crf N` 的数值（没有则 None）。"""
+    rc, out, ec = enc_cmd(args)
+    m = re.search(r'-crf (\d+)', ec)
+    return rc, (int(m.group(1)) if m else None)
+
+rc, q_val = enc_crf(['--crf-ref', '30'])
+chk('⑦ --crf-ref 30（quality 口径）退出码', rc, 0)
+chk('⑦ quality 口径换算到 libx265（等质量表 → 31）', q_val, 31)
+rc, s_val = enc_crf(['--crf-ref', '30', '--quality-mode', 'size'])
+chk('⑦ size 口径换算到 libx265（等体积表 → 29）', s_val, 29)
+chk_true('⑦ 两种口径确实给出不同值（否则该参数是摆设）',
+         q_val != s_val, f'quality={q_val} size={s_val}')
+
+# ② 字面量同族原样下发；跨族换算
+rc, out, ec = enc_cmd(['--crf', '22'])
+chk_in('⑦ --crf 22 字面量原样下发', '-crf 22', ec)
+rc, out, ec = enc_cmd(['--cq', '26'])
+chk_in('⑦ --cq 落到 CPU 编码器时换算为 -crf', '-crf 21', ec)
+chk('⑦ 换算后的值不得与输入相同（防"静默丢值"）', '-cq 26' in ec, False)
+
+# ③ HDR10 能力守卫：8bit-only 编码器直接拒绝
+rc, out, ec = enc_cmd(['--codec', 'h264_nvenc'])
+chk('⑦ --codec h264_nvenc（只做 8bit）退出码', rc, 2)
+chk_in('⑦ 拒绝理由点明 10bit 是硬要求', '10bit', err_first(out))
+rc, out, ec = enc_cmd(['--codec', 'libx264'])
+chk('⑦ --codec libx264（能做 10bit 但非 HDR10 交付格式）应放行', rc, 0)
+chk_in('⑦ 但必须告警', 'HDR10 的交付格式', out)
+
+# ④ 降级链：本机无 NVENC → 自动降级 libx265，且质量值要按新编码器换算
+rc, out, ec = enc_cmd(['--codec', 'hevc_nvenc', '--cq', '26'])
+chk('⑦ hevc_nvenc 不可用时退出码仍为 0（auto 策略降级）', rc, 0)
+chk_in('⑦ 降级到 libx265 并入命令', '-c:v libx265', ec)
+chk_in('⑦ 降级后 --cq 26 换算成 -crf（质量值不得蒸发）', '-crf 21', ec)
+chk('⑦ 降级后不得残留 -cq', '-cq 26' in ec, False)
+rc, out, ec = enc_cmd(['--codec', 'hevc_nvenc', '--fallback-policy', 'strict'])
+chk('⑦ strict 策略下不可用必须报错', rc, 2)
+chk_in('⑦ strict 报错点明不允许降级', 'strict', err_first(out))
+
+# ⑤ 解码轴：默认 cpu；显式 cuda 在本机（无 CUDA）回退且告警
+rc, out = run_script(['--input', str(SRC), '--output', str(WORK / 'o7.mp4'),
+                      '--no-model', '--dry-run'])
+chk('⑦ 默认解码退出码', rc, 0)
+dec_cmd = cmd_of(out, 1)
+chk_in('⑦ 默认软件解码（解码命令里是 format=gbrp16le）', 'format=gbrp16le', dec_cmd)
+chk('⑦ 默认解码命令里不得出现 -hwaccel', '-hwaccel' in dec_cmd, False)
+rc, out, ec = enc_cmd(['--decode', 'cuda'])
+chk('⑦ --decode cuda 不可用时退出码仍 0（回退）', rc, 0)
+dec_cmd = cmd_of(out, 1)
+chk('⑦ 回退为软解（解码命令里不得出现 hwdownload）',
+    'hwdownload' in dec_cmd, False)
+chk('⑦ 回退为软解（不得残留 -hwaccel）', '-hwaccel' in dec_cmd, False)
+chk_in('⑦ 回退要有告警', '回退', out)
+
+# ⑥ rc 轴：constqp 的三条互斥规则 + lookahead 量程
+for label, extra in (
+        ('constqp 缺质量参数', ['--rc-mode', 'constqp']),
+        ('constqp 与 --bitrate 互斥', ['--rc-mode', 'constqp', '--qp', '20', '--bitrate', '8M']),
+        ('constqp 与字面量 --crf 互斥', ['--rc-mode', 'constqp', '--qp', '20', '--crf', '22']),
+        ('--lookahead 超上限 250', ['--lookahead', '300']),
+        ('--qp 非 constqp 下不生效但应放行', []),
+):
+    if extra:
+        rc, out, _ = enc_cmd(extra)
+        chk(f'⑦ {label}：退出码', rc, 2)
+        chk_true(f'⑦ {label}：有 [ERROR] 首行', bool(err_first(out)))
+
+rc, out, ec = enc_cmd(['--lookahead', '40'])
+chk('⑦ --lookahead 40 在 libx265 下并入 -x265-params（单条）', rc, 0)
+chk_in('⑦ lookahead 与 HDR 元数据同条', 'rc-lookahead=40', ec)
+chk('⑦ -x265-params 只发一条（两条是后者覆盖前者）',
+    ec.count('-x265-params'), 1)
+
+# ⑦ NVENC 专属轴的忽略告警必须可见（此前被 warn=None 吞掉）
+rc, out, ec = enc_cmd(['--nvenc-aq'])
+chk('⑦ --nvenc-aq 在非 NVENC 下退出码', rc, 0)
+chk_in('⑦ --nvenc-aq 忽略要有告警', '已忽略', out)
+chk('⑦ 非 NVENC 下不得下发 -spatial-aq', '-spatial-aq' in ec, False)
+
+# ⑧ 容器 / color-range / 音频
+rc, out, ec = enc_cmd(['--container', '.mkv'])
+chk('⑦ --container .mkv 生效（输出扩展名）', ec.rstrip().endswith('.mkv'), True)
+rc, out, ec = enc_cmd(['--color-range', 'tv'])
+chk_in('⑦ --color-range tv 落到 -color_range', '-color_range tv', ec)
+chk_in('⑦ 同时落到 setparams 的 range', 'range=tv', ec)
+rc, out, ec = enc_cmd(['--audio-codec', 'aac', '--audio-bitrate', '192k'])
+chk_in('⑦ 音频重编码', '-c:a aac', ec)
+chk_in('⑦ 音频码率', '-b:a 192k', ec)
+
+# ═══════════════════════════════════════════════════════════════════
+if ENCODE:
+    print('── ⑧ 批处理与单文件并行（真跑，--no-model）──')
+    BATCH_IN = WORK / 'batch_in'
+    BATCH_OUT = WORK / 'batch_out'
+    if not BATCH_IN.is_dir() or len(list(BATCH_IN.glob('*.mp4'))) < 3:
+        BATCH_IN.mkdir(parents=True, exist_ok=True)
+        for i in (1, 2, 3):
+            subprocess.run(
+                ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+                 '-f', 'lavfi', '-i', 'testsrc2=size=160x120:rate=6:duration=1',
+                 '-c:v', 'libx264', '-crf', '30', '-pix_fmt', 'yuv420p',
+                 str(BATCH_IN / f'c{i}.mp4')],
+                check=True, capture_output=True)
+
+    rc, out = run_script(['--input', str(BATCH_IN), '--output', str(BATCH_OUT),
+                          '-r', '--no-model', '--preset', 'ultrafast',
+                          '--suffix', '_HDR', '--overwrite'])
+    chk('⑧ 批量目录处理退出码', rc, 0)
+    made = sorted(p.name for p in BATCH_OUT.glob('*.mp4'))
+    chk('⑧ 三个文件都产出且后缀生效', made,
+        ['c1_HDR.mp4', 'c2_HDR.mp4', 'c3_HDR.mp4'])
+
+    # 已存在 + 无 --overwrite → 必须跳过（而不是报错或重编）
+    rc, out = run_script(['--input', str(BATCH_IN), '--output', str(BATCH_OUT),
+                          '-r', '--no-model', '--preset', 'ultrafast',
+                          '--suffix', '_HDR'])
+    chk('⑧ 已存在且未给 --overwrite：退出码仍 0', rc, 0)
+    chk_in('⑧ 报为跳过', '跳过', out)
+
+    # 单文件分段并行：时长/帧数必须守恒（段边界允许极小漂移）
+    SEG_SRC = WORK / 'seg_src.mp4'
+    if not SEG_SRC.exists():
+        subprocess.run(
+            ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+             '-f', 'lavfi', '-i', 'testsrc2=size=160x120:rate=5:duration=22',
+             '-f', 'lavfi', '-i', 'sine=frequency=440:duration=22',
+             '-c:v', 'libx264', '-crf', '30', '-pix_fmt', 'yuv420p',
+             '-c:a', 'aac', '-shortest', str(SEG_SRC)], check=True,
+            capture_output=True)
+    seg_out = WORK / 'seg_out.mp4'
+    rc, out = run_script(['--input', str(SEG_SRC), '--output', str(seg_out),
+                          '--no-model', '--preset', 'ultrafast',
+                          '--split-mode', 'segment', '--workers', '2',
+                          '--overwrite'])
+    chk('⑧ 分段并行退出码', rc, 0)
+    chk('⑧ 分段并行确实分了段', '分段并行' in out, True)
+
+    def _dur_frames(p):
+        r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                            '-show_entries', 'stream=nb_frames',
+                            '-show_entries', 'format=duration',
+                            '-of', 'json', str(p)],
+                           capture_output=True, text=True, encoding='utf-8',
+                           errors='replace')
+        d = json.loads(r.stdout or '{}')
+        v = (d.get('streams') or [{}])[0]
+        return float((d.get('format') or {}).get('duration') or 0), int(v.get('nb_frames') or 0)
+
+    d_src, f_src = _dur_frames(SEG_SRC)
+    d_out, f_out = _dur_frames(seg_out)
+    chk('⑧ 分段并行：帧数守恒', f_out, f_src)
+    chk_true('⑧ 分段并行：时长漂移 < 0.2s（段边界重编码所致）',
+             abs(d_out - d_src) < 0.2, f'源 {d_src:.3f}s 输出 {d_out:.3f}s')
+
+    # 分段产物的 HDR10 标签必须齐（-c copy 拼接不得丢元数据）
+    pr = subprocess.run(['ffprobe', '-v', 'error', '-print_format', 'json',
+                         '-show_streams', str(seg_out)],
+                        capture_output=True, text=True, encoding='utf-8',
+                        errors='replace')
+    vs = next((s for s in json.loads(pr.stdout)['streams']
+               if s.get('codec_type') == 'video'), {})
+    chk('⑧ 分段产物仍是 HEVC Main10', (vs.get('codec_name'), vs.get('profile')),
+        ('hevc', 'Main 10'))
+    chk('⑧ 分段产物色彩标签不被拼接破坏',
+        (vs.get('color_space'), vs.get('color_transfer'), vs.get('color_primaries')),
+        ('bt2020nc', 'smpte2084', 'bt2020'))
+else:
+    print('── ⑧ 批处理与单文件并行：跳过（--no-encode）──')
+
 print()
 if fails:
     print(f'✗ {len(fails)} 项不通过：')

@@ -12,7 +12,7 @@ bench_sdr_to_hdr.py — convert_sdr_to_hdr.py 的生产基准（2026-10-08）
      是个实操问题。）
   ② 执行路径：整条 vs 分段并行（`--split-mode segment`）vs 多进程推理
      （`--split-mode workers`），以及 `--tile` 分块推理的代价。
-  ③ 瓶颈分解：模型推理占多少、编码占多少、`--no-model` 相对全流程省多少。
+  ③ 瓶颈分解：不同模型变体（ensemble/agcm/le/hr）的推理速度差异。
 
 三条设计红线（都是本机实测踩出来的，改动前先读 memory 的对应条目）
 ────────────────────────────────────────────────────────────
@@ -25,8 +25,7 @@ bench_sdr_to_hdr.py — convert_sdr_to_hdr.py 的生产基准（2026-10-08）
 2. **「参数不同」≠「路径不同」，必须断言组合真的生效。**
    实测四类静默退化：8秒素材 + `--workers 4` 仍返回 `'off'`（`_SEGMENT_MIN_SECONDS`
    = 20.0 阈值，且内存画像把 workers 压到 1）；`--frames`/`--duration` 与分段互斥、
-   给了就一律降级 `'off'`；CUDA 推理下 `split-mode workers` 被降级；显式
-   `segment` + `--no-model` 反而是合法的。
+   给了就一律降级 `'off'`；CUDA 推理下 `split-mode workers` 被降级。
    ⇒ 本脚本抓 stdout 里的 `分段并行：N 段`（:4185）/ `单解码 + N 推理进程`（:4295）
    两行**确认路径生效**，否则把该组合标为 SKIP 而不是当成一个 baseline 报出去。
 
@@ -40,14 +39,15 @@ bench_sdr_to_hdr.py — convert_sdr_to_hdr.py 的生产基准（2026-10-08）
 
 分层矩阵
 ────
-  L1 编码器×质量    --no-model，跨编码器等质量对比（最快，不需要 torch）
-  L2 执行路径       segment / workers / tile 分块（需要 ≥20s 素材与 torch）
-  L3 瓶颈分解       no-model vs 全流程，量化模型推理占比
+  L1 编码器×质量    等质量锚定 crf-ref，跨编码器对比（需 torch + 模型）
+  L2 执行路径       segment / workers / tile 分块（需要 ≥20s 素材与 torch + 模型）
+  L3 完整流程       单模型完整推理（需 torch + 模型）
   L4 质量门禁       对抽样组合跑 VMAF（PQ 先 tonemap 到 8bit，n_subsample=1）
   C  并发/线程阶梯  单文件 workers=1/2/4（=分段数）与每任务 threads=1/2/4/8
   D  NVENC 组       hevc/av1_nvenc 的 -cq / -nvenc-aq / -tune uhq / rc-mode cbr
   E  解码/容器/音频 --decode cpu/cuda/auto、容器 mp4/mkv、音频 copy/none
   G  4K 分块推理    tile=0 / 1024+128 / 2048+256（1080p 整帧不吃内存，4K 才是主场）
+  M  模型变体对比   ensemble/agcm/le/hr 四种模型的推理速度与效果差异
 
 ⚠ 四组「看起来能测、实际在本机会退化」的轴已被显式拦住并标 SKIP（附原因）。
 这是刻意设计：退化轴会产出「几组一模一样」的耗时，那看起来像一个很确定的
@@ -183,6 +183,18 @@ _VMAF_TOL = 1.0
 # L1 默认的编码器矩阵。⚠ 只放**在 QUALITY_MAP 里**的编码器 —— 见文件头红线 3。
 # libx264 不在表内（靠回退 SIZE_MAP 恰好恒等），故不放进来。
 L1_CODECS = ("libx265", "libsvtav1", "libaom-av1", "librav1e")
+
+# 模型变体配置（与 convert_sdr_to_hdr.py 的 MODEL_VARIANTS 对齐）
+# ⚠ 根据 WorkBuddy 分析（HDRTVNet-plus/MODEL_VARIANTS_ANALYSIS.md）：
+# - LE 不能单独使用：它以 AGCM 输出为输入，直接喂原始 SDR 会输入失配
+# - AGCM + LE 两段式推理 ≠ Ensemble：Ensemble 权重经端到端联调，两段式用独立权重，性能不等价
+# - HR 是 Ensemble 的 GAN 微调版，架构相同但权重不同（感知质量增强），可单独使用
+# ⇒ 保留 ensemble（全功能，定量最优）、agcm（仅全局色调映射，极速/省显存）、hr（感知质量增强，同架构微调版）
+MODEL_VARIANTS = {
+    "ensemble": {"description": "AGCM + LE 级联（默认，定量最优）"},
+    "agcm": {"description": "全局色调映射（ConditionNet 仅，极速/省显存）"},
+    "hr": {"description": "感知质量增强版（GAN 微调，同架构不同权重）"},
+}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -334,7 +346,20 @@ def count_frames(path: Path) -> int:
 # ═══════════════════════════════════════════════════════════════════
 #  能力探测
 # ═══════════════════════════════════════════════════════════════════
-def detect_env(model_repo: Optional[Path] = None) -> Dict:
+# 模型变体配置（与 convert_sdr_to_hdr.py 的 MODEL_VARIANTS 对齐）
+# ⚠ 根据 WorkBuddy 分析（HDRTVNet-plus/MODEL_VARIANTS_ANALYSIS.md）：
+# - LE 不能单独使用：它以 AGCM 输出为输入，直接喂原始 SDR 会输入失配
+# - AGCM + LE 两段式推理 ≠ Ensemble：Ensemble 权重经端到端联调，两段式用独立权重，性能不等价
+# - HR 是 Ensemble 的 GAN 微调版，架构相同但权重不同（感知质量增强），可单独使用
+# ⇒ 保留 ensemble（全功能，定量最优）、agcm（仅全局色调映射，极速/省显存）、hr（感知质量增强，同架构微调版）
+_MODEL_WEIGHTS = {
+    "ensemble": "Ensemble_AGCM_LE.pth",
+    "agcm": "AGCM.pth",
+    "hr": "HR.pth",
+}
+
+
+def detect_env(model_repo: Optional[Path] = None, model_variant: str = "ensemble") -> Dict:
     """探测本机跑 benchmark 需要的能力。**每一项都实测**，不靠猜。"""
     import importlib.util
     has_torch = importlib.util.find_spec("torch") is not None
@@ -350,7 +375,8 @@ def detect_env(model_repo: Optional[Path] = None) -> Dict:
 
     repo = Path(model_repo) if model_repo else ROOT.parent / "HDRTVNet-plus"
     codes_ok = (repo / "codes").is_dir()
-    weights_ok = (repo / "pretrained_models" / "Ensemble_AGCM_LE.pth").is_file()
+    weight_file = _MODEL_WEIGHTS.get(model_variant, "Ensemble_AGCM_LE.pth")
+    weights_ok = (repo / "pretrained_models" / weight_file).is_file()
 
     cpu, cpu_src = _detect_cpu()
     mem_total, mem_avail, mem_src = _detect_memory()
@@ -445,7 +471,7 @@ def print_env(env: Dict) -> None:
     print()
     print("── 层可用性 ──")
     print(f"  L1 编码器×质量  : {'✓ 可跑' if env['ffmpeg'] else '✗ 需要 ffmpeg'}"
-          f"（--no-model，不需 torch）")
+          f"（需 torch + 模型）")
     print(f"  L2 执行路径     : {'✓' if env['model_ready'] else '✗ 缺模型仓库'}"
           f" 需 torch；分段并行还需素材 ≥{_SEGMENT_MIN_SECONDS:.0f}s")
     print(f"  L3 瓶颈分解     : ✓ 可跑（模型侧{'已就绪' if env['model_ready'] else '会 SKIP'}）")
@@ -456,6 +482,8 @@ def print_env(env: Dict) -> None:
           f"音频轴需源带音轨）")
     print(f"  G  4K 分块      : {'✓ 可跑' if env['model_ready'] else '✗ 需模型仓库'}"
           f"；⚠ CPU 上 4K 单帧约 89s，务必配 --frames 限制帧数")
+    print(f"  M  模型变体     : {'✓ 可跑' if env['model_ready'] else '✗ 需模型仓库'}"
+          f"（ensemble/agcm/le/hr 四种变体对比）")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -565,14 +593,15 @@ def build_matrix(layers: List[str], crf_ref: int,
     """按层生成组合矩阵。"""
     out: List[Combo] = []
 
-    # ── L1 编码器 × 质量（等质量锚定在 --crf-ref）──
+    # ── L1 编码器 × 质量（等质量锚定在 --crf-ref，必须有模型推理）──
     if "l1" in layers:
         for c in codec_list:
             out.append(Combo(
                 cid=f"l1.{c}", layer="l1",
                 desc=f"{c} 等质量(crf-ref={crf_ref})",
-                args=["--codec", c, "--crf-ref", str(crf_ref), "--no-model"],
+                args=["--codec", c, "--crf-ref", str(crf_ref)],
                 group="l1.codec",
+                need_torch=True, need_model=True,
             ))
 
     # ── L2 执行路径（需要 torch + 模型；分段需要长素材）──
@@ -596,14 +625,10 @@ def build_matrix(layers: List[str], crf_ref: int,
                 group="l2.tile", need_torch=True, need_model=True,
             ))
 
-    # ── L3 瓶颈分解（有模型 vs --no-model）──
+    # ── L3 瓶颈分解（有模型 vs --no-model 已移除，改为模型变体对比见 M 层）──
     if "l3" in layers:
         out.append(Combo(
-            cid="l3.nomodel", layer="l3", desc="仅编码链路（--no-model）",
-            args=["--no-model"], group="l3.infer",
-        ))
-        out.append(Combo(
-            cid="l3.full", layer="l3", desc="完整流程（含模型推理）",
+            cid="l3.full", layer="l3", desc="完整流程（ensemble 模型）",
             args=["--split-mode", "off", "--device", "cpu"],
             group="l3.infer", need_torch=True, need_model=True,
         ))
@@ -637,8 +662,9 @@ def build_matrix(layers: List[str], crf_ref: int,
             out.append(Combo(
                 cid=f"c.threads{t}", layer="c",
                 desc=f"每任务 ffmpeg 线程 threads={t}",
-                args=["--threads", str(t), "--split-mode", "off", "--no-model"],
+                args=["--threads", str(t), "--split-mode", "off"],
                 group="c.threads",
+                need_torch=True, need_model=True,
             ))
 
     # ── D NVENC 组（本机无卡 ⇒ 全部 SKIP，见 Combo.need_hw_codec 的说明）──
@@ -651,30 +677,34 @@ def build_matrix(layers: List[str], crf_ref: int,
             cid="d.plain", layer="d",
             desc=f"hevc_nvenc 等质量基线（crf-ref={crf_ref}，无调优）",
             args=["--codec", "hevc_nvenc", "--crf-ref", str(crf_ref),
-                  "--no-model", "--fallback-policy", "auto"],
+                  "--fallback-policy", "auto"],
             group="d.tune", need_hw_codec="hevc_nvenc", expect_codec="hevc_nvenc",
+            need_torch=True, need_model=True,
         ))
         for codec in ("hevc_nvenc", "av1_nvenc"):
             out.append(Combo(
                 cid=f"d.{codec}.cq", layer="d",
                 desc=f"{codec} -cq 档位（等质量换算）",
                 args=["--codec", codec, "--crf-ref", str(crf_ref),
-                      "--no-model", "--fallback-policy", "auto"],
+                      "--fallback-policy", "auto"],
                 group="d.codec", need_hw_codec=codec, expect_codec=codec,
+                need_torch=True, need_model=True,
             ))
         # NVENC 专属调优轴：必须与基线同 group 才能得到「相对无调优」的有效倍数。
         # 三者在非 NVENC 下只会被告警忽略，所以必须配 NVENC 编码器才测得到。
         out.append(Combo(
             cid="d.aq", layer="d", desc="hevc_nvenc + --nvenc-aq",
             args=["--codec", "hevc_nvenc", "--crf-ref", str(crf_ref),
-                  "--no-model", "--nvenc-aq"],
+                  "--nvenc-aq"],
             group="d.tune", need_hw_codec="hevc_nvenc", expect_codec="hevc_nvenc",
+            need_torch=True, need_model=True,
         ))
         out.append(Combo(
             cid="d.tune_uhq", layer="d", desc="hevc_nvenc + --nvenc-tune uhq",
             args=["--codec", "hevc_nvenc", "--crf-ref", str(crf_ref),
-                  "--no-model", "--nvenc-tune", "uhq"],
+                  "--nvenc-tune", "uhq"],
             group="d.tune", need_hw_codec="hevc_nvenc", expect_codec="hevc_nvenc",
+            need_torch=True, need_model=True,
         ))
         # ⚠ 必须带 --crf-ref：constqp 之外的 rc 模式仍由 -cq 决定质量，而缺了
         # 锚定就会用被测脚本的 default_quality_for(codec)（恒为 cq 26，等于
@@ -684,8 +714,9 @@ def build_matrix(layers: List[str], crf_ref: int,
             cid="d.rc_cbr", layer="d",
             desc="hevc_nvenc + rc-mode cbr（与基线同为 crf-ref 锚定）",
             args=["--codec", "hevc_nvenc", "--crf-ref", str(crf_ref),
-                  "--rc-mode", "cbr", "--bitrate", "8M", "--no-model"],
+                  "--rc-mode", "cbr", "--bitrate", "8M"],
             group="d.tune", need_hw_codec="hevc_nvenc", expect_codec="hevc_nvenc",
+            need_torch=True, need_model=True,
         ))
 
     # ── E 解码后端 / 容器 / 音频 ────────────────────────────────
@@ -700,27 +731,40 @@ def build_matrix(layers: List[str], crf_ref: int,
             out.append(Combo(
                 cid=f"e.decode.{dec}", layer="e",
                 desc=f"解码后端 {dec}",
-                args=["--decode", dec, "--no-model"],
+                args=["--decode", dec],
                 group="e.decode",
                 need_hw_decode=(dec != "cpu"),
+                need_torch=True, need_model=True,
             ))
         for cont in (".mp4", ".mkv"):
             out.append(Combo(
                 cid=f"e.container{cont}", layer="e",
                 desc=f"容器 {cont}",
-                args=["--container", cont, "--no-model"],
+                args=["--container", cont],
                 group="e.container",
+                need_torch=True, need_model=True,
             ))
         for au in ("copy", "none"):
             out.append(Combo(
                 cid=f"e.audio.{au}", layer="e",
                 desc=f"音频 {au}",
-                args=["--audio", au, "--no-model"],
+                args=["--audio", au],
                 group="e.audio", need_audio=(au != "none"),
                 expect_audio_mux=(au == "copy"),
+                need_torch=True, need_model=True,
             ))
 
-    # ── G 高分辨率（4K）：分块推理的真实主场 ─────────────────────
+    # ── M 模型变体对比 ──────────────────────────────────────────
+    # 对比 ensemble/agcm/le/hr 四种模型的推理速度与效果差异
+    if "m" in layers:
+        for variant in ("ensemble", "agcm", "le", "hr"):
+            out.append(Combo(
+                cid=f"m.{variant}", layer="m",
+                desc=f"模型变体 {variant} ({MODEL_VARIANTS[variant]['description']})",
+                args=["--model", variant, "--crf-ref", str(crf_ref)],
+                group="m.variant",
+                need_torch=True, need_model=True,
+            ))
     # 1080p 整帧推理不吃内存，所以分块的意义要在 4K 上才体现得出来。
     # ⚠ 实测 4K 单帧 CPU 推理约 **89 秒**（tile 1024+128），故这一层必须配合
     # `--frames`限制帧数，否则 10 秒 480 帧的素材单次要 ~12 小时。
@@ -1607,7 +1651,7 @@ def selftest() -> int:
     src = ROOT / "Accessory" / "temp" / "fixture_1080p.mp4"
     if src.exists():
         got, axis, cmdline = resolve_native_quality(
-            [str(src), "--codec", "libx265", "--crf-ref", "21", "--no-model"],
+            [str(src), "--codec", "libx265", "--crf-ref", "21", "--model", "ensemble"],
             tag="selftest")
         if got is None:
             fails.append("⑦ resolve_native_quality 没抓到质量值（报告会显示「质量值 —」）"
@@ -1622,7 +1666,7 @@ def selftest() -> int:
         # ⑦b librav1e 只认 -qp（实测 ref=21 → `-qp 64`）。若只认 -crf，它的
         # 「质量值」列会是空的 —— 而空格与「没测到」在报告里看起来一样。
         got_rav, axis_rav, _ = resolve_native_quality(
-            [str(src), "--codec", "librav1e", "--crf-ref", "21", "--no-model"],
+            [str(src), "--codec", "librav1e", "--crf-ref", "21", "--model", "ensemble"],
             tag="selftest_rav")
         chk("⑦b librav1e 的质量轴是 qp（不是 crf）", axis_rav, "qp")
         chk_true("⑦b librav1e 抓到了质量值", got_rav is not None,
@@ -1639,13 +1683,13 @@ def selftest() -> int:
         skipped_all = bool(md and md.group(1) == "0" and ms and ms.group(1) != "0")
         return (not skipped_all) and bool(_RE_DONE_MARK.search(text))
 
-    normal = ("  模型仓库: 跳过检查（--no-model）\n"
-              "推理        : 跳过（--no-model）\n"
+    normal = ("  模型仓库: 就绪\n"
+              "推理        : ensemble\n"
               "  ✔ 完成，用时 6.4s\n"
               "汇总        : 完成 1  失败 0  跳过 0  累计用时 6.4s  均速 4fps  峰值 5fps")
-    chk("⑧ 含『跳过』提示但真跑成了 → 仍算有效样本", _really_ran(normal), True)
+    chk("⑧ 含提示但真跑成了 → 仍算有效样本", _really_ran(normal), True)
 
-    skipped = ("  模型仓库: 跳过检查（--no-model）\n"
+    skipped = ("  模型仓库: 就绪\n"
                "待处理文件  : 0 个（另有 1 个跳过）\n"
                "⏭  跳过 fixture_1080p.mp4 (已存在，--overwrite 可覆盖)\n"
                "汇总        : 完成 0  失败 0  跳过 1  累计用时 0.0s")
@@ -1838,7 +1882,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 """)
     p.add_argument("--input", "-i", help="源视频（SDR）")
     p.add_argument("--layers", default="l1,l3",
-                   help="要跑哪些层，逗号分隔（默认 l1,l3；见文件头「分层矩阵」）")
+                   help="要跑哪些层，逗号分隔（默认 l1,l3；见文件头「分层矩阵」；"
+                        "可选：l1,l2,l3,l4,c,d,e,g,m）")
     p.add_argument("--crf-ref", type=int, default=CRF.DEFAULT_REF if hasattr(CRF, "DEFAULT_REF") else 21,
                    metavar="N", help="等质量锚点（libx264 CRF 基准，默认 21）")
     p.add_argument("--quality-mode", choices=("quality", "size"), default="quality",
@@ -1870,6 +1915,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--selftest", action="store_true", help="装置自检（不碰素材）")
     p.add_argument("--model-repo", default=None,
                    help=f"HDRTVNet-plus 仓库目录（默认 {ROOT.parent / 'HDRTVNet-plus'}）")
+    p.add_argument("--model", default="ensemble", choices=list(MODEL_VARIANTS.keys()),
+                   help="模型变体（默认 ensemble，用于 --env/--selftest 时检查对应权重文件）")
 
     g = p.add_argument_group("4K 素材制备（G 层用）")
     g.add_argument("--make-4k-from", default=None, metavar="SRC",
@@ -1946,7 +1993,7 @@ def main() -> int:
 
     CRF.set_quality_mode(args.quality_mode)
 
-    env = detect_env(Path(args.model_repo) if args.model_repo else None)
+    env = detect_env(Path(args.model_repo) if args.model_repo else None, args.model)
     if env["ffmpeg"] is None or env["ffprobe"] is None:
         print("[ERROR] 未找到 ffmpeg / ffprobe，无法做基准", file=sys.stderr)
         return 2
@@ -1981,7 +2028,7 @@ def main() -> int:
         return 2
 
     layers = [x.strip() for x in args.layers.split(",") if x.strip()]
-    bad = [x for x in layers if x not in ("l1", "l2", "l3", "l4", "c", "d", "e", "g")]
+    bad = [x for x in layers if x not in ("l1", "l2", "l3", "l4", "c", "d", "e", "g", "m")]
     if bad:
         print(f"[ERROR] 未知层：{bad}（可用 l1,l2,l3,l4,c,d,e,g）", file=sys.stderr)
         return 2

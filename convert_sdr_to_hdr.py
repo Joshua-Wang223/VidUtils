@@ -1872,6 +1872,10 @@ def _probe_encoder(codec: str) -> bool:
 
     结果按编码器名缓存（同一次运行里只探一次）。探测命令失败即视为不可用，
     不区分"没这个编码器"与"驱动/显存问题"——两者对调用方的结论一致：降级。
+
+    ⚠ 探针分辨率必须是 160×160：NVENC 有最小编码分辨率限制，64×64 低于该下限，
+    会导致在装有可用 NVENC 的机器上也被误判为不可用（驱动报 "Frame Dimension less
+    than the minimum supported value"）。与 vidcrop_hwaccel.py 的 _check_nvenc_available 保持一致。
     """
     with _HW_PROBE_LOCK:
         if codec in _HW_PROBE_CACHE:
@@ -1881,7 +1885,7 @@ def _probe_encoder(codec: str) -> bool:
     try:
         r = subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-             "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1:d=0.1",
+             "-f", "lavfi", "-i", "color=c=black:s=160x160:r=1:d=0.1",
              "-frames:v", "1", "-c:v", codec, "-f", "null", "-"],
             capture_output=True, text=True, timeout=30, check=False,
             env=_ffmpeg_env(),
@@ -2527,15 +2531,50 @@ def build_x265_params(master_display: Optional[str],
 # ═══════════════════════════════════════════════════════════════════
 #  模型侧：直接 import 上游定义，不复制代码
 # ═══════════════════════════════════════════════════════════════════
-def resolve_model_paths(model_repo: Path) -> Tuple[Path, Path]:
+# 模型变体配置：名称 -> (架构导入路径, 实例化参数, 权重文件名)
+# ⚠ 根据 WorkBuddy 分析（HDRTVNet-plus/MODEL_VARIANTS_ANALYSIS.md）：
+# - LE 不能单独使用：它以 AGCM 输出为输入，直接喂原始 SDR 会输入失配
+# - AGCM + LE 两段式推理 ≠ Ensemble：Ensemble 权重经端到端联调，两段式用独立权重，性能不等价
+# - HR 是 Ensemble 的 GAN 微调版，架构相同但权重不同（感知质量增强），可单独使用
+# ⇒ 保留 ensemble（全功能，定量最优）、agcm（仅全局色调映射，极速/省显存）、hr（感知质量增强，同架构微调版）
+MODEL_VARIANTS = {
+    "ensemble": {
+        "import": "models.modules.Ensemble_AGCM_LE_arch",
+        "class": "Ensemble_AGCM_LE",
+        "params": {"classifier": "color_condition", "cond_c": 6, "in_nc": 3, "out_nc": 3, "nf": 32, "act_type": "relu", "weighting_network": False},
+        "weight": "Ensemble_AGCM_LE.pth",
+        "description": "AGCM + LE 级联（默认，定量最优）"
+    },
+    "agcm": {
+        "import": "models.modules.Condition_arch",
+        "class": "ConditionNet",
+        "params": {"nf": 64, "classifier": "color_condition", "cond_c": 6},
+        "weight": "AGCM.pth",
+        "description": "全局色调映射（ConditionNet 仅，极速/省显存）"
+    },
+    "hr": {
+        "import": "models.modules.Ensemble_AGCM_LE_arch",
+        "class": "Ensemble_AGCM_LE",
+        "params": {"classifier": "color_condition", "cond_c": 6, "in_nc": 3, "out_nc": 3, "nf": 32, "act_type": "relu", "weighting_network": False},
+        "weight": "HR.pth",
+        "description": "感知质量增强版（GAN 微调，同架构不同权重）"
+    },
+}
+
+
+def resolve_model_paths(model_repo: Path, variant: str = "ensemble") -> Tuple[Path, Path, Dict]:
     """
-    校验模型仓库布局，返回 (codes 目录, 权重文件路径)。
+    校验模型仓库布局，返回 (codes 目录, 权重文件路径, 变体配置)。
 
     缺失即抛 ValueError，错误信息里给出 clone 指引。
     """
+    if variant not in MODEL_VARIANTS:
+        raise ValueError(f"未知模型变体: {variant}。可选: {', '.join(MODEL_VARIANTS.keys())}")
+    
     repo = Path(model_repo)
     codes = repo / "codes"
-    weights = repo / "pretrained_models" / "Ensemble_AGCM_LE.pth"
+    variant_cfg = MODEL_VARIANTS[variant]
+    weights = repo / "pretrained_models" / variant_cfg["weight"]
     if not codes.is_dir():
         raise ValueError(
             f"模型仓库不完整：{codes} 不存在。\n"
@@ -2548,12 +2587,12 @@ def resolve_model_paths(model_repo: Path) -> Tuple[Path, Path]:
             f"缺少预训练权重：{weights} 不存在。\n"
             f"HDRTVNet-plus 的权重随仓库一起分发（pretrained_models/，共约 7MB），"
             f"重新 clone 即可；若仓库是手工拷贝的，确认 pretrained_models/ 目录完整。")
-    return codes, weights
+    return codes, weights, variant_cfg
 
 
 class HdrTvNetPlus:
     """
-    HDRTVNet++ 的 Ensemble_AGCM_LE 级联模型（AGCM + LE 合成一层）。
+    HDRTVNet++ 模型（支持 ensemble/agcm/le/hr 四种变体）。
 
     上游是 BasicSR 框架（test.py + yml + dataset 类），但**推理链本身只依赖 torch**：
     models/modules/{Ensemble_AGCM_LE,Condition,HDRUNet3T1}_arch.py 与 arch_util.py
@@ -2568,9 +2607,10 @@ class HdrTvNetPlus:
     """
 
     def __init__(self, model_repo: Path, device: str = "auto",
-                 threads: int = 0, verbose: bool = True):
-        self.codes_dir, self.weights = resolve_model_paths(model_repo)
+                 threads: int = 0, verbose: bool = True, variant: str = "ensemble"):
+        self.codes_dir, self.weights, self.variant_cfg = resolve_model_paths(model_repo, variant)
         self.verbose = verbose
+        self.variant = variant
 
         try:
             import torch  # noqa: F401
@@ -2597,16 +2637,15 @@ class HdrTvNetPlus:
         if codes_str not in sys.path:
             sys.path.insert(0, codes_str)
         try:
-            from models.modules.Ensemble_AGCM_LE_arch import Ensemble_AGCM_LE
+            module = __import__(self.variant_cfg["import"], fromlist=[self.variant_cfg["class"]])
+            model_class = getattr(module, self.variant_cfg["class"])
         except Exception as exc:
             raise RuntimeError(
                 f"import 上游模型定义失败：{exc}\n"
                 f"已把 {codes_str} 加入 sys.path；若报的是 torch 相关错误，"
                 f"多半是 torch 版本过低。") from exc
 
-        self.net = Ensemble_AGCM_LE(classifier="color_condition", cond_c=6,
-                                    in_nc=3, out_nc=3, nf=32,
-                                    act_type="relu", weighting_network=False)
+        self.net = model_class(**self.variant_cfg["params"])
         state = torch.load(str(self.weights), map_location="cpu")
         # 上游 convert_pretrain_models.py 把 AGCM/LE 两个 .pth 合并成一份
         # 裸 OrderedDict（无 'params' 包装），键前缀为 'AGCM.' / 'LE.'，
@@ -2626,7 +2665,7 @@ class HdrTvNetPlus:
 
         if self.verbose:
             nparam = sum(p.numel() for p in self.net.parameters())
-            print(f"[模型] Ensemble_AGCM_LE 已加载：{self.weights}")
+            print(f"[模型] {self.variant_cfg['class']} ({self.variant}) 已加载：{self.weights}")
             print(f"[模型] 参数量 {nparam:,}，设备 {self.device}"
                   + (f"（{torch.cuda.get_device_name(0)}）"
                      if self.device == "cuda" else ""))
@@ -3308,23 +3347,35 @@ class SingleProgress:
         if not self._started:
             self._started = True
             sys.stdout.write("\n")
-        if j.progress <= 0.001:
-            tail = "  预计中...  "
-        elif j.progress < 1.0:
-            eta = elapsed * (1 - j.progress) / j.progress
-            tail = f"  剩余 {_fmt_time(eta)}   "
-        else:
-            tail = "  收尾中...  "
 
-        frames = f"{j.frame}/{j.total_frames}帧" if j.total_frames else f"{j.frame}帧"
-        fps = j.fps if j.fps > 0 else (j.frame / elapsed if elapsed > 0 else 0.0)
-        stage = f"{j.stage}  " if j.stage else ""
-        line = (
-            f"\r  [{_bar(j.progress)}] {j.progress * 100:5.1f}%  "
-            f"{frames}  "
-            f"fps={fps:5.1f}  speed={j.speed or '-':>6}  "
-            f"{stage}已用 {_fmt_time(elapsed)}{tail}{self._queue_tail(j.progress, elapsed)}   "
-        )
+        # 已知总帧数：显示百分比进度条；未知：仅显示已处理帧数、fps、用时
+        if j.total_frames > 0:
+            if j.progress <= 0.001:
+                tail = "  预计中...  "
+            elif j.progress < 1.0:
+                eta = elapsed * (1 - j.progress) / j.progress
+                tail = f"  剩余 {_fmt_time(eta)}   "
+            else:
+                tail = "  收尾中...  "
+            frames = f"{j.frame}/{j.total_frames}帧"
+            pct = j.progress * 100
+            bar = _bar(j.progress)
+            line = (
+                f"\r  [{bar}] {pct:5.1f}%  "
+                f"{frames}  "
+                f"fps={j.fps:5.1f}  speed={j.speed or '-':>6}  "
+                f"{(j.stage + '  ') if j.stage else ''}已用 {_fmt_time(elapsed)}{tail}"
+                f"{self._queue_tail(j.progress, elapsed)}   "
+            )
+        else:
+            # 未知总帧数：不显示百分比进度条，仅显示计数器
+            fps = j.fps if j.fps > 0 else (j.frame / elapsed if elapsed > 0 else 0.0)
+            stage = f"{j.stage}  " if j.stage else ""
+            line = (
+                f"\r  {j.frame}帧  "
+                f"fps={fps:5.1f}  speed={j.speed or '-':>6}  "
+                f"{stage}已用 {_fmt_time(elapsed)}   "
+            )
         sys.stdout.write(line)
         sys.stdout.flush()
 
@@ -3422,6 +3473,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     g = p.add_argument_group("模型")
     g.add_argument("--model-repo", default=DEFAULT_MODEL_REPO,
                    help=f"HDRTVNet-plus 仓库目录（默认 {DEFAULT_MODEL_REPO}）")
+    g.add_argument("--model", default="ensemble", choices=list(MODEL_VARIANTS.keys()),
+                   help="模型变体（默认 ensemble=AGCM+LE 级联；agcm=仅全局色调映射；le=仅局部增强；hr=超分辨率）")
     g.add_argument("--no-model", action="store_true",
                    help="跳过神经网络推理，只跑 SDR→PQ + HDR10 编码链路")
     g.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"),
@@ -4307,10 +4360,11 @@ def run_job(args: argparse.Namespace, job: Job, plan: Dict,
                         - int(round(float(plan["seg_start"]) * plan["fps"])))
     elif args.duration and plan["fps"] > 0:
         total = max(1, int(round(args.duration * plan["fps"])))
-    elif plan.get("total_frames"):
+    elif plan.get("total_frames") and plan["total_frames"] > 0:
         # 整条处理（未截断）：用源探测到的帧数，否则进度条会全程停在 0.0%
+        # ⚠ total_frames 可能为 0（ffprobe 探测不到），此时视为未知
         total = int(plan["total_frames"])
-    job.total_frames = total or 0
+    job.total_frames = total if total is not None else 0
 
     env = _ffmpeg_env()
     dec = subprocess.Popen(plan["decode_cmd"], stdout=subprocess.PIPE,
@@ -4361,9 +4415,11 @@ def run_job(args: argparse.Namespace, job: Job, plan: Dict,
                 job.fps = n_done / el
                 if job.fps > job.peak_fps:
                     job.peak_fps = job.fps
-            if total:
+            # 进度计算：已知总帧数时按百分比，未知时仅累计帧数（progress 保持 0，显示层处理）
+            if total is not None and total > 0:
                 job.progress = min(1.0, n_done / total)
-            if on_update and (now - last_cb >= 0.25 or (total and n_done == total)):
+            # 回调触发：每 0.25s 或 处理完最后一帧（已知总数时）
+            if on_update and (now - last_cb >= 0.25 or (total is not None and n_done == total)):
                 last_cb = now
                 on_update(job)
 
@@ -4897,12 +4953,12 @@ _MP_ARGS: Optional[Tuple[int, int, int, int]] = None
 
 
 def _mp_init(model_repo: str, device: str, torch_threads: int,
-             tile: int, tile_overlap: int, w: int, h: int) -> None:
+             tile: int, tile_overlap: int, w: int, h: int, variant: str = "ensemble") -> None:
     """子进程初始化：各进程独立加载一份模型（内存 ×N，见文件头说明）。"""
     global _MP_ENGINE, _MP_ARGS
     _MP_ARGS = (tile, tile_overlap, w, h)
     _MP_ENGINE = HdrTvNetPlus(Path(model_repo), device=device,
-                              threads=torch_threads, verbose=False)
+                              threads=torch_threads, verbose=False, variant=variant)
 
 
 def _mp_infer(buf: bytes) -> bytes:
@@ -4949,7 +5005,7 @@ def run_job_multiproc(args: argparse.Namespace, job: Job, meta: Dict,
         pool = ctx.Pool(processes=nproc, initializer=_mp_init,
                         initargs=(args.model_repo, resolve_infer_device(args),
                                   args.torch_threads, args.tile, args.tile_overlap,
-                                  w, h))
+                                  w, h, getattr(args, "model", "ensemble")))
     except Exception as exc:
         job.error = f"推理进程池创建失败：{exc}"
         return 1
@@ -5197,7 +5253,7 @@ def make_engine_factory(args: argparse.Namespace):
 
     def _make():
         return HdrTvNetPlus(Path(args.model_repo), device=args.device,
-                            threads=args.torch_threads)
+                            threads=args.torch_threads, variant=getattr(args, "model", "ensemble"))
 
     return _make
 

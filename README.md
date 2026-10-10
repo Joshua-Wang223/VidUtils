@@ -467,6 +467,7 @@ qp_range('av1_nvenc')                         # → (0, 255)
 | `--input` / `-i`、`--output` / `-o` | — | 输入视频**文件或目录** / 输出文件或目录（必选） |
 | `--recursive` / `-r` | 关 | 递归扫描输入目录（批量模式） |
 | `--model-repo` | 与仓库同级的 `../HDRTVNet-plus` | HDRTVNet-plus 仓库目录（仓库外，避免权重进 git） |
+| `--model` | `ensemble` | 模型变体：`ensemble`（默认，定量最优）/ `agcm`（仅全局色调映射，极速/省显存）/ `hr`（感知质量增强版，GAN 微调同架构） |
 | `--no-model` | 关 | **跳过神经网络**，只跑 ①→③ 编码链路 |
 | `--device` | `auto` | 推理设备 `auto`（有 CUDA 用 cuda）/ `cpu` / `cuda` |
 | `--torch-threads` | `0` | torch CPU 线程数（0 = 不干预）。⚠ 旧版的 `--threads` 是这个含义，已改名 |
@@ -661,8 +662,14 @@ python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --dry-run
 # 3) 无 GPU / 无 torch 时先验证编码链路
 python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --no-model
 
-# 4) 完整流程（默认 libx265 / 软解 / 单文件顺序）
+# 4) 完整流程（默认 libx265 / 软解 / 单文件顺序，ensemble 模型）
 python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4
+
+# 4b) 完整流程（AGCM 仅全局色调映射，极速/省显存）
+python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --model agcm
+
+# 4c) 完整流程（感知质量增强版，GAN 微调同架构）
+python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --model hr
 
 # 5) 冒烟：前 6 帧、CPU 推理
 python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --frames 6 --device cpu
@@ -2033,7 +2040,7 @@ vidutils/
 ├── vidcrop_cpu_v2.py         # CPU 并发裁剪增强版（推荐；AV1/VP9、别名、preset 映射、-ref 基准）
 ├── vidcrop_hwaccel.py        # 硬件加速裁剪（CUDA/Vulkan/VA-API/OpenCL，6 级策略链）
 ├── convert_crf.py            # 质量换算表（被 v2 / hwaccel 依赖，单一事实来源）
-├── convert_sdr_to_hdr.py     # SDR→HDR10 转换（HDRTVNet++ Ensemble_AGCM_LE；批量/并行/GPU 编解码/质量轴/自动降级，--no-model 只跑编码链路）
+├── convert_sdr_to_hdr.py     # SDR→HDR10 转换（HDRTVNet++ Ensemble_AGCM_LE/AGCM/HR；批量/并行/GPU 编解码/质量轴/自动降级/模型选择 --model {ensemble,agcm,hr}，--no-model 只跑编码链路）
 ├── git-sync.sh               # 提交同步 shortcuts（fetch / pull origin main --no-rebase）
 ├── interp_2x_safe.sh         # 光流插帧 2x · GPU 专版（nvinterpolate + hevc_nvenc；环境探测 + -j 并行 + --SS/--TO/-T + TS 分片 + 断点恢复）
 ├── interp_2x_safe_v1.sh      # 同上的通用版（多一条 CPU 回退 minterpolate + libx265 与 --backend/--cpu-preset）

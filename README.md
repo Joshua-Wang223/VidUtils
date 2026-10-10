@@ -487,8 +487,8 @@ qp_range('av1_nvenc')                         # → (0, 255)
 | `--container` | 按编码器推导 | 输出容器扩展名（如 `.mp4` / `.mkv`） |
 | `--suffix` | `_hdr` | 批量/目录输出时自动生成名的后缀（如 `--suffix _HDR10`） |
 | `--color-range` | `pc` | 输出 color_range：`pc`（HDR10/PQ 交付惯例）/ `tv` |
-| `--audio` | `copy` | `copy` 流复制源音轨 / `none` 丢弃 |
-| `--audio-codec` / `--audio-bitrate` | `copy` / `128k` | 音频编码器与重编码码率（仅 `--audio-codec` 非 copy 时生效） |
+| `--audio` | `copy` | `copy` 流复制源音轨 / `none` 丢弃。⚠ 源音轨比视频短时**自动降级为重编码并补静音**，以保住全部视频帧（见下方说明） |
+| `--audio-codec` / `--audio-bitrate` | `copy` / `128k` | 音频编码器与重编码码率。⚠ 只有非 copy 才能补静音（`apad` 与流复制不能共存）；音轨偏短时若已显式指定本项，保留你的选择、只补静音 |
 | `--bit-depth` | `10` | 输出位深，唯一可选值（SDR→HDR 必须 10bit） |
 | `--master-display` / `--no-master-display` / `--max-cll` | 见右 | mastering display 元数据（默认 BT.2020 常规值）/ 关闭它 / `MaxCLL,MaxFALL`（默认 `1000,400`） |
 | `--no-mod-crop` | 关（即默认裁齐） | 关闭向内裁到 8 的倍数 |
@@ -552,6 +552,101 @@ qp_range('av1_nvenc')                         # → (0, 255)
 **转换前后的结构化对比**（分辨率、编码、像素格式、位深、色彩四参数、HDR 静态元数据、
 时长、帧数、音频、字幕、体积），`≠` 标出与源不同的项——SDR→HDR10 的正确性主要靠这些
 字段判断，而它们恰恰最难肉眼发现。
+
+**字幕处理 `--subs`（2026-09-09 新增）**
+
+原先字幕从一开始就被丢弃（`-an -sn -dn` + 只 map 视频/音频），**单文件与批量行为一致**。
+现在 `auto`（默认）至少会**明确告警**，不再静默丢：
+
+```bash
+python3 convert_sdr_to_hdr.py -i in.mkv -o out.mkv            # 默认：告警「源含 N 条字幕轨，当前不保留」
+python3 convert_sdr_to_hdr.py -i in.mkv -o out.mkv --subs keep        # 透传字幕
+python3 convert_sdr_to_hdr.py -i in.mkv -o out.mp4 --subs keep --subs-index 2   # 选第 3 条轨
+python3 convert_sdr_to_hdr.py -i in.mkv -o out.mkv --subs burn        # 烧进画面（libass）
+```
+
+| 模式 | 行为 |
+|---|---|
+| `auto`（默认） | 不保留，但源含字幕时**告警**（轨数/语言/如何启用） |
+| `none` | 显式声明不要 |
+| `keep` | 透传；受容器/codec 限制；**与 `--split-mode segment` 互斥**（分段只切音频区间，字幕是全局单文件，各段独立编码再拼接会错位） |
+| `burn` | libass 烧进画面；**位图字幕烧不了**（libass 只认文本字幕） |
+
+`--subs-index` 默认 0（第一条）。多轨选择已用 33 轨素材
+（`../input_videos/The.Creature.Cases.S01E01...mkv`）实测正确（index 0=eng / 1=gre）。
+⚠ 该素材的字幕**从 31.3s 才开始**有事件 —— 截取没有字幕的区间会让 burn 报
+「导出得到 0 字节文件」，这是脚本会明确提示的真实情况，不是 bug。
+
+⚠ **容器/codec 矩阵**（实测，与音频那套同构）：**只有 mkv 能 `-c:s copy` 直传**；
+mp4/mov 收不了 subrip（`Could not find tag for codec subrip` ⇒ rc=234），需转
+`mov_text`；webm 需转 `webvtt`。⚠ **mp4 即使源已是 mov_text 也必须显式给
+`-c:s mov_text`** —— 给 `copy` 报 rc=234、完全不给报 rc=8「自动编码器选择失败」
+（源已是 mov_text 时它是无损直通）。
+
+⚠ **keep 在部分源上自动改走两阶段**（先编码、再 `-c copy` remux 挂字幕；不重编码、
+画质无损，只多一次 remux）。触发条件实测为「**源容器不提供各流时长**」（典型是 mkv）：
+此时「音频 + 字幕 + `-shortest`」共存会让 ffmpeg 产出**畸形容器**
+（rc=0、体积几 KB、视频帧读不出）。mp4 源（各流 duration 齐全）走单次编码。
+脚本会**明确告知**已改两阶段。
+
+⚠ burn/keep **都不需要「中间编码提质」**：burn 可直接吃脚本的中间格式 `gbrp16le`
+（仍是单次编码，无二次编码）；且实测烧字幕的码率代价仅 **1%**（同 crf 下
+194KB→196KB），提质 1-2 级属过度补偿。
+
+**音轨偏短时自动降级补静音（2026-10-09 实测）**
+
+复用源音轨时会下发 `-shortest`，而视频来自 `pipe:0`（父进程持续写入）。当**源音轨
+比视频短**时，ffmpeg 会在音频结束处就停止输出 ⇒ 视频被截短。修复前实测：
+
+| 源 | 产物 | 结果 |
+|---|---|---|
+| 音轨短 17s（视频 22s/550 帧） | — | **整条转换失败**（BrokenPipe） |
+| 音轨短 0.06s（真实素材 `test3.mp4`，视频 302 帧） | 299 帧 | 丢 3 帧 |
+
+现在脚本会**自动降级并补静音**，保住全部视频帧：
+
+| 场景 | 行为 | 实测产物 |
+|---|---|---|
+| 默认 `copy` + mp4/mkv | 降级为 **aac** + `-af apad` | v=550 完整、a=aac 22.006s |
+| **显式** `--audio-codec copy` | **同样降级为 aac** + `-af apad` | v=550 完整（见下方说明） |
+| 默认 `copy` + WebM | 降级为 **libopus**（容器只收 Opus/Vorbis） | a=opus 22.007s |
+| 显式 `--audio-codec libopus` | **保留你的选择**，只加 `apad` | a=opus、v=550 完整 |
+| `--audio none` | 不涉及，不降级 | v=550 完整、无音轨流 |
+| 音视频等长 / 音轨偏长 / 无音轨 | **不触发**（阈值 1 帧） | 无警告、行为不变 |
+
+- ⚠ **`--audio-codec copy` 关不掉降级**：显式写它照样降级补静音，脚本会**明确告知**
+  （「你显式指定的 `--audio-codec copy` 同样会被降级」）。原因是流复制与 `-af apad`
+  **不能共存**（ffmpeg rc=234），保住视频帧只能重编码 —— 保帧优先于音轨原样。
+  想维持流复制只有两条路：`--audio none`（出无声版）或换素材。
+- ⚠ **代价**：音频被重编码（非逐位保留），体积可能有微小变化。脚本每次降级都会告警。
+- ⚠ **阈值按帧不按秒**（≥1 帧）：实测 ffprobe 对**同源等长**素材报出的两流 duration
+  **完全相等**（偏差 0.00 帧），所以 1 帧不会被容器噪声误触发；等长偏差 0、音轨偏长为负，
+  都不越过阈值。⚠ 曾用「3 帧」导致真实素材 `test3.mp4`（音轨短 0.0597s = **1.79 帧**）
+  不触发降级，**静默丢 3 帧（302→299）且 EXIT=0、零告警** —— 阈值过高的代价是
+  「静默丢帧」，比多一次重编码严重得多。
+- ⚠ 分段并行下按**本段区间**判定，每段各自补静音（故告警会按段数打印多次，是对的）。
+  ⚠ 「按本段判定」在 2026-10-10 之前是**假的**：旧实现拿**全片音轨长**去减**本段视频长**
+  （两个数分属不同区间，差值没有物理意义）。实测 4 段 / 视频 44s：
+
+  | 音轨长 | 出问题的段 | 本段真实短 | 旧口径算出 | 旧结果 |
+  |---|---|---|---|---|
+  | 16s | 段1 `[11,22)` | 6s | 11−16 = **−5** ⇒ 判「不短」 | ✘ BrokenPipe **整条失败** |
+  | 30s | 段2 `[22,33)` | 3s | 11−30 = **−19** ⇒ 判「不短」 | ✘ BrokenPipe **整条失败** |
+  | 10s | 段1~3 | 11s | 11−10 = 1s ⇒ **碰巧判对** | ✔ 侥幸成功（最危险：靠运气） |
+
+  末段还有反向问题：`seg_dur=None` 时退回**全片**时长 ⇒ 本段真实短 11s 却报 34s（高估）。
+  现在统一按「本段视频区间 ∩ `[0, 全片音轨长]`」算交集，5/5 实测全通过、帧数全 1100 完整；
+  等长与音轨偏长素材仍**零告警**（无误触发）。
+
+同批修掉一个更隐蔽的病根：`probe_source()` 原先取**容器** `duration`（被最长流即
+音轨决定），于是「音轨明显长于视频」的素材（实测视频 5s + 音轨 20s）会按 20s 切段、
+每段期望 250 帧而实际只有 62 ⇒ **整条转换判失败**。现在改取视频流自己的 duration。
+
+⚠ `-shortest` 是**有意保留**的：它防的是音轨**偏长**时输出尾巴拖长（实测靠它把 20s
+音轨正确截到 5s）。另两个看似标准的替代方案实测无效：`-max_interleave_delta` 完全
+不影响 `-shortest` 的截断判定；`-t <视频时长>` 是输出选项、作用于所有流，两者都仍
+截到 5s。`-af apad` 才是根因解，但**要求重编码**（与流复制共存会 rc=234），这正是
+「自动降级」存在的原因。
 
 **常用流程**
 
@@ -1984,6 +2079,7 @@ vidutils/
 │   │   ├── calibrate_soft_offsets_nocache.py # 同上，但每次运行独立工作目录 + 打印 prep 的 md5（可审计）；--dense 把 libaom 扫描加密到 3 档间隔
 │   │   ├── loo_equal_quality.py             # LOO 留一交叉验证：等质量表的**过拟合门禁**（ΔVMAF < 1.0 是唯一判红口径）
 │   │   ├── convert_points_cache.py          # 标定数据迁移：旧 points_cache.json（整素材缓存）→ 新 points.json（逐点）
+│   │   ├── bench_sdr_to_hdr.py              # convert_sdr_to_hdr.py 的生产基准：同输入+同质量下测各编码器/执行路径/分块推理/并发/容器的总耗时差异（L1~L4 + C/D/E/G 四组扩展；--selftest 验装置、--env 看层可用性；⚠ SKIP≠通过）
 │   │   └── enum_cmds.py                     # 无 GPU 时 mock 远程能力、枚举脚本真正下发的命令
 ├── memory/                   # 工程记忆：工具背后的事实与踩坑，索引见 memory/MEMORY.md
 ├── Plan/                     # 立项任务书与过程归档（含 vidls 对话记录 .txt）
@@ -2107,6 +2203,80 @@ python3 Accessory/probe/verify_nvenc_quality_gpu.py --src '<源视频>'         
 python3 Accessory/probe/verify_nvenc_quality_gpu.py --expect-av1 --src '<源视频>'   # L40/Ada 交接：要求本卡真能编 AV1，否则 exit 2（防把静默 SKIP 当成"AV1 已验"）
 python3 Accessory/probe/verify_nvenc_quality_gpu.py --src '<源视频>' --json verification_report/nvenc_quality.json --md verification_report/nvenc_quality.md   # 落报告
 ```
+
+性能基准（`bench_sdr_to_hdr.py`，**不需要 GPU**：L1/C/E 只跑编码链路，L2/G 的模型推理走 CPU）：
+
+```bash
+python3 Accessory/probe/bench_sdr_to_hdr.py --selftest                # 装置自检，CPU-only，不碰素材
+python3 Accessory/probe/bench_sdr_to_hdr.py --env                      # 环境与各层可用性速查
+
+python3 Accessory/probe/bench_sdr_to_hdr.py -i '<源视频>' --layers l1,l3            # 快测：编码器等质量对比 + 瓶颈分解
+python3 Accessory/probe/bench_sdr_to_hdr.py -i '<≥20s源视频>' --layers l1,l2,l3,c,e # 全量：含分段并行/多进程/分块/并发阶梯
+python3 Accessory/probe/bench_sdr_to_hdr.py -i '<4K源视频>' --layers g --frames 2 # 4K 分块推理（⚠ 必须限帧，见下）
+python3 Accessory/probe/bench_sdr_to_hdr.py --make-4k-from '../input_videos/<某个长视频>.mp4'  # 先从中点截 10s 造 4K 素材，再跑上一行
+python3 Accessory/probe/bench_sdr_to_hdr.py -i '<源视频>' --json /tmp/b.json --md /tmp/b.md \\
+    --vmaf l1.libx265,l1.libsvtav1                              # 落报告 + 只对两个组合跑 VMAF 质量门禁
+```
+
+**分层矩阵**（`--layers` 逗号分隔，默认 `l1,l3`）：
+
+| 层 | 内容 | 前置条件 |
+|---|---|---|
+| L1 | 编码器×等质量对比 | ffmpeg（不需 torch） |
+| L2 | 执行路径：segment / workers / tile 分块 | torch + 模型 + 素材 ≥20s |
+| L3 | 瓶颈分解（no-model vs 全流程） | ffmpeg；模型侧需 torch |
+| L4 | VMAF 质量门禁 | libvmaf + tonemap（`--vmaf` 显式指定才跑） |
+| C | 并发/线程阶梯：workers=1/2/4、threads=1/2/4/8 | 分段轴需素材 ≥20s |
+| D | NVENC：`-cq` / `-nvenc-aq` / `-tune uhq` / `rc-mode cbr` | 需**真正可用**的硬编 |
+| E | 解码后端 / 容器 mp4·mkv / 音频 copy·none | 解码轴需 CUDA；音频轴需源带音轨 |
+| G | 4K 分块推理：tile=0 / 1024+128 / 2048+256 | torch + 模型 + 4K 素材 |
+
+> ⚠ **四组轴在无卡/无音轨机器上会退化，已被显式拦住并标 SKIP（附原因）**，因为退化轴会产出
+> 「几组一模一样」的耗时——那看起来像一个很确定的结论、其实什么都没测到：
+> D 组（无卡时 `--codec hevc_nvenc` **静默降级到 libx265 且 ffmpeg token 逐字不变**）、
+> E 组解码轴（无卡时 `--decode cuda` 的 `-vf` 链与 cpu 完全相同）、
+> E 组音频轴（无音轨素材上 `copy` 与 `none` 命令逐字相同）、
+> C 组 workers（单文件下 workers = 分段数，且**非单调**——实测 workers=4 比 2 慢约 30%，属过订）。
+> E 组的**容器轴是有效的**（mkv 与 mp4 都保住 HDR10 静态元数据，所以它测的是 mux 开销）。
+
+> ⚠ **G 层务必配 `--frames`**：实测 4K 单帧 CPU 推理约 **89 秒**（tile 1024+128），
+> 10 秒 480 帧的素材单次要 ~12 小时。但**加了 `--frames` 会让 C 组的分段轴被降级成 'off'**
+> （被测脚本 `convert_sdr_to_hdr.py:4079` 的截断/分段互斥）—— 两者互斥，脚本会提前预告。
+> ⚠ 4K **整帧**（`--tile 0`）的结果**取决于机器是否空闲**：机器空闲时能跑完（实测 237.7s、
+> 峰值内存 4.13GB），并发占用时会被 OOM killer 杀（退出码 -9，dmesg 有
+> `Killed process … anon-rss:5554004kB`）。所以它被标成 `OOM（预期）` 而不是 FAIL，
+> 且报告必须带本机可用内存——**别在机器被别的重负载占满时采信基准数字**。
+
+> ⚠ **D 组在「有卡机」上也可能静默降级**：NVENC 运行中失败时会按 `--fallback-policy auto`
+> 降级到 libx265 **重跑并成功**（rc=0）。此时 stdout 概览的「编码器：hevc_nvenc」读的是
+> `args.codec`（降级从不回写），三条降级告警的前缀也不在采集范围内 ⇒ **都抓不到**。
+> 唯一硬证据是产物的 `stream_tags=encoder`，所以基准会断言「实际编码器 == 期望编码器」，
+> 不符即判 FAIL 并写明「名义 hevc_nvenc、实际写出的是 libx265」——
+> 否则 GPU 机上 D 组会把 libx265 的耗时当成 NVENC 的数据报出去。
+
+> ⚠ **G 层报告里那张 tile 处理量表，算法与被测脚本的分块循环同构**（边缘块补到 8 的倍数，
+> **不是**补到满 tile，`convert_sdr_to_hdr.py:2389-2390`）。按此计算，4K 下
+> tile=512/1024/2048 的总处理量**都是 10.51 Mpx / 1.27x**（三档基本相同）——
+> 所以 **tile 档位之间的速度差不该归因于「重叠重复计算」**。分块推理的目的是
+> **压内存**（4K 整帧峰值 4GB+、内存更紧的机器会被 OOM 杀），不是提速。
+
+> **倍数怎么读**：每组会印出 `基准 = <组合名>`；若组内首格 FAIL/SKIP 会提示「基准顺延」。
+> ⚠ 本机墙钟噪声很大（同一命令 6 次实测 44.5–68.8s，±42%），**小于噪声带的倍数差异
+> 不应被当成确定的加速比**；`min` 口径取的是最幸运的一次，会略偏乐观。
+
+> 它测的是「**同一输入 + 同输出质量**下各参数/路径的总耗时」，有三条与直觉相反的读数须知：
+> ① **不信被测脚本自报的 fps** —— `convert_sdr_to_hdr.py:3023` 的均速用**源探测帧数**而非实际输出帧数，
+> `--frames` 截断时会打印出「均速高于峰值」的矛盾值；本脚本自测墙钟并自己数帧。
+> ② **SKIP ≠ 通过**：8 秒素材配 `--workers 4` 仍会被静默降级成整条处理（分段并行的时长阈值是 20s），
+> 此时该组合标 SKIP 并写明原因，不会产出「名义分段、实则整条」的假对比数据。
+> ③ **「质量值」列是真正下发的原生值，且标明是哪根轴**，不是 `--crf-ref` 的数字——该基准处
+> **没有任何编码器是恒等映射**（libx265→CRF21、libsvtav1→CRF29、libaom-av1→CRF26、
+> **librav1e→QP64**、NVENC→CQ）；不同轴的数字**不可横向比较**，故列里带轴名。
+> 不在 `convert_crf.QUALITY_MAP` 里的编码器会被直接拒绝测量（否则会静默按等体积口径换算）。
+
+> ⚠ VMAF 质量门禁有两个硬约束：PQ/BT.2020 **不能直接喂 libvmaf**（不报错但 crf 20~32 区间曲线压平、
+> 只差 1.6 分，判据分辨率不足），两侧都要先 tonemap 到 8bit；且 **`n_subsample` 必须 = 1**
+> （实测 1→91.0、8→94.3，虚高 3.3 分）。故耗时基准与 VMAF 门禁分开跑，门禁只对抽样组合跑。
 
 > `Accessory/probe/t4_acceptance.py` 是那轮改动**剩下的验收面**的收口（A 落点 / B 运行期 / C 无损）。
 > 每格都带一列**「本机状态」**（本机已验 / 只能单元级 / 需上机）—— 它回答"跑完是绿的是否等于

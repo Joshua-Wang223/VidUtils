@@ -93,6 +93,26 @@ convert_sdr_to_hdr.py – SDR 视频转 HDR10（基于 HDRTVNet++，ICCV2021/JCV
 --suffix               批量/目录输出的文件名后缀（默认 "_hdr"）
 --color-range          输出 color_range：pc（默认，HDR10 交付惯例）/ tv
 --audio                copy（默认）/ none
+                       ⚠ 源音轨比视频短时会**自动降级为重编码并补静音**
+                       （`-af apad`），以保住全部视频帧：`-shortest` 会在音频
+                       结束处停止输出，实测音轨短 17s 的素材原本**整条转换失败**。
+                       默认降到 aac（WebM 下降到 libopus）；已显式指定其它
+                       编码器（libopus 等）时保留你的选择、只补静音
+                       ⚠ 阈值 1 帧：实测真实素材 test3.mp4（音轨短 0.0597s
+                       =1.79 帧）原本会静默丢 3 帧，故宁可多一次重编码
+--subs                 auto（默认）/ none / keep / burn
+--subs-index              N       选源里第几条字幕轨（0=第一条，默认）
+                       字幕原先从一开始就被丢弃（单文件与批量**行为一致**）；`auto` 现在
+                       至少会**明确告警**而非静默丢。keep 受容器/codec 限制、与
+                       `--split-mode segment` 互斥；burn 用 libass 烧进画面。
+                       ⚠ burn 与 keep **都不需要提质**：burn 可直接吃中间格式
+                       gbrp16le（仍是单次编码）；keep 在必要时的两阶段走 `-c copy`
+                       （不重编码、画质无损，只多一次 remux）
+--audio-codec          copy（默认）/ aac / libopus …
+                       ⚠ 非 copy 才能补静音：`apad` 与 `-c:a copy` 不能共存
+                       （ffmpeg rc=234）
+                       ⚠ **显式写 copy 也关不掉自动降级**：音轨偏短时照样降级补静音
+                       （保帧优先于音轨原样），脚本会明确告知
 --audio-codec / --audio-bitrate
                        音频编码器（默认 copy）与重编码码率（默认 128k）
 --master-display / --no-master-display / --max-cll
@@ -472,7 +492,27 @@ _WEBM_AUDIO_CODECS = {"opus", "vorbis"}
 _WEBM_AUDIO_FALLBACK = "libopus"
 _BITMAP_SUBS = {"dvd_subtitle", "dvb_subtitle", "dvb_teletext",
                 "hdmv_pgs_subtitle", "xsub"}
-_MP4_FAMILY = {"mp4", "m4v", "mov"}
+
+# ── 字幕透传的容器分派（2026-10-09 实测，与音频那套同构）──────────────
+# 实测矩阵（源：mkv 里的 subrip 软字幕，ffmpeg 9.0.2）：
+#   mkv + -c:s copy✓ 直传成功
+#   mp4  + -c:s copy    ✗ rc=234 "Could not find tag for codec subrip"
+#   mp4  + -c:s mov_text ✓
+#   mov  + -c:s copy    ✗ 同 mp4（subrip 不被 QuickTime 容器接受）
+#   webm + 任何          ✗ rc=234（WebM 只收 WebVTT；且本条报错同时含视频编码限制）
+# ⇒ 结论：**只有 mkv 能直传**；mp4/mov 需转 mov_text；webm 需转 webvtt。
+_MP4_SUB_FALLBACK = "mov_text"
+_WEBM_SUB_FALLBACK = "webvtt"
+# webm 只接受 WebVTT 字幕
+_WEBM_SUB_CODECS = {"webvtt"}
+# 这些容器可以原样 copy 文本字幕（不转换仍安全）
+_SUBS_DIRECT_CONTAINERS = {".mkv", ".mka"}
+# ⚠ 这里**必须带前导点**：调用方传的是 `dst.suffix`（形如 ".mp4"）。
+# 音频那边同名常量 `_MP4_FAMILY = {"mp4","m4v","mov"}` 不带点是**因为**它收到的是
+# 已经 `normalize_container()` 过的值；照抄过来会让 `".mp4" in {...}` 恒为 False
+# ⇒ 静默落到「未知容器」分支返回 copy ⇒ 不下发 -c:s ⇒ mp4 自动编码器选择失败 rc=8。
+# （实测踩过：`-c:s mov_text` rc=0 ✓ / `copy` rc=234 / 不给 rc=8。）
+_MP4_FAMILY = {".mp4", ".m4v", ".mov"}
 
 # ── 解码轴 ────────────────────────────────────────────────────────
 # auto：探测到可用的 CUDA(hwaccel) 才启用，否则软解。本脚本**默认 cpu**（保守），
@@ -1648,6 +1688,80 @@ def _source_audio_codecs(src: Path) -> List[str]:
         return []
 
 
+def _has_libass() -> bool:
+    """本机 ffmpeg 是否有 libass（`subtitles`/`ass` 滤镜）—— burn 的前提。"""
+    try:
+        r = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-filters"],
+                       capture_output=True, text=True, timeout=30, check=False)
+        return ("subtitles" in r.stdout) and (" ass " in f" {r.stdout} ")
+    except Exception:
+        return False
+
+
+def _probe_json(path: Path, extra: Optional[List[str]] = None) -> Dict:
+    """一次 ffprobe 拿 JSON；失败返回 {}（不抛，调用方自己判空）。
+
+    与 `probe_video_summary` 同风格（本脚本原先没有通用封装，各处直接
+    `json.loads(r.stdout)`）。字幕导出要先知道源字幕轨的真实 codec（决定导成
+    .ass 还是 .srt），才需要这个「只取一条流一个字段」的轻量查询。
+    """
+    cmd = ["ffprobe", "-v", "error", "-print_format", "json"] + (extra or []) \
+        + [str(path)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace",
+                           timeout=60, check=False)
+        return json.loads(r.stdout or "{}")
+    except Exception:
+        return {}
+
+
+def _export_subtitle(src: Path, index: int,
+                     work_sub_dir: Path, tag: str) -> Path:
+    """把源里第 index 条字幕导出成文件，供 libass 渲染（burn 用）。
+
+    为什么必须先导出：libass 的 `subtitles=` 滤镜吃的是**文件路径**，不吃容器内嵌流。
+    ⚠ 格式保持原样（subrip→.srt、ass→.ass），**不要**一律导成 srt ——
+    ass 带样式（字体/颜色/定位），导成 srt 会全部丢失（实测 libass 读 srt 时
+    只能用它的默认样式）。
+    """
+    work_sub_dir.mkdir(parents=True, exist_ok=True)
+    # 先探一次真实 codec 决定扩展名（ass 的样式不能降级成 srt）
+    probe = _probe_json(src, ["-select_streams", f"s:{index}",
+                              "-show_entries", "stream=codec_name"])
+    st_ = (probe.get("streams") or [{}])[0]
+    codec = (st_.get("codec_name") or "").lower()
+    ext = ".ass" if codec == "ass" else ".srt"
+    out = work_sub_dir / f"{tag}_s{index}{ext}"
+    if out.exists():
+        try:
+            out.unlink()
+        except OSError:
+            pass
+    # -y覆盖、-nostdin 避免无终端时卡住；失败会抛 ValueError（带原因）
+    r = subprocess.run(
+        ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+         "-y", "-i", str(src), "-map", f"0:s:{index}", str(out)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=300, check=False)
+    if r.returncode != 0 or not out.exists():
+        raise ValueError(
+            f"导出字幕（index={index}）失败，rc={r.returncode}："
+            f"{(r.stderr or '').strip()[:200]}")
+    # ⚠ **必须查非空**：mkv 的字幕轨是「稀疏」的—— 某段时间内没有字幕事件时，
+    # 导出**rc=0 但文件 0 字节**（实测：截取 300~310s 的 10s 片段，那段无字幕 ⇒
+    # 「Output file is empty, nothing was encoded」）。只判rc+exists 会把它当成功，
+    # 于是 libass 拿到空文件、编码端报 "Unable to open …srt" ⇒ 整条转换失败，
+    # 而真正的信息（这段没字幕）被埋在三层报错之下。
+    if out.stat().st_size <= 0:
+        raise ValueError(
+            f"源字幕轨 index={index} 在本片段时间内**没有任何字幕事件**"
+            f"（导出得到 0 字节文件）。\n"
+            f"    · 换一条轨：`--subs-index N`（用 --env 或 ffprobe 看有哪些轨）；\n"
+            f"    · 或用 `--subs keep`（不烧录、只透传，不受此限）。")
+    return out
+
+
 def resolve_audio_codec_for_container(audio_codec: str, container_ext: str,
                                       src: Optional[Path] = None,
                                       warn: Optional[Callable[[str], None]] = None) -> str:
@@ -1683,6 +1797,56 @@ def resolve_audio_codec_for_container(audio_codec: str, container_ext: str,
                  f"已改用 {_WEBM_AUDIO_FALLBACK}")
         return _WEBM_AUDIO_FALLBACK
     return audio_codec
+
+
+def resolve_subtitle_codec_for_container(container_ext: str,
+                                         src_codec: str,
+                                         src: Optional[Path] = None,
+                                         warn: Optional[Callable[[str], None]] = None
+                                         ) -> Optional[str]:
+    """按目标容器决定字幕编码（`--subs keep` 用）。返回 None 表示「直接 copy」。
+
+    与 `resolve_audio_codec_for_container` 同构的分派，但**多一层位图字幕判断**：
+    位图字幕（PGS/DVD/DVB teletext/xsub）无法转码成文本容器格式（mov_text/webvtt），
+    只能原样 copy —— 而 mkv 之外没有容器收它⇒ 这种情况必须报错而不是静默降级。
+
+    实测依据见 `_MP4_SUB_FALLBACK` 上方的矩阵注释。
+    """
+    ext = (container_ext or "").lower()
+    src_codec = (src_codec or "").lower()
+
+    if src_codec in _BITMAP_SUBS:
+        # 位图字幕：只有 mkv 能原样带走，其它容器一律做不到。
+        if ext in _SUBS_DIRECT_CONTAINERS:
+            return None                      # copy
+        if warn:
+            warn(f"源字幕是位图格式（{src_codec}），无法转成 {_MP4_SUB_FALLBACK}"
+                 f"/{_WEBM_SUB_FALLBACK}；且{ext} 容器不接受它。\n"
+                 f"    · 请输出到 .mkv 以原样保留，或改用 --subs burn"
+                 f"（位图字幕**不能**烧录，libass 只认文本字幕）、或 --subs none")
+        return None                          # 交给上层报错/跳过
+
+    if ext in _SUBS_DIRECT_CONTAINERS:
+        return None                          # mkv：copy 最稳，不转码
+
+    if ext in _MP4_FAMILY:
+        #⚠ **不能**因为「源已经是 mov_text」就返回 None（copy）——实测那样会失败：
+        #   `-c:s copy` 到 mp4 ⇒ rc=234（copy 不做容器适配）；
+        #   完全不给 `-c:s` ⇒ rc=8「Automatic encoder selection failed」。
+        #   必须**显式**下发 -c:s mov_text（源是 mov_text 时它是无损直通）。
+        if src_codec and src_codec != "mov_text" and warn:
+            warn(f"{ext} 不接受 {src_codec} 字幕，已转为 {_MP4_SUB_FALLBACK}")
+        return _MP4_SUB_FALLBACK
+
+    if ext == ".webm":
+        if src_codec in _WEBM_SUB_CODECS:
+            return None
+        if warn:
+            warn(f"WebM 只支持 WebVTT 字幕，{src_codec} 已转为 {_WEBM_SUB_FALLBACK}")
+        return _WEBM_SUB_FALLBACK
+
+    # 未知容器：copy（ffmpeg 会自己报错，比我们猜要诚实）
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1925,7 +2089,63 @@ def probe_source(path: Path) -> Dict:
             src_bits = 12
 
     has_audio = any(s.get("codec_type") == "audio" for s in streams)
-    duration = _frac_to_float((data.get("format") or {}).get("duration")) or 0.0
+    # 音频/视频流的 duration 是否缺失（2026-09-09，`--subs keep` 的两阶段判据）。
+    #实测（ffmpeg 9.0.2，rawvideo 管道输入 + `-map 音频` + `-map 字幕` + `-shortest`）：
+    #   mkv 源（v/a 的 duration=N/A、只有 format.duration=12s）⇒ 产出**畸形 mkv**
+    #        （3688 字节、ffprobe 报 Duplicate element、视频帧读不出）
+    #   mp4 源（v/a/s 的 duration 都有值）⇒ 正常（65821 字节 / 50 帧 / 三流齐全）
+    # ⇒ 触发条件是**音频或视频流拿不到自己的 duration**，`-shortest` 无法比较各流
+    #    时就会写坏容器。已在这种源上改走两阶段（先编码、再 remux 挂字幕）。
+    _dur_known = True
+    for _t in ("video", "audio"):
+        _s = next((x for x in streams if x.get("codec_type") == _t), None)
+        if _s is not None and (_frac_to_float(_s.get("duration")) or 0.0) <= 0:
+            _dur_known = False
+            break
+    stream_durations_known = _dur_known
+    # 音轨自身的时长（2026-10-09 加）。用于判断「音轨比视频短」——那是`-shortest`
+    # 会截断视频的前提条件。容器/视频流时长都拿不到这个信息（容器时长取最长流，
+    # 视频流时长只描述视频），所以必须单独探测音频流。
+    audio_duration = 0.0
+    for s in streams:
+        if s.get("codec_type") != "audio":
+            continue
+        # ⚠ `_frac_to_float` 解析失败时返回 **None**（不是 0.0）。mkv 的字幕流
+        # duration 常为 None，实测「带字幕的 mkv」会让下面的 `<= 0` 直接抛
+        # TypeError（`'NoneType' <= 'int'`）⇒ 整条转换崩溃。
+        # ⇒ 这里必须用 `or 0.0` 把 None 一并归零，而不是只挡 `<= 0`。
+        audio_duration = (_frac_to_float(s.get("duration"))
+                          or _frac_to_float((s.get("tags") or {}).get("DURATION"))
+                          or 0.0)
+        if audio_duration <= 0:
+            # 部分容器（mkv/webm）不在 stream.duration 里给时长，回退读
+            # format.duration 与视频流时长的差值：多数封装里音频比视频短一点，
+            # 差值即音频长度。估不准只影响告警文案，不影响任何处理行为。
+            fmt_dur = _frac_to_float((data.get("format") or {}).get("duration")) or 0.0
+            vid_dur = _frac_to_float(video.get("duration")) or 0.0
+            if fmt_dur > 0 and vid_dur > 0 and fmt_dur > vid_dur:
+                audio_duration = vid_dur      # 保守：宁可认为不短
+        break
+    # ⚠ **duration 必须取视频流自己的，不能取容器值**（2026-10-09 修）。
+    #
+    # 缺陷实测（`/tmp/long_audio.mp4`：视频 5s/125 帧 + 音轨 20s）：
+    #   format.duration = 20.0（被**最长流即音轨**决定）而 stream.duration = 5.0
+    #   ⇒ 旧代码拿 20s 当视频时长，于是：
+    #     ① 分段并行按 20s 切段，每段期望 20×25/2 = 250 帧，实际只有 ~62 帧
+    #        ⇒ 触发 run_job 的截断检测，**整条转换判失败**（实测 EXIT=1
+    #          「输出不完整：期望 250 帧、实际 125 帧」）；
+    #     ② 分段边界按错误时长切，拼接后音画必然错位。
+    #
+    # 为什么此前没暴露：绝大多数素材音视频等长，容器值与视频流值一致
+    # （实测 short_audio / equal_audio / test3 三者全部相同）。只有
+    #「音轨明显长于视频」这种少见素材才会命中。
+    #
+    # 取值顺序：视频流 duration →（缺失时）nb_frames/fps →（再缺失时）容器 duration。
+    # 最后那步兜底仍会被音轨污染，但那种素材本身就没有可靠时长可依，
+    # 且nb_frames 通常可用；宁可退到「帧数正确」也不要退到「时长错误」。
+    duration = _frac_to_float(video.get("duration")) or 0.0
+    if duration <= 0:
+        duration = _frac_to_float((data.get("format") or {}).get("duration")) or 0.0
 
     # 帧数：优先用容器自报，缺失时按 duration×fps 估（供进度条与汇总用；估不准只会
     # 让进度条的百分比略有偏差，不会影响实际处理帧数）
@@ -1948,6 +2168,19 @@ def probe_source(path: Path) -> Dict:
         "color_primaries": (video.get("color_primaries") or "").lower(),
         "color_transfer": (video.get("color_transfer") or "").lower(),
         "has_audio": has_audio,
+        "audio_duration": audio_duration,
+        "stream_durations_known": stream_durations_known,
+        # 字幕轨清单（2026-10-09 加，`--subs` 需要）。每项含 index/codec/language/
+        # is_bitmap —— burn 时位图格式（PGS/DVD 等）**烧不了**（libass 只认文本字幕），
+        # keep 时位图也无法 copy 到 mp4。
+        "subs": [
+            {"index": i,
+             "codec": (s.get("codec_name") or "").lower(),
+             "language": ((s.get("tags") or {}).get("language") or ""),
+             "is_bitmap": (s.get("codec_name") or "").lower() in _BITMAP_SUBS}
+            for i, s in enumerate(
+                [x for x in streams if x.get("codec_type") == "subtitle"])
+        ],
         "duration": duration,
         "nb_frames": nb_frames,
     }
@@ -2035,6 +2268,21 @@ class EncodeSettings:
     # 拼起来音画会逐段错位。None 表示整条（不切）。
     seg_start: Optional[float] = None
     seg_dur: Optional[float] = None
+    # 音视频各自的时长（秒）。用于在拼命令时判断「音轨是否比视频短」——
+    # 那是 `-shortest` 会截断视频的前提条件（见 build_encode_cmd 里的告警）。
+    audio_duration: float = 0.0
+    video_duration: float = 0.0
+    # 音轨比视频短 ⇒ 已自动把音频从「流复制」降级为重编码，并对音频加 `-af apad`
+    # 补静音到视频长度（否则 `-shortest` 会在音频 EOF 处截断视频）。设False 时
+    # 一切照原样；见 build_plan 里的降级判定与 _audio_pad_needed。
+    audio_pad: bool = False
+    # ── 字幕（--subs，2026-09）─────────────────────────────────────
+    subs_mode: str = "none"          # 实际生效的模式（auto 在无字幕时会退成 none）
+    subs_index: int = 0              # 选中的源字幕轨序号
+    subs_map: Optional[str] = None   # keep 用：给 -map 的 spec（如 "1:s:0"）
+    subs_codec: Optional[str] = None  # keep 用：None=copy，否则强制转换码
+    subs_burn_file: str = ""          # burn 用：导出的字幕文件路径
+    subs_two_stage: bool = False      # keep 用：需remux 挂字幕（源流时长缺失时）
 
 
 def _hdr_vf(color_range: str = "pc") -> str:
@@ -2046,6 +2294,24 @@ def _hdr_vf(color_range: str = "pc") -> str:
     return (f"scale=out_color_matrix=bt2020nc:out_range={color_range},"
             "setparams=colorspace=bt2020nc:color_primaries=bt2020:"
             f"color_trc=smpte2084:range={color_range}")
+
+
+def build_subs_remux_cmd(stage1: Path, src: Path, out: Path,
+                         subs_index: int, subs_codec: Optional[str],
+                         ffmpeg: str = "ffmpeg") -> List[str]:
+    """阶段2 命令：把字幕 `-c copy`（必要时转码）挂进已编码好的产物。
+
+    ⚠ 全程 `-c copy`（除字幕容器不兼容时）⇒ **不重编码、画质无损**，只是多一次
+    remux。这也是「burn 不需要提质」的对偶：keep 的两阶段同样不损伤画质。
+    """
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+           "-i", str(stage1), "-i", str(src),
+           "-map", "0:v", "-map", "0:a?", "-map", f"1:s:{subs_index}"]
+    cmd += ["-c", "copy"]
+    if subs_codec:
+        cmd += ["-c:s", subs_codec]
+    cmd.append(str(out))
+    return cmd
 
 
 def build_encode_cmd(width: int, height: int, fps: float,
@@ -2083,9 +2349,49 @@ def build_encode_cmd(width: int, height: int, fps: float,
             a_in += ["-ss", f"{st.seg_start:.6f}"]
         if st.seg_dur is not None:
             a_in += ["-t", f"{st.seg_dur:.6f}"]
-        cmd += a_in + ["-i", str(src), "-map", "0:v:0", "-map", "1:a:0?", "-shortest"]
+        cmd += a_in + ["-i", str(src), "-map", "0:v:0", "-map", "1:a:0?"]
+        # ── 字幕透传的 `-map`（--subs keep）───────────────────────
+        # ⚠ 位置很讲究：必须夹在 `1:a:0?` 与 `-shortest` **之间**。
+        #   · 放在 `-shortest` **之后** ⇒ 命令变成「…-shortest -i src -map…」，
+        #     而 `-i` 是**输入选项**、`-shortest` 是**输出选项**，ffmpeg 要求输入
+        #     选项在前 ⇒ 编码端立刻 BrokenPipe（实测「编码端提前退出」）。
+        # ⚠ `-map` 必须给**具体 index**（`1:s:N`），给 `-map 1:s` 会带出全部字幕轨。
+        if st.subs_map:
+            cmd += ["-map", st.subs_map]
+        cmd += ["-shortest"]
+        # ⚠ `-shortest` 保留是有意的（它防的是**音轨比视频长**时输出尾巴拖长，
+        # 实测音轨 20s / 视频 5s 的素材靠它把音轨正确截到 5s）。
+        #
+        # 「音轨比视频短」的副作用已在 **build_plan 里先修掉**：那里会把
+        # audio_codec 从 copy 降级为 aac/libopus 并置 `st.audio_pad=True`
+        # （见 `_audio_pad_needed`），于是音频被 apad 补长、不再短于视频，
+        # `-shortest` 也就不会截断视频。
+        #
+        # ⚠ 兜底告警：若走到这里仍是 copy 且音轨确实偏短，说明降级没生效
+        #   （例如调用方直接构造 EncodeSettings 而没走 build_plan）。
+        #   补静音需要重编码，而 `apad` 与 `-c:a copy` 不能共存（ffmpeg rc=234），
+        #   所以这里只能提示、不能自己修。
+        if warn and not st.audio_pad and st.audio_duration and st.video_duration:
+            _short = st.video_duration - st.audio_duration
+            _lost = _short * fps
+            if _lost >= _AUDIO_PAD_MIN_FRAMES:
+                warn(f"源音轨比视频短 {_short:.2f}s（约 {int(_lost)} 帧）且音频仍是"
+                     f"流复制（未走 build_plan 的自动降级）：`-shortest` 会丢掉这些帧。"
+                     f"改用 `--audio-codec aac` 可补静音保住帧数。")
 
-    cmd += ["-vf", _hdr_vf(st.color_range), "-c:v", st.codec]
+    # ── 字幕 burn：把 libass 片段**接在 _hdr_vf 之前** ──
+    # ⚠ 顺序理由（实测两种顺序都可行，但语义不同）：字幕先按**源色域**渲染，
+    #   随后的 scale/setparams 再把整帧（含字幕）一起转到 BT.2020/PQ ⇒ 字幕颜色
+    #   与画面一致。反过来（先转 HDR 再烧）字幕会按 PQ/BT.2020 渲染再被转一次，
+    #   白字会偏色/过亮。
+    # ⚠ libass 能直接吃 gbrp16le（实测），所以 burn **不需要中间编码** ——
+    #   整条链仍是「解码→NN 推理→一次编码」，不存在二次编码的画质损失。
+    _vf = _hdr_vf(st.color_range)
+    if st.subs_burn_file:
+        _sub_path = str(st.subs_burn_file).replace("\\", "\\\\") \
+                                .replace(":", r"\:").replace("'", r"\'")
+        _vf = f"subtitles='{_sub_path}',{_vf}"
+    cmd += ["-vf", _vf, "-c:v", st.codec]
 
     # ── 质量轴（与 vidcrop_cpu_v2.py 的 build_encoder_options_v2 同序同判）──
     if encoder_supports_qp(st.codec):
@@ -2142,10 +2448,23 @@ def build_encode_cmd(width: int, height: int, fps: float,
     # ── 音频（按容器修正：WebM 只收 Opus/Vorbis，必要时代用 libopus 重编码）──
     audio_codec = resolve_audio_codec_for_container(st.audio_codec, out.suffix, src,
                                                     warn)
+    # 音轨比视频短时已在上面把 audio_codec 降级为重编码（见 _audio_pad_needed 的
+    # 调用处）；这里只负责下发它依赖的 `-af apad`。⚠ `-af` 与 `-c:a copy`
+    # **不能共存**（ffmpeg 明确报 "Filtergraph 'apad' was specified, but codec
+    # copy was selected" ⇒ rc=234），所以 apad 只在已降级为重编码时下发。
     if audio_codec != "none" and has_audio:
+        if st.audio_pad:
+            # 补静音到视频长度：`-shortest` 于是按视频收尾（音轨不再更短），
+            # 既保住全部视频帧，也让音画时长对齐。
+            cmd += ["-af", "apad"]
         cmd += ["-c:a", audio_codec]
         if audio_codec.lower() != "copy" and st.audio_bitrate:
             cmd += ["-b:a", st.audio_bitrate]
+
+    # ── 字幕编码（--subs keep；burn 无需 -c:s，已烧进画面）──────────
+    # None = copy（mkv 直传 / 已是容器原生格式）；否则按容器强制转换码。
+    if st.subs_map and st.subs_codec:
+        cmd += ["-c:s", st.subs_codec]
 
     # ── HDR10 静态元数据 + rc/lossless 键：**只有 libx265 能真正写入** ──
     # `-x265-params` 是 libx265 的私有选项：别的编码器收到它只会被**静默忽略**
@@ -3191,9 +3510,24 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     g.add_argument("--color-range", default="pc", choices=("pc", "tv"),
                    help="输出 color_range（默认 pc=full range，HDR10/PQ 的交付惯例）")
     g.add_argument("--audio", default="copy", choices=("copy", "none"),
-                   help="音频处理（默认 copy 流复制；none = 丢弃）")
+                   help="音频处理（默认 copy 流复制；none = 丢弃）。"
+                        "源音轨比视频短时会**自动降级为重编码并补静音**"
+                        "（-af apad）以保住全部视频帧（默认降 aac，WebM 降 libopus）")
+    g.add_argument("--subs", default="auto",
+                   choices=("auto", "none", "keep", "burn"),
+                   help="字幕处理：auto（默认，保持现状**不保留**字幕，但源含字幕时"
+                        "会告警）/ none（同 auto，显式声明不要）/ keep（透传到产物，"
+                        "受容器与 codec 限制）/ burn（烧进画面，需 libass）")
+    g.add_argument("--subs-index", type=int, default=0, metavar="N",
+                   help="选源里的第几条字幕轨（0=第一条，默认）。"
+                        "keep=透传这一条；burn=烧这一条。"
+                        "⚠ 位图字幕（PGS/DVD/DVB 等）既不能透传到 mp4 也不能 burn")
     g.add_argument("--audio-codec", default="copy",
-                   help="音频编码器（默认 copy；重编码可用 aac / libopus）")
+                   help="音频编码器（默认 copy；重编码可用 aac / libopus）。"
+                        "⚠ 只有非 copy 才能补静音（apad 与流复制不能共存，"
+                        "ffmpeg rc=234）；音轨偏短时若已显式指定本项，则保留你的"
+                        "选择并只补静音，不会改写成别的编码器。"
+                        "⚠ **显式写 copy 也关不掉自动降级** —— 保住视频帧优先于音轨原样")
     g.add_argument("--audio-bitrate", default="128k",
                    help="音频重编码码率（默认 128k，仅 --audio-codec 非 copy 时生效）")
     g.add_argument("--master-display", default=DEFAULT_MASTER_DISPLAY,
@@ -3250,7 +3584,8 @@ def normalize_container(container: Optional[str]) -> Optional[str]:
     return c.lower()
 
 
-def validate_args(args: argparse.Namespace) -> None:
+def validate_args(args: argparse.Namespace,
+                  argv_argv: Optional[List[str]] = None) -> None:
     """参数校验与归一化。违反约定抛 ValueError（调用方转成退出码 2）。
 
     顺序（与 vidcrop_cpu_v2.py 的 validate_and_finalize_args 大体对齐）：
@@ -3425,6 +3760,20 @@ def validate_args(args: argparse.Namespace) -> None:
             # --audio-codec 的优先级高于 --audio copy（两者语义重叠，必须说清楚）
             print(f"提示：--audio-codec {args.audio_codec} 优先于 --audio copy，"
                   f"音轨将重编码。")
+    # 用户是否**显式**写了 --audio-codec（2026-10-09 加）。用途：音轨偏短时脚本
+    # 会自动降级补静音（否则 -shortest 会丢视频帧），而「显式指定 copy 却被改写」
+    # 与「默认值 copy 被改写」对用户的意义不同 —— 前者明确覆盖了用户意图，
+    # 提示必须区分，否则用户会以为 `--audio-codec copy` 是能关掉降级的开关。
+    #
+    # ⚠ 判据不能用 `args.audio_codec != "copy"`：分不出「默认」与「显式 copy」。
+    #   也**不能扫 `sys.argv`** —— main() 里 `--extra-args` 之后的参数是给
+    #   ffmpeg 的（`_split_extra_args` 已把它们切走），扫全量 argv 会把
+    #   `--extra-args -- --audio-codec copy` 误判成「用户显式指定了脚本参数」。
+    #   正确做法：用 argparse 收到的 argv（已切掉 --extra-args 段）。
+    #   拿不到 argv（被当库调用）时保守判 False —— 少说一句提示好过误报。
+    args.audio_codec_explicit = any(
+        a == "--audio-codec" or a.startswith("--audio-codec=")
+        for a in (argv_argv or []))
     args.container_normalized = normalize_container(args.container)
 
     # ── 并发参数 ──
@@ -3447,6 +3796,81 @@ def validate_args(args: argparse.Namespace) -> None:
 # ═══════════════════════════════════════════════════════════════════
 #  计划与执行
 # ═══════════════════════════════════════════════════════════════════
+# 音轨偏短时判定「要不要为了保帧而重编码」的阈值（帧）。
+# ⚠ 为什么是 1 而不是更大值：实测 ffprobe 对**同源等长**素材（lavfi 同时产视频与
+# 音频）报出的两流 duration **完全相等**（偏差 0.00 帧），所以 1 帧不会被容器噪声
+# 误触发；而等长偏差为 0、偏长为负，都不会越过这个阈值。
+#   曾用 3 帧，代价是 `../input_videos/test3.mp4`（音轨短 0.0597s = **1.79 帧**）
+#   不触发降级 ⇒ 实测仍丢 3 帧（302→299）且 EXIT=0、**零告警**——真丢帧被当成了
+#   容器舍入噪声（调研实测确认）。阈值过高的代价是「静默丢帧」，比多一次重编码
+#   严重得多：后者有告警且可事后用 --audio none 规避。
+_AUDIO_PAD_MIN_FRAMES = 1
+
+# 音频重编码的默认编码器（音轨偏短时自动降级到这里）。选 aac 是因为：
+#   · mp4/mkv 的通用兼容最好，HDR10 交付链路都认；
+#   · ffmpeg 内建（libavcodec），不依赖任何外部编码器；
+#   · 与 --audio-codec aac 走同一条已实测可用的路径。
+_AUDIO_FALLBACK_CODEC = "aac"
+
+
+def _segment_durations(meta: Dict, seg_start: Optional[float],
+                       seg_dur: Optional[float]) -> Tuple[float, float]:
+    """返回 (本段视频时长, 本段音轨时长)，单位秒。`seg_start=None` 即整条。
+
+    ⚠ 分段并行必须按**本段**算，不能拿全片时长直接减全片音轨时长 ——
+    那两个数分属不同的区间，差值没有物理意义。实测（4 段、视频 44s）：
+    音轨 16s 时段 1 [11,22) 真实短 6s，而「全片口径」算出 11−16 = **−5**
+    ⇒ 判定「不短」⇒ 不补静音 ⇒ `-shortest` 在音频 EOF 处截断 ⇒ BrokenPipe，
+    **整条转换失败**（EXIT=1）；音轨 30s / 22s 两例同样失败。
+    反过来末段（`seg_dur=None`）退回全片时长又会**高估**（真实短 11s 却报 34s）。
+
+    本段音轨 = `[seg_start, 本段视频末]` 与 `[0, 全片音轨长]` 的**交集**：
+    音轨在段中途结束 ⇒ 只算到结束点；音轨在该段开始前就结束了 ⇒ 交集为 0
+    （这是「本段确实没有音频」的**已知**事实，与「探测不到音轨时长」不同，
+    故调用方仍须先用全片 `audio_duration > 0` 把「未知」情形挡在外面）。
+    """
+    v_total = float(meta.get("duration") or 0.0)
+    a_total = float(meta.get("audio_duration") or 0.0)
+    if seg_start is None:
+        return v_total, a_total
+    start = max(0.0, float(seg_start))
+    v_seg = float(seg_dur) if seg_dur else max(0.0, v_total - start)
+    a_seg = max(0.0, min(start + v_seg, a_total) - start) if a_total > 0 else 0.0
+    return v_seg, a_seg
+
+
+def _audio_pad_needed(meta: Dict, fps: float,
+                      seg_start: Optional[float] = None,
+                      seg_dur: Optional[float] = None) -> Tuple[bool, float]:
+    """判定是否需要为「保住全部视频帧」而把音频从流复制降级为重编码。
+
+    返回 (需要否, 短多少秒)。
+
+    背景：`-shortest`（复用源音轨时下发）在**音轨比视频短**时会在音频 EOF 处
+    停止输出，而视频来自 `pipe:0`（父进程持续写入）⇒ ffmpeg 提前退出，父进程
+    写 stdin 触发 BrokenPipe。实测音轨短 17s 的素材**整条转换失败**、短 0.06s
+    的丢 3 帧。
+
+    唯一的根因解是给音频补静音（`apad`），但 **`apad` 与 `-c:a copy` 不能共存**
+    （ffmpeg 报 "Filtergraph 'apad' was specified, but codec copy was
+    selected" ⇒ rc=234）⇒ 必须重编码。这就是本函数存在的理由。
+
+    ⚠ 分段并行按**本段**区间判（见 `_segment_durations`）：音轨可能只在某段偏短，
+    甚至某段完全没有音频。用全片口径判会同时产生漏判（⇒ 整条失败）与高估。
+    """
+    if fps <= 0:
+        return False, 0.0
+    # 全片音轨时长探测不到（mkv 常见）⇒ 无法判定，不动音频路径（保守：
+    # 宁可漏判也不在没有依据时把用户的 copy 改掉）。
+    if float(meta.get("audio_duration") or 0.0) <= 0:
+        return False, 0.0
+    v_dur, a_dur = _segment_durations(meta, seg_start, seg_dur)
+    if v_dur <= 0:
+        return False, 0.0
+    short = v_dur - a_dur
+    return (short * fps >= _AUDIO_PAD_MIN_FRAMES), max(0.0, short)
+
+
 def build_encode_settings(args: argparse.Namespace, codec: Optional[str] = None,
                           preset: Optional[str] = None,
                           threads: Optional[int] = None,
@@ -3532,6 +3956,172 @@ def build_plan(args: argparse.Namespace, meta: Dict,
     _dec_dur = seg_dur if _seg else args.duration
     _dec_frames = None if _seg else args.frames
 
+    # 音视频各自时长（供 build_encode_cmd 判断 `-shortest` 的截断风险）。
+    # 分段时按**本段**区间算，不是全片 —— 告警要对应实际会丢的那一段。
+    # ⚠ 这两个值同时是 build_encode_cmd 里「降级没生效」兜底告警的基准，
+    #   口径必须与 _audio_pad_needed 一致（同一个 _segment_durations），
+    #   否则会出现「build_plan 判要补、兜底告警却说短得更多/更少」。
+    _seg_v_dur, _seg_a_dur = _segment_durations(
+        meta, seg_start if _seg else None, seg_dur)
+    st.audio_duration = _seg_a_dur
+    st.video_duration = _seg_v_dur
+
+    # ── 字幕（--subs）─────────────────────────────────────────────────
+    # 三种模式（2026-09）：
+    #   auto/none = 不保留，但**必须告警**（此前是静默丢，用户无从知道）；
+    #   keep      = 透传，受容器/codec 限制，且与分段并行互斥；
+    #   burn      = 烧进画面，需 libass。
+    _warn = warn or _default_warn
+    _subs = list(meta.get("subs") or [])
+    _mode = getattr(args, "subs", "auto")
+    st.subs_mode = _mode
+    st.subs_index = int(getattr(args, "subs_index", 0) or 0)
+    st.subs_map = None            # keep 用：'-map' 的第四个 spec
+    st.subs_codec = None          # keep 用：None=copy
+
+    if not _subs:
+        if _mode in ("keep", "burn"):
+            _warn(f"--subs {_mode} 但源没有字幕轨，已按 --subs none 处理"
+                  f"（产物不含字幕）")
+        _mode = "none"
+        st.subs_mode = "none"
+
+    if _subs:
+        if st.subs_index >= len(_subs):
+            _warn(f"--subs-index {st.subs_index} 越界（源只有 {len(_subs)} 条字幕轨，"
+                  f"index {0}~{len(_subs) - 1}）；已退回 index 0")
+            st.subs_index = 0
+        _pick = _subs[st.subs_index]
+        _lang = f"（{_pick['language']}）" if _pick.get("language") else ""
+
+        if _mode == "auto":
+            _warn(f"源含 {len(_subs)} 条字幕轨{_lang}，当前**不保留字幕**"
+                  f"（默认行为）。字幕不会出现在产物里。\n"
+                  f"    · 要保留：`--subs keep`（透传，受容器限制）"
+                  f"或 `--subs burn`（烧进画面）；\n"
+                  f"    · 选另一条轨：`--subs-index N`（默认 0=第一条）")
+        elif _mode == "keep":
+            # 与分段并行互斥：分段只对音频做时间区间切分，字幕是**单文件全局**的，
+            # 各段独立编码后 concat 会让字幕与视频错位/丢失。
+            #
+            # ⚠ 判据必须覆盖**三种** split_mode 的实际后果，而不只是「显式 segment」。
+            # 实测两个踩中的坑：
+            # ① 只看 `_seg`（本次调用是否已带 seg_start）⇒ `--split-mode segment
+            #    --frames 10` 时 build_plan 还没拿到 seg_start（分段要到运行时才由
+            #    decide_single_file_mode 决定），互斥被跳过 ⇒ 走到 remux 才报
+            #    「字幕 remux 失败 rc=234」，报错指向 remux 而非真正该改的地方；
+            # ② 只拦显式 `segment` ⇒ `auto` 在**长素材上真会分段**
+            #    （实测 22s + workers 2 → `分段并行：2 段 × 2 并发`），
+            #    转换跑完才在运行期抛 ValueError，白跑一遍。
+            # ⇒ 判据 = 「本次会不会分段」，三个取值都要算进去。
+            _sm = getattr(args, "split_mode", "auto")
+            _want_seg = _sm == "segment"
+            if _sm == "auto":
+                # auto 的分段前提（对齐 decide_single_file_mode）：单文件、
+                # 素材够长、未给截断、且 workers>1（并发宽度 > 1 才可能分段）
+                _dur0 = _frac_to_float(meta.get("duration")) or 0.0
+                _want_seg = (not _seg
+                            and _dur0 >= _SEGMENT_MIN_SECONDS
+                            and getattr(args, "duration", None) is None
+                            and getattr(args, "frames", None) is None
+                            and int(getattr(args, "workers", 0) or 0) > 1)
+            if _seg or _want_seg:
+                raise ValueError(
+                    f"--subs keep 与分段并行（--split-mode {_sm}）互斥："
+                    f"分段只切音频区间，而字幕是全局单文件，各段独立编码再拼接"
+                    f"会导致字幕错位。\n"
+                    f"    · 改用 `--split-mode off`，或\n"
+                    f"    · 用 `--subs burn`（字幕烧进画面，随视频帧走，不受影响）")
+            if _pick.get("is_bitmap"):
+                raise ValueError(
+                    f"--subs-index {st.subs_index} 是**位图字幕**"
+                    f"（{_pick['codec']}），无法转码进 {dst.suffix or '目标'} 容器"
+                    f"（只能原样 copy，而 mp4/mov 不收位图字幕）。\n"
+                    f"    · 输出到 .mkv 可原样保留；\n"
+                    f"    · 或 `--subs burn` —— 但位图字幕**同样烧不了**"
+                    f"（libass 只认文本字幕）；\n"
+                    f"    · 或 `--subs-index` 选一条文本字幕。")
+            _codec = resolve_subtitle_codec_for_container(
+                dst.suffix or ".mp4", _pick["codec"], src, warn)
+            st.subs_map = f"1:s:{st.subs_index}"
+            st.subs_codec = _codec
+            # ── 两阶段降级（仅在会触发 ffmpeg bug 时）──────────────
+            # 见 probe_source 里的 stream_durations_known 注释：当源流拿不到自己的
+            # duration（典型是 mkv）时，「音频+字幕+`-shortest`」共存会产出**畸形
+            # 容器**（rc=0、体积几 KB、视频帧读不出）。那种源改成：
+            #   阶段1 = 按无字幕编码（不含 `-map字幕`，`-shortest` 只管音视频）；
+            #   阶段2 = `-c copy` 把字幕 remux 进产物（不重编码、画质无损）。
+            st.subs_two_stage = not meta.get("stream_durations_known", True)
+            if st.subs_two_stage:
+                st.subs_map = None      # 阶段1 不map 字幕，故不发 -map/-c:s
+                st.subs_codec = None
+                _warn(f"源容器不提供各流时长（{dst.suffix or '目标'} 的 "
+                      f"`-shortest` + 字幕共存会导致 ffmpeg 产出畸形文件，"
+                      f"已实测）：已改用**两阶段** —— 先编码、再把字幕 `-c copy` "
+                      f"挂进产物（不重编码、画质无损，多一次remux 开销）。")
+        elif _mode == "burn":
+            if _pick.get("is_bitmap"):
+                raise ValueError(
+                    f"--subs burn 不支持位图字幕（{_pick['codec']}）："
+                    f"libass 只渲染**文本**字幕。\n"
+                    f"    · 位图字幕请用 `--subs keep` 并输出 .mkv（可原样保留）。")
+            if not _has_libass():
+                raise ValueError(
+                    "--subs burn 需要 ffmpeg 的 libass（subtitles/ass 滤镜），"
+                    "但本机 ffmpeg 没有这两个滤镜。\n"
+                    f"    · 可改用 `--subs keep`（若容器支持）；\n"
+                    f"    · 或先换一个带 libass 的 ffmpeg 构建。")
+            st.subs_burn_file = _export_subtitle(
+                src, st.subs_index, work_sub_dir=(dst.parent / ".subs_burn"),
+                tag=dst.stem)
+
+    # ── 音轨偏短 ⇒ 补静音保住全部视频帧 ──
+    # `-shortest` 在音轨比视频短时会截断视频，而补静音（`-af apad`）是唯一的根因解。
+    # 这里对**任何音频路径**都生效，只要该路径**能加滤镜**（即非流复制）：
+    #   · copy（默认）→ 降级为 aac（唯一根因解，apad 与 copy 不共存）；
+    #   · 已显式给了非 copy 编码器（aac/libopus/…）→ 保留用户的选择，只加 apad。
+    # ⚠ 早先只处理 copy，导致显式 `--audio-codec libopus` 的场景漏掉 apad，
+    #   实测仍 EXIT=1 / BrokenPipe（用户以为选了重编码就安全了，其实没有）。
+    _want_audio = (st.audio_codec != "none" and meta.get("has_audio"))
+    if _want_audio:
+        _pad, _short = _audio_pad_needed(meta, fps,
+                                        seg_start if _seg else None,
+                                        seg_dur if _seg else None)
+        if _pad:
+            _was_copy = st.audio_codec.lower() == "copy"
+            if _was_copy:
+                # ⚠ 降级目标必须**尊重容器限制**：WebM 只收 Opus/Vorbis，
+                # 若这里选 aac，`build_encode_cmd` 里的
+                # resolve_audio_codec_for_container 会再换一次 libopus ⇒
+                # 多一轮无用替换，且告警文案会说「降级为 aac」而实际是 libopus
+                # （实测过：文案与产物不一致）。故先问一次容器。
+                _ext = normalize_container(args.container) or dst.suffix
+                _cand = _AUDIO_FALLBACK_CODEC
+                if (_ext or "").lower() == ".webm":
+                    _cand = _WEBM_AUDIO_FALLBACK
+                st.audio_codec = _cand
+            st.audio_pad = True
+            _lost = int(_short * fps)
+            _tail = (f"    · 想维持流复制：`--audio none`（出无声版）或换素材。\n"
+                     f"    · ⚠ **加 `--audio-codec copy` 并不能避免降级** —— "
+                     f"流复制与 `-af apad` 不能共存（ffmpeg rc=234），"
+                     f"保住视频帧只能重编码。")
+            if _was_copy:
+                _origin = (
+                    f"已自动把音频从流复制降级为 {st.audio_codec}"
+                    + ("（**你显式指定的 `--audio-codec copy` 同样会被降级**："
+                       "它是默认值同一条路径，且保帧优先于音轨原样）"
+                       if getattr(args, "audio_codec_explicit", False)
+                       else "（默认音频策略）"))
+            else:
+                _origin = f"音频已按你指定的 {st.audio_codec} 重编码"
+            (warn or _default_warn)(
+                f"源音轨比视频短 {_short:.2f}s（约 {_lost} 帧）：`-shortest` 会在音频"
+                f"结束处停止输出而丢掉这些帧。{_origin}，并补静音"
+                f"（`-af apad`），视频帧全部保留。\n"
+                f"    · 音频被重编码（非逐位保留），体积可能有微小变化。\n"
+                + _tail)
+
     decode_cmd = build_decode_cmd(src, _dec_dur, _dec_frames,
                                   decode=decode or getattr(args, "decode_resolved", "cpu"),
                                   src_bits=meta.get("src_bits", 8),
@@ -3539,6 +4129,17 @@ def build_plan(args: argparse.Namespace, meta: Dict,
     encode_cmd = build_encode_cmd(ow, oh, fps, dst, src, st, meta["has_audio"],
                                   warn=warn or _default_warn,
                                   extra_args=getattr(args, "extra_args", None))
+    # 两阶段（keep + 源流时长缺失）：阶段1 先写 `_stage1`，remux 成功才移到 dst。
+    # 之所以要中间文件：`-c copy` 的 remux 必须以阶段1 的产物为输入，而 ffmpeg
+    # 不允许输入与输出同路径。
+    if st.subs_two_stage:
+        # 契约：输出路径必须是最后一个 token（verify_sdr_to_hdr ③ 逐字断言）
+        assert encode_cmd[-1] == str(dst), f"输出路径不在末尾：{encode_cmd[-1]!r}"
+        _stage1 = dst.with_name(dst.stem + "_stage1" + dst.suffix)
+        encode_cmd[-1] = str(_stage1)
+        _subs_stage1 = str(_stage1)     # 由下方 return 带给执行层
+    else:
+        _subs_stage1 = ""
 
     # 展示用的 x265-params **从真正下发的命令里取**（单一真源）：
     # 之前用 build_x265_params(..., 无 extra) 单独构造，漏掉了 rc-lookahead 等键，
@@ -3559,6 +4160,9 @@ def build_plan(args: argparse.Namespace, meta: Dict,
         "x265_params": _xp,
         "decode": decode or getattr(args, "decode_resolved", "cpu"),
         "decode_cmd": decode_cmd, "encode_cmd": encode_cmd,
+        # 仅两阶段（--subs keep + 源流时长缺失）时非空，指向阶段1 的产物路径；
+        # 执行层据此在编码成功后做字幕 remux（见 _run_job_with_fallback）。
+        "subs_stage1": _subs_stage1,
     }
 
 
@@ -3820,6 +4424,23 @@ def run_job(args: argparse.Namespace, job: Job, plan: Dict,
                 _t.join(timeout=1.0)
             except Exception:
                 pass
+        # burn 导出的字幕是**临时文件**：编码端在本次任务里已经读完它，
+        # 留着只会在每个输出目录攒下一堆 .srt（批量跑一遍就是 N 个）。
+        # ⚠ 只删自己导出的那一个文件 + 目录（若空），不碰别人的。
+        # ⚠ 本函数里没有 `st`，设置在 `plan["settings"]`（见函数开头）。
+        _burn_file = plan.get("settings").subs_burn_file \
+            if plan.get("settings") else ""
+        if _burn_file:
+            try:
+                _bf = Path(_burn_file)
+                if _bf.is_file():
+                    _bf.unlink()
+                _bd = _bf.parent
+                if _bd.is_dir() and _bd.name == ".subs_burn" \
+                        and not any(_bd.iterdir()):
+                    _bd.rmdir()
+            except Exception:
+                pass        # 清理失败不该影响转换结果
     return rc
 
 
@@ -3864,6 +4485,35 @@ def _run_job_with_fallback(args: argparse.Namespace, job: Job, meta: Dict,
                      else "（降档重试）"))
         last_rc = run_job(args, job, plan, engine, on_update=on_update)
         if last_rc == 0:
+            # ── 字幕阶段2（仅 keep + 源流时长缺失时）─────────────────
+            # run_job 把阶段1 产物写在 `subs_stage1`；这里用 `-c copy` 把字幕
+            # remux 进最终路径（不重编码 ⇒ 画质无损），成功后才替换成品。
+            # ⚠ 放在这里而不是 run_job 内：只有本层知道 job.dst（最终路径）。
+            if plan.get("subs_stage1"):
+                _st1 = Path(plan["subs_stage1"])
+                try:
+                    _rx = build_subs_remux_cmd(
+                        _st1, job.src, job.dst, plan["settings"].subs_index,
+                        plan["settings"].subs_codec)
+                    _r = subprocess.run(_rx, capture_output=True, text=True,
+                                       encoding="utf-8", errors="replace",
+                                       timeout=900, check=False)
+                    if _r.returncode != 0 or not job.dst.exists():
+                        raise RuntimeError(
+                            f"字幕 remux 失败 rc={_r.returncode}："
+                            f"{(_r.stderr or '').strip()[:200]}")
+                    _st1.unlink(missing_ok=True)
+                except Exception as _ex:
+                    job.status = "failed"
+                    job.error = f"字幕 remux 阶段失败：{_ex}"
+                    # ⚠ 阶段1 的产物**留在这个路径**（实测 96KB），它其实是可用的
+                    #   ——只是没挂上字幕。不清理是故意的（用户可手工改名取用），
+                    #   但**必须说出来**，否则它会变成一个来源不明的孤儿文件，
+                    #   而最终路径上什么都没有 ⇒ 看起来像「转好了但文件没了」。
+                    if _st1.exists():
+                        job.warnings.append(
+                            f"阶段1 产物已保留在 {_st1}（可用，只是没挂字幕）")
+                    return 1
             job.plan = plan
             return 0
         if _STOP_REQUESTED.is_set():
@@ -4565,7 +5215,7 @@ def main() -> int:
         if _extra_tail is not None:
             args.extra_args = _extra_tail
         args.warnings = []          # validate_args 往里收集告警
-        validate_args(args)
+        validate_args(args, _argv)
     except ValueError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 2

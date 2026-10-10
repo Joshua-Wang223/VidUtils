@@ -221,3 +221,18 @@
   属于"装 FFmpeg"而不是"用 FFmpeg"，暂留原处。
 - `feedback_gpu_testing.md` — 用户的验证顺序偏好（先验证 CPU/软编路径）。
   属于协作偏好而非项目事实，暂留原处。
+
+---
+
+## 2026-10-09 新增（SDR→HDR 脚本 + benchmark + 字幕/音频缺陷修复）
+
+- [SDR→HDR 的 audio/字幕/benchmark 三组实测约束](project_sdr2hdr_subtitles.md) — `--subs auto|keep|burn` 三态；ffmpeg「音频+字幕+`-shortest`」共存产出**畸形 mkv**（rc=0 但视频帧读不出），mkv 源自动改走两阶段
+- [`-shortest` 截断缺陷的三层根因与自动降级](project_shortest_audio_truncation.md) — ✅已修：病根是 `probe_source` 的 duration 取容器值被**音轨**污染（不是 `-shortest`）；四个修法里 `-max_interleave_delta`/`-t` 实测无效、`apad` 与流复制冲突（rc=234）
+- [bench_sdr_to_hdr 的实测约束与陷阱](project_bench_sdr_to_hdr_constraints.md) — 自报 fps 用源帧数不可信；分段时长阈值 20s；**自造估算公式与被测实现不同构**（tile 处理量真实是三档均 10.51Mpx，非 1.4/1.9/3.0x）
+- [音轨降级的判据边界](project_audio_pad_blindspots.md) — 显式 `--audio-codec copy` 也被降级保帧；判「是否显式」不能扫 `sys.argv` 全量（`--extra-args` 之后是下游参数）
+- [常量与调用方的点约定不匹配](feedback_constant_contract_mismatch.md) — `_MP4_FAMILY` 漏前导点 ⇒ 静默落「未知容器」分支 ⇒ mp4 字幕不转发 `-c:s`（rc=8）
+- [互斥检查的判据要覆盖实际会发生的路径](feedback_interlock_predicate_layer.md) — keep×segment 互斥改了三次判据（本次调用/只看显式/复刻运行时决策）；报错必须指向用户该改的地方
+- [中间产物残留与清理代码的两个坑](feedback_midproduct_leak.md) — remux 失败后阶段1 文件静默残留没人告知；`finally` 里引用错变量会把清理 bug 放大成转换失败
+- [写测试/清理代码的两个自身踩坑](feedback_test_and_cleanup_selftraps.md) — 作用域变量缺失把清理 bug 变成主流程失败；`--frames N` 超素材帧数产生假失败
+- [用户要求「中间编码提质」时的实测反证](feedback_verify_user_technical_premise.md) — burn 实测**不存在中间编码**（libass 直吃 gbrp16le）、烧字幕只增 1% 码率 ⇒ 前提不成立时摆证据让用户选 A/B
+- [子 agent 的结论必须自己复核](feedback_subagent_verification.md) — 它也会编造事实（报「文件不存在」/引用不存在的字段）；长跑 workflow 返回 null 不等于「没问题」

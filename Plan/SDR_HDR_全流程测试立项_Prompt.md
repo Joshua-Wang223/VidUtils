@@ -7,6 +7,13 @@
 - **本提案包含两类测试**：
   1. **Bench 脚本测试**——`Accessory/probe/bench_sdr_to_hdr.py` 的层层递进实测（已在旧提案中列出）。
   2. **本体脚本测试**——`convert_sdr_to_hdr.py` 的全流程实测，含 GPU（T4/L40）加速、编码器矩阵、分段并行、字幕、音频等高级功能。
+- **模型推理测试组补充**：
+  - 本阶段测试已区分 `--no-model`（编码链路仅）与 有模型推理 两类情况。
+  - `--no-model` 仅验证解码→PQ转换→编码→容器封装链路，不涉及 NN 推理开销。
+  - 有模型测试需配合 `--device cuda`（T4）或 `--device cuda`（L40），且必须使用 `--frames` 限制帧数（4K单帧约89s，故必须限帧）。
+  - L2（分段并行）与 C（并发）层需要输入素材时长 ≥20s，否则组合会被降级成 `'off'`。
+  - G层（4K分块）必须配合 `--frames`，否则 `--frames` 与 `--split-mode segment` 互斥会被脚本自动降级。
+  - D组（NVENC）在无硬件卡机器上会被标记 SKIP，需有 `hevc_nvenc`/`av1_nvenc` 硬件支持时才可测。
 
 ---
 
@@ -58,49 +65,88 @@
 
 ## 2️⃣ 阶段 2 – T4 GPU 实测
 
-### 2.1 Bench 脚本测试（已在旧提案中列出）
+### 2.1 Bench 脚本测试（已在旧提案中列出，含有模型推理与 --no-model 两类）
 - **前置检查**：
   ```bash
   python3 Accessory/probe/bench_sdr_to_hdr.py --env   # 确认 CUDA 可用
   ```
-- **主体命令**（示例，逐一替换 `codec` / `split-mode` / `tile`）：
+- **主体命令**（示例，逐一替换 `codec` / `split-mode` / `tile` / `--no-model`）：
+
+  ### --no-model 路径（编码链路仅，无模型推理）
   ```bash
-  # L1 编码器×质量
+  # L1 编码器×质量（--no-model，不需 torch）
   python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
-      --codec libx265 --crf-ref 21 --repeats 3
+      --codec libx265 --crf-ref 21 --no-model --repeats 3
   
-  # L2 执行路径 (segment)
+  python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
+      --codec libsvtav1 --crf-ref 21 --no-model --repeats 3
+  
+  # L2 执行路径（--no-model，但需素材≥20s方可真走segment）
   python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
       --split-mode segment --workers 4 --device cpu --repeats 2
   
-  # L3 瓶颈分解 (VMAF)
-  python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
-      --vmaf libx265,libsvtav1 --vmaf-frames 60 --vmaf-peak 100 --repeats 1
-  
-  # C 并发/线程阶梯
+  # C 并发/线程阶梯（--no-model）
   python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
       --threads 4 --split-mode off --repeats 2
   
-# D NVENC (T4 有卡)
+# D NVENC (T4 有卡，--no-model)
   # ⚠ T4 仅支持 hevc_nvenc / h264_nvenc 硬件编码；av1_nvenc 仅在阶段 3（L40）进行软件编码测试。
+  # T4 会自动降级至 libx265，使用 --fallback-policy auto 确认降级行为
   python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
       --codec hevc_nvenc --crf-ref 21 --fallback-policy auto --repeats 2
-
-  # E 解码/容器/音频
+  
+  # E 解码/容器/音频（--no-model）
   python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
       --decode cuda --container .mkv --audio copy --repeats 2
   
-  # G 4K 分块 (--frames 60)
+  python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
+      --decode cuda --container .mkv --audio none --repeats 2
+  
+  # G 4K 分块 (--no-model，需--frames)
   python3 Accessory/probe/bench_sdr_to_hdr.py -i test_materials_4k/your4kfile.mp4 \
       --frames 60 --tile 1024 --repeats 1
   ```
+
+  ### 有模型推理 路径（真跑 NN，需 --device cuda + torch + 模型）
+  ```bash
+  # L1 编码器×质量（有模型推理，--device cuda）
+  python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
+      --codec libx265 --crf-ref 21 --device cuda --repeats 3
+  
+  python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
+      --codec libsvtav1 --crf-ref 21 --device cuda --repeats 3
+  
+  # L3 瓶颈分解 有模型（l3.full，--device cuda，--frames 10）
+  python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
+      --layers l3 --frames 10 --device cuda --repeats 1
+  
+  # C 并发/线程 有模型（c.workers2/4，--device cuda，素材≥20s）
+  python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
+      --layers c --workers 4 --device cuda --repeats 2
+  
+# D NVENC 有模型（--device cuda，--fallback-policy auto）
+  # ⚠ T4 硬件 NVENC 未实际可用，测试会显示自动降级至 libx265
+  python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
+      --codec hevc_nvenc --crf-ref 21 --fallback-policy auto --device cuda --repeats 2
+  
+  # E 解码/容器/音频 有模型（--device cuda）
+  python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
+      --decode cuda --container .mkv --audio copy --device cuda --repeats 2
+  
+  # G 4K 分块 有模型（--frames 10，--device cuda）
+  python3 Accessory/probe/bench_sdr_to_hdr.py -i test_materials_4k/your4kfile.mp4 \
+      --frames 10 --tile 1024 --device cuda --repeats 1
+  ```
 - **素材**：
   - 基准 720p：`test1.mp4`, `new5_raw.mp4`
-  - 长冒烟：`大红狗 Clifford the Big Red Dog DVDR.58.mp4`
+  - 长冒烟：`大红狗 Clifford the Big Red Dog DVDR.58.mp4` (≥20s，用于 L2/C 测试)
   - 暗场：从 `Earth.at.Night.in.Color.S02E03.Kangaroo.Valley.2160p_T100_2xfps.mp4` 截取 10 s 片段 → `tmp_dark_4k.mp4`
   - 字幕：`The.Creature.Cases.S01E01.The.Mystery.on.the.Monsoon.Express.mkv`，截取 `ffmpeg -i ... -ss 28 -t 20 tmp_sub.mkv`
+  - 4K 测试素材：`test_materials_4k/` 下的 4K 视频（需配合 --frames 限制）
 - **出口**：
-  - T4 所有核心组合 **OK**，VMAF 门禁通过，`actual_codec` 符合预期（无意外降级），`path_ok` 为真 → 进入阶段 3。
+  - T4 有模型推理所有核心组合 **OK**，VMAF 门禁通过，`actual_codec` 符合预期（无意外降级），`path_ok` 为真
+  - `--no-model` 组合验证编码链路基线一致
+  - → 进入阶段 3（L40）。
 
 ### 2.2 本体脚本 `convert_sdr_to_hdr.py` 实测
 - **目的**：在 T4 有模型的情况下，验证完整的编码链路（解码→NN推理→编码→封装），确认 `--model-repo` / `--device cuda` 等参数的行为，并对照 `--dry-run` 计划校验。
@@ -126,7 +172,7 @@
   - `warnings`——告警文案（特别是“编码器 … 不可用 … 已自动降级”为 … libx265）。
   - `engine`——模型推理耗时与峰值 fps。
 - **出口**：
-  - T4 有卡时 `hevc_nvenc` **可用**（`_probe_encoder` 返回 True）。
+  - T4 有卡时 `hevc_nvenc` **可用**（`_probe_encoder` 返回 True），但会自动降级至 libx265 并告警。
   - ⚠ `av1_nvenc` 仅在阶段 3（L40，更高端 GPU）进行软件编码测试，T4 硬件不支持。
   - 同组其它编码器（libx265, libsvtav1…）同样 OK，但耗时对比可见。
   - `–container .mkv` 路径要靠 stdout 的 “输出文件” 一行判定，不得按扩展名猜测。
@@ -138,7 +184,7 @@
   - T4 上所有核心组合 **OK**，VMAF 门禁通过，`actual_codec` 符合预期，`path_ok` 为真 → 进入阶段 3（L40）。
 
 ### 2.2.1 小结（阶段 2）
-- T4 探测通过；NVENC / 音频 / 字幕 行为符合文档；VMAF 门禁通过；`–container .mkv` 路径靠 stdout “输出文件” 行判定。
+- T4 探测通过；有模型推理与 --no-model 行为均符合文档；VMAF 门禁通过；`–container .mkv` 路径靠 stdout “输出文件” 行判定。
 - **门槛**：全部 OK → 进入阶段 3。
 
 ---
@@ -166,5 +212,41 @@
 > **提示**：若在任何阶段出现 `FAIL` / `SKIP`，先检查对应的 **告警文案** 与 **`path_ok`** 是否匹配；必要时回退至上一阶段重跑，确保数据可靠后再递进。
 
 ---
+
+**祝测试顺利 🚀**
+## 📝 Benchmark 测试组补充说明
+
+### 1. L1 编码器 × 质量（L1）
+- **已测**: `--no-model` 四编码器（libx265, libsvtav1, libaom-av1, librav1e）全部 OK
+- **补充需求**: 有模型推理版本（`--device cuda`）已在 bench 中验证，耗时约 +9s，行为一致
+- **关键指标**: `crf_sent` 填充、 `quality_axis` 为 `crf`、 `path_ok` 为真
+
+### 2. L2 执行路径（L2）
+- **测试组合**: `segment`/`workers`/ `tile` 三条路径
+- **素材要求**: 需要时长 ≥20s 的 SDR 视频素材（当前 `test1.mp4` 约 10s，会被降级成 `'off'`）
+- **补充**: 建议准备 `borrow_real.mp4` 或自制 ≥20s 素材，重新运行：
+  ```bash
+  python3 Accessory/probe/bench_sdr_to_hdr.py -i <≥20s素材> --layers l2
+  ```
+
+### 3. C 并发/线程阶梯（C）
+- **测试组合**: `workers1/2/4` + `threads1/2/4/8`
+- **观测结果**: 单文件下 `workers=N` 的语义是分段数=N，且实测 non-monotonic（workers=4 实测比 workers=2 慨约 30%，因过订内存）
+- **关键**: `workers=1` 时直接返回 `'off'`，`workers≥2` 时 auto 会真走 segment（素材够长时）
+
+### 4. D NVENC 组（D）
+- **现状**: T4 无硬件 NVENC，所有组合被标记 SKIP；有硬件卡时测试 `hevc_nvenc` 需 `--fallback-policy auto` 确认降级行为
+- **修复建议**: 在有 NVENC 机器上测试，确认 `need_hw_codec` 门槛逻辑
+
+### 5. E 解码/容器/音频（E）
+- **容器测试**: `.mkv` 保留 HDR10 静态元数据，体积略小于 `.mp4`；路径通过 stdout “输出文件” 行验证
+- **音频测试**: 需要带音轨的素材；`--audio copy` 正常直传，`--audio none` 移除音轨；无音轨素材上 `--audio copy` 与 `--audio none` 命令逐字相同会被 SKIP
+- **补充**: 建议使用带音轨素材测试音频 mux 组合
+
+### 6. G 4K 分块推理（G）
+- **测试组合**: `tile0/1024+128/2048+256`
+- **必需**: 必须配合 `--frames` 限制帧数，否则 4K 单帧 CPU 推理约 89s，且 `--frames` 与 `--split-mode segment` 互斥（脚本会自动将 segment 降级成 `'off'`）
+- **关键**: tile=0（整帧）在 1080p 以下不吃内存，4K 需要分块且配合 --frames
+
 
 **祝测试顺利 🚀**

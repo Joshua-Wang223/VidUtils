@@ -230,6 +230,7 @@
 - [`-shortest` 截断缺陷的三层根因与自动降级](project_shortest_audio_truncation.md) — ✅已修：病根是 `probe_source` 的 duration 取容器值被**音轨**污染（不是 `-shortest`）；四个修法里 `-max_interleave_delta`/`-t` 实测无效、`apad` 与流复制冲突（rc=234）
 - [bench_sdr_to_hdr 的实测约束与陷阱](project_bench_sdr_to_hdr_constraints.md) — 自报 fps 用源帧数不可信；分段时长阈值 20s；**自造估算公式与被测实现不同构**（tile 处理量真实是三档均 10.51Mpx，非 1.4/1.9/3.0x）
 - [音轨降级的判据边界](project_audio_pad_blindspots.md) — 显式 `--audio-codec copy` 也被降级保帧；判「是否显式」不能扫 `sys.argv` 全量（`--extra-args` 之后是下游参数）
+- [_segment_durations 修复段音频基准](project_audio_pad_blindspots.md) — split-mode segment 每段音频降级判定修复，_segment_durations() 取代全片口径，5/5 实测全通过、等长零误触发。【2026-10-10 本次会话验证】本次修复将判定基准从「全片音轨长减全片视频长」改为「本段视频区间 ∩ [0, 全片音轨长]」的交集，消除了分段场景下因区间不统一产生的误判。
 - [常量与调用方的点约定不匹配](feedback_constant_contract_mismatch.md) — `_MP4_FAMILY` 漏前导点 ⇒ 静默落「未知容器」分支 ⇒ mp4 字幕不转发 `-c:s`（rc=8）
 - [互斥检查的判据要覆盖实际会发生的路径](feedback_interlock_predicate_layer.md) — keep×segment 互斥改了三次判据（本次调用/只看显式/复刻运行时决策）；报错必须指向用户该改的地方
 - [中间产物残留与清理代码的两个坑](feedback_midproduct_leak.md) — remux 失败后阶段1 文件静默残留没人告知；`finally` 里引用错变量会把清理 bug 放大成转换失败

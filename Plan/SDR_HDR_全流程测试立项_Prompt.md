@@ -125,7 +125,8 @@
   - `warnings`——告警文案（特别是“编码器 … 不可用 … 已自动降级”为 … libx265）。
   - `engine`——模型推理耗时与峰值 fps。
 - **出口**：
-  - T4 有卡时 `hevc_nvenc` / `av1_nvenc` **可用**（`_probe_encoder` 返回 True）。
+  - T4 有卡时 `hevc_nvenc` **可用**（`_probe_encoder` 返回 True）。
+  - ⚠ `av1_nvenc` 仅在阶段 3（L40，更高端 GPU）进行软件编码测试，T4 硬件不支持。
   - 同组其它编码器（libx265, libsvtav1…）同样 OK，但耗时对比可见。
   - `–container .mkv` 路径要靠 stdout 的 “输出文件” 一行判定，不得按扩展名猜测。
   - 音频 `copy` 在有音轨时会被 **自动降级** 为 aac（告警已出现），`none` 保持无音轨。
@@ -148,6 +149,7 @@
   - `--workers 8` / `--threads 8`（检查并发上限）。
   - `--frames 30 / 120`（测试帧限对 tile 的影响）。
   - `--vmaf` 大范围组合（如 `l1.libx265,l1.libaom-av1,l1.librav1e`）。
+  - ⚠ **av1_nvenc**：T4 硬件不支持，改在 L40 通过软件编码测试（`-codec av1_nvenc --crf-ref 21 --no-model` 或真模型跑）。
 - **出口**：所有测例 **OK** 或者 **EXPECTED_FAIL**（仅 OOM） → 基准完成，生成最终报告。
 
 ---

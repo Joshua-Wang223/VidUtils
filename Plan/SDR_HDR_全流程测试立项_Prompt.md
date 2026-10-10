@@ -81,10 +81,11 @@
   python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
       --threads 4 --split-mode off --repeats 2
   
-  # D NVENC (T4 有卡)
+# D NVENC (T4 有卡)
+  # ⚠ T4 仅支持 hevc_nvenc / h264_nvenc 硬件编码；av1_nvenc 仅在阶段 3（L40）进行软件编码测试。
   python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
       --codec hevc_nvenc --crf-ref 21 --fallback-policy auto --repeats 2
-  
+
   # E 解码/容器/音频
   python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
       --decode cuda --container .mkv --audio copy --repeats 2
@@ -146,10 +147,7 @@
 
 - **命令结构**：同阶段 2，仅 `--device cuda` 保持不变，可增大 `--workers` / `--threads` 与 `--frames`。
 - **额外测例**：
-  - `--workers 8` / `--threads 8`（检查并发上限）。
-  - `--frames 30 / 120`（测试帧限对 tile 的影响）。
-  - `--vmaf` 大范围组合（如 `l1.libx265,l1.libaom-av1,l1.librav1e`）。
-  - ⚠ **av1_nvenc**：T4 硬件不支持，改在 L40 通过软件编码测试（`-codec av1_nvenc --crf-ref 21 --no-model` 或真模型跑）。
+  - ⚠ **av1_nvenc**：必须 Ada 架构 GPU（L40）进行硬件编码测试；T4 仅软件编码测试（见阶段 2备注）。
 - **出口**：所有测例 **OK** 或者 **EXPECTED_FAIL**（仅 OOM） → 基准完成，生成最终报告。
 
 ---

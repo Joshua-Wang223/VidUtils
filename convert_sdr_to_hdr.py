@@ -976,17 +976,39 @@ def _same_path(a: Path, b: Path) -> bool:
         return os.path.abspath(str(a)) == os.path.abspath(str(b))
 
 
-def _size_change(src: Path, dst: Path) -> str:
-    """输出「输入 → 输出（↓x%）」的体积变化描述。"""
+def _size_change(src: Path, dst: Path,
+                 src_duration: Optional[float] = None,
+                 src_nb_frames: Optional[int] = None,
+                 out_duration: Optional[float] = None,
+                 out_nb_frames: Optional[int] = None) -> str:
+    """输出「输入 → 输出（↓x%）」的体积变化描述。
+
+    若提供了时长/帧数信息，按同等时长/帧数比例估算源体积，避免
+   「全源 vs 截断输出」导致的误导性压缩率。
+    """
     try:
         in_size, out_size = src.stat().st_size, dst.stat().st_size
     except OSError:
         return "—"
     if in_size <= 0:
         return _fmt_size(out_size)
-    ratio = (1.0 - out_size / in_size) * 100
+
+    # 若输出被截断（指定了 --frames/--duration），按比例估算同等时长的源体积
+    est_in_size = in_size
+    # 优先用帧数（直接由 --frames 指定，最准确）；其次用时长
+    if out_nb_frames is not None and out_nb_frames > 0 and src_nb_frames is not None and src_nb_frames > out_nb_frames:
+        # 按帧数比例估算（最准确，直接对应 --frames）
+        est_in_size = int(in_size * (out_nb_frames / src_nb_frames))
+    elif out_duration is not None and out_duration > 0 and src_duration is not None and src_duration > out_duration:
+        # 按时长比例估算（回退方案）
+        est_in_size = int(in_size * (out_duration / src_duration))
+
+    if est_in_size <= 0:
+        return _fmt_size(out_size)
+    ratio = (1.0 - out_size / est_in_size) * 100
     direction = "↓" if ratio >= 0 else "↑"
-    return f"{_fmt_size(in_size)} → {_fmt_size(out_size)}（{direction}{abs(ratio):.1f}%）"
+    note = " (同等时长估算)" if est_in_size != in_size else ""
+    return f"{_fmt_size(est_in_size)} → {_fmt_size(out_size)}（{direction}{abs(ratio):.1f}%{note}）"
 
 
 class QueueETA:
@@ -2287,6 +2309,9 @@ class EncodeSettings:
     subs_codec: Optional[str] = None  # keep 用：None=copy，否则强制转换码
     subs_burn_file: str = ""          # burn 用：导出的字幕文件路径
     subs_two_stage: bool = False      # keep 用：需remux 挂字幕（源流时长缺失时）
+    # 输出视频的时长/帧数（用于体积归一化对比）
+    duration: float = 0.0
+    nb_frames: int = 0
 
 
 def _hdr_vf(color_range: str = "pc") -> str:
@@ -3210,11 +3235,35 @@ def print_structural_diff(src: Path, dst: Path,
     print(f"    {'  ' if md_a == md_b else '≠ '}{'静态元数据':<10} "
           f"{'有' if md_a != '无' else '无'}  →  {'有' if md_b != '无' else '无'}"
           f"    MaxCLL {a.get('max_cll') or '—'} → {b.get('max_cll') or '—'}")
-    print(_row("时长(s)", "duration"))
-    print(_row("帧数", "nb_frames"))
+    # 体积/时长/帧数对比：若输出被截断，按相同帧数/时长基础归一化显示
+    _src_dur = a.get('duration') or 0
+    _src_frames = a.get('nb_frames') or 0
+    _dst_dur = b.get('duration') or 0
+    _dst_frames = b.get('nb_frames') or 0
+    if _dst_frames > 0 and _src_frames > _dst_frames:
+        # 输出被截断，按输出帧数比例归一化源值
+        ratio = _dst_frames / _src_frames
+        _norm_src_dur = _src_dur * ratio
+        _norm_src_frames = _dst_frames
+        _norm_src_size = int(a.get('size', 0) * ratio)
+    else:
+        _norm_src_dur = _src_dur
+        _norm_src_frames = _src_frames
+        _norm_src_size = None
+
+    print(f"    {'  ' if _norm_src_dur == _dst_dur else '≠ '}{'时长(s)':<10} {_norm_src_dur:.3f}  →  {_dst_dur:.3f}")
+    print(f"    {'  ' if _norm_src_frames == _dst_frames else '≠ '}{'帧数':<10} {_norm_src_frames}  →  {_dst_frames}")
+
+    # 如果归一化了源大小，显示归一化体积对比
+    if _norm_src_size is not None and _norm_src_size > 0:
+        ratio = (1.0 - b.get('size', 0) / _norm_src_size) * 100
+        direction = "↓" if ratio >= 0 else "↑"
+        print(f"      {'体积':<10} {_fmt_size(_norm_src_size)} → {_fmt_size(b.get('size', 0))}（{direction}{abs(ratio):.1f}% 同等帧数估算）")
+    else:
+        print(f"      {'体积':<10} {_size_change(Path(src), Path(dst), a.get('duration'), a.get('nb_frames'), b.get('duration'), b.get('nb_frames'))}")
+
     print(_row("音频", "acodecs"))
     print(_row("字幕", "subs"))
-    print(f"      {'体积':<10} {_size_change(Path(src), Path(dst))}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -4175,6 +4224,10 @@ def build_plan(args: argparse.Namespace, meta: Dict,
                 f"    · 音频被重编码（非逐位保留），体积可能有微小变化。\n"
                 + _tail)
 
+    # 输出视频的时长/帧数（用于体积归一化对比）
+    st.duration = _seg_v_dur
+    st.nb_frames = int(_seg_v_dur * fps) if _seg_v_dur > 0 else int(meta.get("nb_frames") or 0)
+
     decode_cmd = build_decode_cmd(src, _dec_dur, _dec_frames,
                                   decode=decode or getattr(args, "decode_resolved", "cpu"),
                                   src_bits=meta.get("src_bits", 8),
@@ -4640,7 +4693,7 @@ def run_sequential(args: argparse.Namespace, jobs: List[Job],
             job.progress = 1.0
             print(f"  ✔ 完成，用时 {_fmt_time(job.elapsed)}")
             print(f"  {_label('输出文件')}{job.dst}")
-            print(f"  {_label('大小变化')}{_size_change(job.src, job.dst)}")
+            print(f"  {_label('大小变化')}{_size_change(job.src, job.dst, job.info.get('duration'), job.info.get('nb_frames'), job.plan['settings'].duration if job.plan else None, job.plan['settings'].nb_frames if job.plan else None)}")
             print_structural_diff(job.src, job.dst, warn=None)
         else:
             job.status = "failed"
@@ -4697,7 +4750,7 @@ def run_parallel(args: argparse.Namespace, jobs: List[Job],
             job.status = "done"
             job.progress = 1.0
             panel.emit(f"✔ 完成 {job.name}  用时 {_fmt_time(job.elapsed)}  "
-                       f"大小 {_size_change(job.src, job.dst)}")
+                       f"大小 {_size_change(job.src, job.dst, job.info.get('duration'), job.info.get('nb_frames'), job.plan['settings'].duration if job.plan else None, job.plan['settings'].nb_frames if job.plan else None)}")
         else:
             job.status = "failed"
             job.error = "interrupted" if _STOP_REQUESTED.is_set() else job.error

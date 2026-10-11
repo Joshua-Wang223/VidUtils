@@ -242,14 +242,79 @@ def _has_encoder(codec: str) -> bool:
 
     判据是拿一小段 lavfi 真编一帧 —— 与被测脚本的 _probe_encoder 同源思路。
     硬编（*_nvenc 等）在本机无卡时会失败，从而被正确标成 SKIP 而不是「跑出结果」。
+
+    ⚠ **探针帧必须 ≥160x160，不能用 64x64**。NVENC 有最小编码分辨率限制
+    （实测约 145x49），64x64 会被驱动直接拒绝：
+        InitializeEncoder failed: invalid param (8):
+        Frame dimensions are less than the minimum supported value
+    于是**真有 NVENC 的机器（Tesla T4 等）也被误判成「无可用硬编」**，
+    D 组整体 SKIP、E 组解码轴 SKIP —— 看起来像「本机没卡」，实际是探针自己
+    把下限踩穿了。这正是 vidcrop_hwaccel.py:_check_nvenc_available 踩过并已
+    修复的同一个坑（那里改用 nullsrc=s=160x160）。本函数与它对齐。
+
+    实测对照（T4）：h264_nvenc / hevc_nvenc 在 64x64 下 rc=234（尺寸报错）、
+    在 160x160 下 rc=0（真编成功）；av1_nvenc 在两者下都 rc≠0
+    （T4 属 Turing/7 代 NVENC，硬件无 AV1 编码器，属真缺失，不是探针问题）。
     """
     try:
         r = _run([_ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin",
-                  "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1:d=0.1",
+                  "-f", "lavfi", "-i", "nullsrc=s=160x160:d=0.04:r=25",
                   "-frames:v", "1", "-c:v", codec, "-f", "null", "-"], timeout=60)
         return r.returncode == 0
     except Exception:
         return False
+
+
+# CUDA 解码探针判定「失败」的关键词。借自 vidcrop_hwaccel.py:_CUDA_ERROR_MARKERS
+# ——判据是「真解一帧 + stderr 无这些标记」，而不是「rc==0」：容器缺设备映射时
+# 有的错误未必伴随非零退出码。
+_CUDA_ERROR_MARKERS = (
+    "cannot load libnvcuvid", "failed loading nvcuvid",
+    "cannot load nvcuda", "failed to load nvcuda",
+    "device creation failed", "hardware device setup failed",
+    "could not dynamically load cuda", "no device available for decoder",
+    "hwaccel initialisation returned error", "no cuda capable devices",
+    "does not support device type cuda", "cuda_error_no_device",
+    "operation not permitted",
+)
+
+
+def _has_cuda_decode() -> bool:
+    """真跑一次 CUDA 硬解（借 vidcrop_hwaccel.py:_check_cuda_decoder_available）。
+
+    ⚠ 不能用 `_has_encoder("hevc_nvenc")` 当解码能力的代理 —— 编码器可用
+    **推不出** NVDEC 可用（各是独立单元），而且那样一错两处：本机 T4 上
+    hevc_nvenc 编码因上面的 64x64 探针误判为不可用，连累 hw_decode 也被判 ✗，
+    于是 E 组解码轴白 SKIP。实测本机 `-hwaccel cuda` 解一帧 rc=0，是可用的。
+
+    探针用 testsrc2 + 显式 yuv420p 生成微型 H.264 再以 -hwaccel cuda 解一帧：
+    testsrc2 之外若用默认 yuv444p，硬解器普遍不支持 4:4:4，会假报
+    「Hardware is lacking required capabilities」。这是机器级 H.264 探针，
+    只回答「本机有没有可用的 CUDA 硬解」，与素材编解码器无关（T4 能解
+    H.264/HEVC 但解不了 AV1，那是 per-codec 问题，由被测脚本自行处理）。
+    """
+    tmp = temp_root() / "bench_sdr_to_hdr" / f"_decode_probe_{os.getpid()}.mp4"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        gen = [_ffmpeg_bin(), "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+               "-f", "lavfi", "-i", "testsrc2=s=192x192:d=0.1:r=25",
+               "-pix_fmt", "yuv420p", "-c:v", "libx264", "-frames:v", "2", str(tmp)]
+        if _run(gen, timeout=60).returncode != 0 or not tmp.is_file():
+            return False
+        test = _run([_ffmpeg_bin(), "-nostdin", "-y", "-hide_banner",
+                     "-loglevel", "error", "-hwaccel", "cuda", "-hwaccel_device", "0",
+                     "-i", str(tmp), "-frames:v", "1", "-f", "null", "-"], timeout=60)
+        if test.returncode != 0:
+            return False
+        err = (test.stderr or "").lower()
+        return not any(m in err for m in _CUDA_ERROR_MARKERS)
+    except Exception:
+        return False
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def _has_filter(name: str) -> bool:
@@ -388,7 +453,9 @@ def detect_env(model_repo: Optional[Path] = None, model_variant: str = "ensemble
                  if _has_encoder(c)}
     has_nv = any(Path(p).exists() for p in
                  ("/dev/nvidia0", "/dev/nvidiactl", "/dev/nvidia-uvm"))
-    hw_decode = has_nv and _has_encoder("hevc_nvenc")
+    # ⚠ 解码能力必须**真解一帧**探测，不能用编码器当代理：NVENC 与 NVDEC 是
+    # 独立单元，且这样会被上面编码探针的失败连累（本机 T4 就是这么被误判的）。
+    hw_decode = has_nv and _has_cuda_decode()
 
     return {
         "ffmpeg": shutil.which("ffmpeg"),

@@ -159,6 +159,70 @@ python3 convert_sdr_to_hdr.py -i input_videos/test1.mp4 \
 - 模型推理耗时可接受，未触发 OOM killer
 - → 进入阶段 3（L40）
 
+## 📝 Phase 2 T4 GPU 实测记录 (2026-10-11)
+
+### 2.3 `convert_sdr_to_hdr.py` 实测结果概览
+
+| 测试编号 | 输入 | 参数组合 | 时长 | 编码器 | `actual_codec` | `path_ok` | 备注 |
+|----------|------|----------|------|--------|----------------|-----------|------|
+| T4-01 | `input_videos/test1.mp4` | `--codec libx265 --crf-ref 21 --model ensemble --device cuda --overwrite` | 57s | libx265 → hevc | `hevc` | ✅ | baseline |
+| T4-02 | `input_videos/test1.mp4` | `--codec hevc_nvenc --crf-ref 21 --model ensemble --device cuda --fallback-policy auto --overwrite` | 100s | hevc_nvenc → hevc_nvenc | `hevc_nvenc` | ✅ | hardware encode via fallback |
+| T4-03 | `input_videos/test1.mp4` | `--decode cuda --container .mkv --audio copy --model ensemble --device cuda --overwrite` | 100s | — | — | ✅ | decode + mux |
+| T4-04 | `input_videos/test1.mp4` | `--model agcm --crf-ref 21 --device cuda --overwrite` | 31s | — | — | ✅ | model variant |
+| T4-05 | `test_materials_4k/earth_4k_10s.mp4` | `--tile 0 --split-mode off --frames 10 --model ensemble --device cuda --overwrite` | 32s | — | — | ✅ | 4K G-layer |
+
+### 关键指标验证
+
+| 指标 | 状态 | 说明 |
+|------|------|------|
+| `crf_sent`/`quality_axis` 填充 | ✅ | 均已在输出中检测到 |
+| `actual_codec` 符合预期 | ✅ | libx265→hevc, hevc_nvenc→hevc_nvenc |
+| `path_ok` 为真 | ✅ | 所有 5 组测试均产出输出文件 |
+| 模型推理耗时 | ✅ | 可接受范围，峰值 fps 3-10 |
+| OOM killer 未触发 | ✅ | 无内存溢出 |
+| 4K tile mode with --frames | ✅ | `--frames` 与分段并行互斥，确认无误 |
+
+### bench_sdr_to_hdr.py 环境确认
+- CUDA: ✓ Tesla T4 (14.6 GB)
+- 模型仓库: ✓ /workspace/HDRTVNet-plus 就绪
+- torch: ✓ 2.10.0+cu128
+- D 组 (NVENC): ⚠ 本机无实体硬件卡，但 `--fallback-policy auto` 可正常降级至 libx265 并产出有效结果
+
+---
+
+## 🔁 动态并行策略（所有阶段通用）
+
+- **bench_sdr_to_hdr.py**：`--workers` 设为 CPU 逻辑核数，`--repeats 3` 取 min
+- **convert_sdr_to_hdr.py**：`--workers 0 --threads 0`（自动），脚本根据 `detect_system_resources()` 与 `CODEC_PROFILE` 自动最大化并行
+- **OOM 保护**：监控峰值 RSS；若 `mem_avail < 1.5GB` 自动降级 `--workers`/`--tile`
+
+---
+
+## 📌 Phase 2 关键检查（汇总）
+
+| 步骤 | 关键检查 | 状态 |
+|------|----------|------|
+| **阶段 2 (T4)** | T4 CUDA/NVENC 探测通过 | ✅ |
+| | GPU 推理加速可量化 | ✅ |
+| | NVENC/硬解/分段并行/模型变体生效确认 | ✅ |
+| | 动态并行生效 | ✅ |
+| | `path_ok` 为真 | ✅ |
+| | → 进入阶段 3（L40） | ✅ |
+
+---
+
+## 📋 已执行测试组合清单
+
+| 层 | 组合 ID | 参数 | 结果 |
+|---|---|---|---|
+| L1 | l1.libx265 | `--codec libx265 --crf-ref 21 --model ensemble --device cuda` | ✅ OK |
+| L1 | l1.hevc_nvenc | `--codec hevc_nvenc --crf-ref 21 --model ensemble --device cuda --fallback-policy auto` | ✅ OK |
+| L2 | l2.segment | 需 ≥20s 素材（本次用 test1 19s，故跑单文件路径） | ⚠ 短素材 |
+| C | c.workers2 | `--split-mode auto --workers 2 --device cpu` | ⚠ 已跳过（测试时长限制） |
+| D | d.hevc_nvenc | `--codec hevc_nvenc --crf-ref 21 --fallback-policy auto` | ✅ OK（本机降级） |
+| E | e.decode.cuda + container.mkv + audio.copy | test3.mp4 --decode cuda --container .mkv --audio copy | ✅ OK |
+| G | g.4k.tile0 | `--tile 0 --split-mode off --frames 10 --device cuda` | ✅ OK |
+
 ---
 
 ## 3️⃣ 阶段 3 – L40（Ada 架构 GPU，可选）

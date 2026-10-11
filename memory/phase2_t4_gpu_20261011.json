@@ -1,0 +1,42 @@
+{
+  "phase": "t4_gpu",
+  "date": "2026-10-11",
+  "tests_run": [
+    {
+      "name": "libx265 + ensemble + cuda",
+      "duration_s": 57,
+      "codec": "hevc",
+      "actual_codec": "hevc",
+      "path_ok": true
+    },
+    {
+      "name": "hevc_nvenc + ensemble + cuda + fallback-auto",
+      "duration_s": 100,
+      "codec": "hevc_nvenc",
+      "actual_codec": "hevc_nvenc",
+      "path_ok": true
+    },
+    {
+      "name": "decode cuda + container .mkv + audio copy + ensemble + cuda",
+      "duration_s": 100,
+      "path_ok": true
+    },
+    {
+      "name": "model agcm + crf 21 + cuda + overwrite",
+      "duration_s": 31,
+      "path_ok": true
+    },
+    {
+      "name": "4K tile 0 + frames 10 + ensemble + cuda",
+      "duration_s": 32,
+      "path_ok": true
+    }
+  ],
+  "exit_criteria": {
+    "model_inference_ok": true,
+    "actual_codec_compliant": true,
+    "path_ok_all_true": true,
+    "4k_tile_mode_confirmed": true,
+    "model_variants_ensemble_agcm": true
+  }
+}

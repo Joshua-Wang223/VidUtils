@@ -4523,7 +4523,22 @@ def run_job(args: argparse.Namespace, job: Job, plan: Dict,
                                f"（差额在容差内，可能是容器自报值不精确）")
             rc = 0
     except BrokenPipeError:
-        job.error = "编码端提前退出（管道断开）"
+        # enc 提前退出。真实死因在 enc_sink（stderr 排空缓冲）里：
+        # · 退出码 137 = 被 SIGKILL（典型是 cgroup OOM killer —— 容器内存限额
+        #   下 4K 管线：torch+CUDA context+双 ffmpeg+25MB/帧缓冲，极易触顶）；
+        # · NVENC 初始化失败（会话超限/驱动）会带 OpenEncodeSessionEx 等字样。
+        # 此前这里只写「管道断开」、把 enc 的 stderr 整个丢了 ⇒ 无法定位。
+        _erc = enc.poll()
+        _etail = chr(10).join(enc_sink[-6:]).strip()[:400]
+        if _erc is None:
+            try:
+                _erc = enc.wait(timeout=5)
+            except Exception:
+                _erc = -1
+        job.error = ("编码端提前退出（管道断开）"
+                     + (f"，编码器退出码 {_erc}"
+                        + ("（SIGKILL，疑似 OOM）" if _erc in (137, -9) else "")
+                        + (f"：{_etail}" if _etail else "")))
         rc = 1
     except KeyboardInterrupt:
         raise
@@ -4706,7 +4721,13 @@ def run_sequential(args: argparse.Namespace, jobs: List[Job],
             job.progress = 1.0
             print(f"  ✔ 完成，用时 {_fmt_time(job.elapsed)}")
             print(f"  {_label('输出文件')}{job.dst}")
-            print(f"  {_label('大小变化')}{_size_change(job.src, job.dst, job.info.get('duration'), job.info.get('nb_frames'), getattr(job.plan, 'settings', None).duration if getattr(job, 'plan', None) else None, getattr(job.plan, 'settings', None).nb_frames if getattr(job, 'plan', None) else None)}")
+            # ⚠ job.plan 只有 _run_job_with_fallback 成功路径会赋值；segment /
+            # workers 并行路径（run_job_segmented / run_job_multiproc）只给段内
+            # job 建 plan，顶层 job.plan 始终不存在 ⇒ 直接访问会 AttributeError。
+            # plan 是 dict（build_plan 的返回），settings 键必存，仍按不存在兜底。
+            _plan = getattr(job, "plan", None)
+            _st = _plan.get("settings") if isinstance(_plan, dict) else None
+            print(f"  {_label('大小变化')}{_size_change(job.src, job.dst, job.info.get('duration'), job.info.get('nb_frames'), _st.duration if _st else None, _st.nb_frames if _st else None)}")
             print_structural_diff(job.src, job.dst, warn=None)
         else:
             job.status = "failed"
@@ -4762,8 +4783,11 @@ def run_parallel(args: argparse.Namespace, jobs: List[Job],
         if rc == 0:
             job.status = "done"
             job.progress = 1.0
+            # 同 run_sequential：job.plan 可能不存在（防御性写法），plan 是 dict。
+            _plan = getattr(job, "plan", None)
+            _st = _plan.get("settings") if isinstance(_plan, dict) else None
             panel.emit(f"✔ 完成 {job.name}  用时 {_fmt_time(job.elapsed)}  "
-                       f"大小 {_size_change(job.src, job.dst, job.info.get('duration'), job.info.get('nb_frames'), getattr(job.plan, 'settings', None).duration if getattr(job, 'plan', None) else None, getattr(job.plan, 'settings', None).nb_frames if getattr(job, 'plan', None) else None)}")
+                       f"大小 {_size_change(job.src, job.dst, job.info.get('duration'), job.info.get('nb_frames'), _st.duration if _st else None, _st.nb_frames if _st else None)}")
         else:
             job.status = "failed"
             job.error = "interrupted" if _STOP_REQUESTED.is_set() else job.error
@@ -5142,7 +5166,15 @@ def run_job_multiproc(args: argparse.Namespace, job: Job, meta: Dict,
                 last_cb = now
                 on_update(job)
     except BrokenPipeError:
-        job.error = "编码端提前退出（管道断开）"
+        # 同 run_job：把 enc 退出码与 stderr 尾部带出（137 = SIGKILL，典型 cgroup OOM）。
+        _erc = enc.poll()
+        _etail = chr(10).join(enc_sink[-6:]).strip()[:400]
+        if _erc is None:
+            _erc = enc.wait(timeout=5) or -1
+        job.error = ("编码端提前退出（管道断开）"
+                     + (f"，编码器退出码 {_erc}"
+                        + ("（SIGKILL，疑似 OOM）" if _erc in (137, -9) else "")
+                        + (f"：{_etail}" if _etail else "")))
         rc = 1
     except KeyboardInterrupt:
         _terminate(dec, enc)

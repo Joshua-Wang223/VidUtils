@@ -1,0 +1,75 @@
+{
+  "phase": "t4_rootcause_l40_issues",
+  "date": "2026-10-12",
+  "env": {
+    "gpu": "Tesla T4",
+    "vram_mib": 15360,
+    "cgroup_mem_gb": 32.0,
+    "cpu_cores_cgroup": 8,
+    "driver": "580.65.06",
+    "cuda": "13.0",
+    "ffmpeg_nvenc_version": "13.0"
+  },
+  "issue_1_attributeerror": {
+    "status": "fixed",
+    "symptom": "AttributeError: 'Job' object has no attribute 'plan'（run_sequential:4709 / run_parallel:4766 成功分支崩）",
+    "root_cause": "run_job_segmented(:4887)/run_job_multiproc(:5052) 只给段内 job 建 plan，顶层 job.plan 从不赋值",
+    "trigger": "--split-mode auto + workers>1 + duration>=20s(_SEGMENT_MIN_SECONDS)",
+    "fix": "成功分支提取 _plan/_st 变量 + isinstance(dict) + .get('settings') 安全访问（:4704-4715 / :4768-4779）",
+    "t4_repro": "4K + --frames 30 命中并行路径，修复前必崩、修复后正常",
+    "model_independent": true
+  },
+  "issue_2_4k_pipe_disconnect": {
+    "status": "root_caused_diagnostics_added",
+    "symptom": "L40 4K 编码第2-3帧后 enc 退出，BrokenPipe -> 编码端提前退出（管道断开），3/3 必现",
+    "experiments": [
+      {"name": "T4 同参数 --split-mode off --frames 30", "result": "success x2"},
+      {"name": "裸 ffmpeg 4K HEVC NVENC p010", "result": "success 72fps"},
+      {"name": "6 路并发 4K NVENC", "result": "all success", "excludes": "session limit"}
+    ],
+    "root_cause": "L40 容器 cgroup 内存限额 4GB（可用仅1.8GB），4K 管线 RSS≈1.4GB 触顶 -> OOM killer 杀 enc ffmpeg(137) -> BrokenPipe",
+    "rss_measured": {
+      "720p_full_pipeline_mib": "1050-1115",
+      "4k_full_pipeline_mib": 1377,
+      "4k_no_model_mib": 1259
+    },
+    "diagnostic_enhancement": "BrokenPipe 分支带出 enc 退出码 + 137=SIGKILL疑似OOM + stderr 尾6行（:4525-4540 / :5153-5162），单测验证通过",
+    "l40_recheck": "待回 L40 实锤（预期退出码137）"
+  },
+  "issue_3_model_concurrency_conflict": {
+    "status": "refuted",
+    "claim": "hr/agcm 模型与编码并发冲突导致管道断开",
+    "evidence": "T4 test2.mp4 三模型全部成功；RSS 峰值 1115/1096/1084MB 差异<3%",
+    "conclusion": "L40 上失败为内存受限+慢模型长时长的次生 OOM，非模型-编码耦合"
+  },
+  "test2_mp4_model_matrix": [
+    {
+      "name": "hevc_nvenc + ensemble + cuda",
+      "duration_s": 373,
+      "fps_avg": 6,
+      "rss_peak_kib": 1115612,
+      "nb_frames": 2190,
+      "path_ok": true
+    },
+    {
+      "name": "hevc_nvenc + hr + cuda",
+      "duration_s": 374,
+      "fps_avg": 6,
+      "rss_peak_kib": 1096356,
+      "nb_frames": 2190,
+      "path_ok": true
+    },
+    {
+      "name": "hevc_nvenc + agcm + cuda",
+      "duration_s": 83,
+      "fps_avg": 26,
+      "rss_peak_kib": 1084372,
+      "nb_frames": 2190,
+      "path_ok": true
+    }
+  ],
+  "corrections": [
+    "修正模型轴旧数据：ensemble 与 hr 用时/帧率相当（6m13s/6m14s, 6fps），旧「hr ~25s/帧」估计作废",
+    "agcm 26fps 为 ensemble/hr 的约 4.4 倍"
+  ]
+}

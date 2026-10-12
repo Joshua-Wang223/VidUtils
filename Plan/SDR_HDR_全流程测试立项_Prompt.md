@@ -148,13 +148,17 @@ python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
 | **T4-08** | `input_videos/test2.mp4` | `--model agcm --crf-ref 21 --device cuda --overwrite` | ~1m 30s | — | — | ✅ | 最快模型变体|
 | **T4-09** | `input_videos/test2.mp4` | `--model hr --crf-ref 21 --device cuda --overwrite` (--frames 5) | ~25s/5帧 | — | — | ✅ | 最慢模型: GAN质量增强|
 
-### 📊 模型轴速度排名 (test2.mp4 73.13s)
+### 📊 模型轴速度排名 (test2.mp4 73.13s, T4 实测 2026-10-12)
 
-|排名|模型|时长|相速率|质量特征|适用场景|
-|----|----|----|----|----|----|
-|**1st (最快)**|**agcm**|**~1m 30s**|**ensemble 的 40-45%**|全局色调映射仅|极速/省显存需求|
-|**2nd**|**ensemble**|**~3m 45s**|**1.0x (基准)**|AGCM + LE 级联（端到端）|**推荐默认**：定量最优|
-|**3rd (最慢)**|**hr**|**~25s/帧** (5帧测)|**1.5-1.8x**|GAN 微调版|感知质量增强|
+|排名|模型|用时|均速|RSS 峰值|质量特征|适用场景|
+|----|----|----|----|----|----|----|
+|**1st (最快)**|**agcm**|**1m23s**|**26fps**|1084MB|全局色调映射仅|极速/省时需求|
+|**2nd**|**ensemble**|**6m13s**|**6fps**|1115MB|AGCM + LE 级联（端到端）|**推荐默认**：定量最优|
+|**3rd**|**hr**|**6m14s**|**6fps**|1096MB|GAN 微调版|感知质量增强|
+
+> 2026-10-12 T4 环境（8 核 / 32GB）全量实测：**ensemble 与 hr 用时/帧率相当
+> （6m1x / 6fps）**，修正旧记录中「hr ~25s/帧」的估计；agcm 快约 4.4 倍。
+> RSS 峰值差异 <3% ⇒ 模型选择不改变内存峰值（详见文末 3.6 节）。
 
 ### 📁 素材适配性章节
 
@@ -402,6 +406,76 @@ python3 convert_sdr_to_hdr.py -i input_videos/test1.mp4 \
 | **M** | m.ensemble/agcm/le/hr | 模型变体对比 | `--model {ensemble,agcm,le,hr} --crf-ref 21` | torch+模型 | 文件级 |
 
 > ⚠ **SKIP 判据明确**：每个组合在 `check_combo_preconditions()` 中显式检查前置条件（硬件编码器真可用、硬解真可用、素材时长/音轨/字幕满足要求、编码器在 QUALITY_MAP 内），不满足即标记 `SKIP` 并记录原因，**不产出假数据**。
+
+---
+
+## 🔧 Phase 3 (L40) 问题定位与修复记录 (2026-10-12)
+
+> 背景：L40（Ada）实测中 4K 编码反复报「编码端提前退出（管道断开）」、任务成功后
+> 汇报体积变化时抛 `AttributeError: 'Job' object has no attribute 'plan'`。
+> 本轮在 T4 上受控复现与变量隔离，完成根因定位与代码修复，并为 L40 复核做好准备。
+
+### 3.4 问题一：AttributeError（根因实锤，已修复）
+
+**根因**：`run_job_segmented()`（`convert_sdr_to_hdr.py:4887`）与
+`run_job_multiproc()`（`:5052`）只给段内 job 建 plan，**顶层 `job.plan` 从不赋值**；
+`run_sequential` / `run_parallel` 的成功分支（`:4709` / `:4766`）直接访问即崩。
+
+**触发条件**：`--split-mode auto`（默认）+ `workers>1` + 时长 ≥ 20s
+（`_SEGMENT_MIN_SECONDS=20.0`，`:4830`）⇒ 走 segment 并行路径。
+**与模型无关**（ensemble 同样崩）。
+
+**修复**：成功分支提取 `_plan`/`_st` 变量，`isinstance(_plan, dict)` 判定 +
+`.get('settings')` 安全访问；顺序/并行两条路径同样处理（`:4704-4715`、`:4768-4779`）。
+
+**T4 复现验证**：4K 素材 + `--frames 30` 命中并行路径，修复前必崩、修复后正常汇报。
+
+### 3.5 问题二：4K「管道断开」根因（证据链 → cgroup OOM）
+
+| 实验 | 结果 | 排除/证实 |
+|----|----|----|
+| T4 同参数 `--split-mode off --frames 30` | ✅ 成功 ×2 | 排除分辨率本身 |
+| 裸 ffmpeg 4K HEVC NVENC p010 | ✅ 72 帧无错 | 排除编码器 4K 能力 |
+| 6 路并发 4K NVENC | ✅ 全部完成 | **排除会话超限** |
+| L40 环境 cgroup 内存 | **限额 4GB（可用 1.8GB）** vs T4 32GB | 关键环境差异 |
+| T4 RSS 实测：720p 完整管线 | 1.05–1.11GB | 已超 L40 可用量一半 |
+| T4 RSS 实测：**4K 完整管线** | **1.38GB**（`--no-model` 也 1.26GB） | 触顶即 OOM |
+
+**根因**：L40 容器 4GB 内存限额下，4K 管线（RSS≈1.4GB + page cache）触顶 →
+cgroup OOM killer 杀 enc ffmpeg（SIGKILL=137）→ `enc.stdin.write` 抛
+BrokenPipe → 报「编码端提前退出（管道断开）」。
+
+**诊断增强（已上线）**：BrokenPipe 分支现在带出 enc 退出码、
+`137=SIGKILL 疑似 OOM` 提示与 stderr 尾 6 行（`:4525-4540`、`:5153-5162`；
+单测验证输出「编码器退出码 137（SIGKILL，疑似 OOM）：hevc_nvenc: ...」）。
+
+### 3.6 问题三：「模型与编码并发冲突」——证伪
+
+T4 实测 test2.mp4（73.13s，hevc_nvenc，cuda）三模型全量对比：
+
+| 模型 | 用时 | RSS 峰值 | 均速 | 产物完整性 |
+|----|----|----|----|----|
+| ensemble | 6m13s | 1115MB | 6fps | ✅ 2190 帧/73s |
+| hr | 6m14s | 1096MB | 6fps | ✅ 2190 帧/73s |
+| agcm | **1m23s** | 1084MB | **26fps** | ✅ 2190 帧/73s |
+
+- RSS 峰值差异 <3% ⇒ 模型选择**不改变内存峰值**
+- 三模型全部成功 ⇒ 不存在「模型-编码耦合崩溃」；L40 上 hr/agcm 失败是
+  **内存受限 + 慢模型长时长**的次生 OOM
+- **修正旧结论**：ensemble 与 hr 用时/帧率相当（6m1x / 6fps），旧记录
+  「hr ~25s/帧」为早期 5 帧小样本估计，作废
+
+### 3.7 L40 复核清单（回 L40 环境执行，验证修复效果）
+
+1. **4K 短片段回归**：`--model agcm --split-mode off --frames 30`
+   → 预期完成；若仍失败，新诊断会给出退出码/stderr（137 = OOM 实锤）
+2. **若确认 OOM**：向运维提 L40 容器内存限额（≥6GB），或改用
+   `--frames 30` 分段跑后 `-c copy` 拼接规避
+3. **AttributeError 回归**：`--split-mode auto --workers 2` + ≥20s 素材
+   → 成功分支正常输出「大小变化」不再崩
+4. **av1_nvenc 复核**：`--codec av1_nvenc --cq 26 --nvenc-tune uhq` + 4K 短片段
+   （仅 Ada 支持；L40 独有项）
+5. 结果写入 `memory/phase3_l40_gpu_20261012.json`（命名规范见「记录与回溯」）
 
 ---
 

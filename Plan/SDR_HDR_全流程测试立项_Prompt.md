@@ -79,6 +79,8 @@ python3 convert_sdr_to_hdr.py -i input_videos/test1.mp4 \
 ### 2.1 环境与能力确认
 ```bash
 python3 Accessory/probe/bench_sdr_to_hdr.py --env   # 确认 CUDA 可用、NVENC 可用
+# 修复后输出应显示：硬件编码 : ✓ h264_nvenc, hevc_nvenc
+# 旧版本（本次修复前）会因 token 判据误报而显示 ✗ 无，导致 D 组整体 SKIP
 python3 convert_sdr_to_hdr.py --env
 ```
 
@@ -124,7 +126,7 @@ python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
 
 **出口**：
 - T4 有模型推理所有核心组合 `OK`，VMAF 门禁通过
-- `actual_codec` 符合预期（NVENC 真跑还是降级、硬解真用还是回退）
+- `actual_codec` 符合预期（NVENC 真跑/降级、硬解真用/回退）——**脚本修复后探测正确，不再出现「无卡静默塌成」的假阴性**
 - `path_ok` 为真
 - 分段并行/多进程推理路径生效确认（stdout 抓 `分段并行：N 段` / `单解码 + N 推理进程`）
 - 动态并行生效（观测 `--workers` 自动调整与内存/CPU 占用）
@@ -186,7 +188,7 @@ python3 convert_sdr_to_hdr.py -i input_videos/test1.mp4 \
 - CUDA: ✓ Tesla T4 (14.6 GB)
 - 模型仓库: ✓ /workspace/HDRTVNet-plus 就绪
 - torch: ✓ 2.10.0+cu128
-- D 组 (NVENC): ⚠ 本机无实体硬件卡，但 `--fallback-policy auto` 可正常降级至 libx265 并产出有效结果
+- D 组 (NVENC): ✓ 脚本修复后探测正确（`hevc_nvenc, h264_nvenc`）；`--fallback-policy auto` 可正常降级至 libx265
 
 ---
 

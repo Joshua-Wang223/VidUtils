@@ -28,6 +28,15 @@ type: project
 各段 fps 之和 ÷ 源帧率 = 聚合 speed）。此值仍是从 `job.fps` 派生的显示量，**不是**独立计时，
 benchmark 依旧别拿它当权威 fps。
 
+⚠ 同源的第二处（同日发现并修）：`--split-mode segment` 下进度条**恒显示「0帧 fps=… speed=…」**。
+根因同上——并发路径里的**顶层 job 是个"代理"**，`_bump()` 只同步了 `progress/fps/speed`，
+漏了 `frame`；而 `job.total_frames` 在分段路径里**从没被赋值过**（只有 `run_job` /
+`run_job_multiproc` 会设），于是 `SingleProgress` 永远走「未知总帧数」分支（没有进度条），
+再叠加 `frame` 恒 0 ⇒ 空有 fps/speed 却一个帧数都不显示。修法：进入分段前按
+`nb_frames`（或 `duration×fps`）设 `job.total_frames`，并在 `_bump()` 里
+`job.frame = sum(s.frame for s in seg_jobs)`。⇒ 教训：**改并发路径的实时显示字段时，
+`progress`/`fps`/`speed`/`frame`/`total_frames` 要成套同步**，漏一个就会呈现半截信息。
+
 ## 2. 三条执行路径的 `job.elapsed` 口径不一致，不可横向比
 
 - `run_job`（整条）：t0 在两个 ffmpeg `Popen` **之后**，**不含**模型加载

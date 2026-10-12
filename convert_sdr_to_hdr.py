@@ -4912,6 +4912,16 @@ def run_job_segmented(args: argparse.Namespace, job: Job, meta: Dict,
     # 而且均速（需要 total_time>0）会整条缺省。
     t_seg = time.time()
 
+    # 顶层 job 的总帧数必须在这里设：分段路径此前从不赋 job.total_frames，于是
+    # SingleProgress 永远走「未知总帧数」分支（没有进度条）；而 job.frame 也没人更新
+    # （只有末尾拼接后才写一次），两相叠加 ⇒ 整个分段过程进度条恒显示「0帧 fps=… speed=…」。
+    # （与上一处 speed 恒空同源：顶层 job 的实时字段在并发路径里没跟 _bump 同步。）
+    _fps_src = float(meta.get("fps") or 0.0)
+    _nbf = int(meta.get("nb_frames") or 0)
+    if _nbf <= 0 and duration > 0 and _fps_src > 0:
+        _nbf = int(round(duration * _fps_src))
+    job.total_frames = max(0, _nbf)
+
     tmpdir = job.dst.parent / f".hdrseg_{job.dst.stem}"
     tmpdir.mkdir(parents=True, exist_ok=True)
     seg_paths = [tmpdir / f"seg{i:03d}{job.dst.suffix}" for i in range(len(ranges))]
@@ -4932,11 +4942,13 @@ def run_job_segmented(args: argparse.Namespace, job: Job, meta: Dict,
         with prog_lock:
             done = sum(s.progress for s in seg_jobs) / len(seg_jobs)
             job.progress = done
+            # 各段已处理帧数相加 = 顶层已处理帧数（此前漏更新 ⇒ 进度条恒显示「0帧」）
+            job.frame = sum(s.frame for s in seg_jobs)
             job.fps = sum(s.fps for s in seg_jobs if s.fps > 0)
             if job.fps > job.peak_fps:
                 job.peak_fps = job.fps
             # 段并发：各段 fps 相加即「总处理帧率」，除以源帧率就是聚合 speed
-            job.speed = _speed_str(job.fps, float(meta.get("fps") or 0.0))
+            job.speed = _speed_str(job.fps, _fps_src)
             if on_update:
                 on_update(job)
 
@@ -5012,7 +5024,7 @@ def run_job_segmented(args: argparse.Namespace, job: Job, meta: Dict,
         if job.elapsed > 0 and n_frames > 0:
             job.fps = n_frames / job.elapsed
             job.peak_fps = max(job.peak_fps, job.fps)
-        job.speed = _speed_str(job.fps, float(meta.get("fps") or 0.0))
+        job.speed = _speed_str(job.fps, _fps_src)
     return rc
 
 

@@ -4706,7 +4706,7 @@ def run_sequential(args: argparse.Namespace, jobs: List[Job],
             job.progress = 1.0
             print(f"  ✔ 完成，用时 {_fmt_time(job.elapsed)}")
             print(f"  {_label('输出文件')}{job.dst}")
-            print(f"  {_label('大小变化')}{_size_change(job.src, job.dst, job.info.get('duration'), job.info.get('nb_frames'), job.plan['settings'].duration if job.plan else None, job.plan['settings'].nb_frames if job.plan else None)}")
+            print(f"  {_label('大小变化')}{_size_change(job.src, job.dst, job.info.get('duration'), job.info.get('nb_frames'), getattr(job.plan, 'settings', None).duration if getattr(job, 'plan', None) else None, getattr(job.plan, 'settings', None).nb_frames if getattr(job, 'plan', None) else None)}")
             print_structural_diff(job.src, job.dst, warn=None)
         else:
             job.status = "failed"
@@ -4763,7 +4763,7 @@ def run_parallel(args: argparse.Namespace, jobs: List[Job],
             job.status = "done"
             job.progress = 1.0
             panel.emit(f"✔ 完成 {job.name}  用时 {_fmt_time(job.elapsed)}  "
-                       f"大小 {_size_change(job.src, job.dst, job.info.get('duration'), job.info.get('nb_frames'), job.plan['settings'].duration if job.plan else None, job.plan['settings'].nb_frames if job.plan else None)}")
+                       f"大小 {_size_change(job.src, job.dst, job.info.get('duration'), job.info.get('nb_frames'), getattr(job.plan, 'settings', None).duration if getattr(job, 'plan', None) else None, getattr(job.plan, 'settings', None).nb_frames if getattr(job, 'plan', None) else None)}")
         else:
             job.status = "failed"
             job.error = "interrupted" if _STOP_REQUESTED.is_set() else job.error

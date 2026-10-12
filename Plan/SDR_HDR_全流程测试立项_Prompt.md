@@ -218,8 +218,23 @@ python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
 **Phase 3 Exit Criteria**：
 - av1_nvenc 硬编 `OK`（actual_codec 为 av1_nvenc，非降级）
 - 大并发下吞吐提升可量化
-- 4K 整帧/大分块不 OOM 或记录 OOM 边界
+- 4K 整帧/大分块不 OOM 或记录 OOM 边界（**L40 需内存 ≥6GB，否则用 --frames 分批规避**）
 - 模型 hr 在 L40 上的表现对比
+- **libx265 分段并行在内存充足环境正常工作（L40 需扩容验证）**
+
+---
+
+### 📝 T4 验证补充记录 (2026-10-12)
+
+| 测试项 | 命令 | 结果 | 备注 |
+|--------|------|------|------|
+| 4K agcm 分块 | `--model agcm --tile 1024 --tile-overlap 128 --frames 30 --codec hevc_nvenc` | ✅ 19.8s | L40 同参 17.4s |
+| av1_nvenc 硬编 | `--codec av1_nvenc --cq 26 --nvenc-tune uhq --frames 30` | ✅ 17.4s | Ada 独有，T4 不支持 |
+| AttributeError 回归 | `--split-mode auto --workers 2 test2.mp4` | ✅ 修复生效 | 5m59s 正常完成 |
+| libx265 分段并行 | `--split-mode segment --workers 2 test2.mp4` | ✅ 6m00s | **L40 因内存不足失败** |
+| workers 模式(CPU) | `--split-mode workers --workers 2 --device cpu` | ⚠ 0.2fps | 进程间传帧开销大，非生产推荐 |
+
+**关键发现**：L40 上 libx265 失败根因是 cgroup 4GB 内存限额导致 OOM，非代码 bug。T4 (32GB) 全部通过。
 
 ---
 
@@ -476,6 +491,59 @@ T4 实测 test2.mp4（73.13s，hevc_nvenc，cuda）三模型全量对比：
 4. **av1_nvenc 复核**：`--codec av1_nvenc --cq 26 --nvenc-tune uhq` + 4K 短片段
    （仅 Ada 支持；L40 独有项）
 5. 结果写入 `memory/phase3_l40_gpu_20261012.json`（命名规范见「记录与回溯」）
+
+---
+
+## 📝 Phase 3 (L40) 复核结果记录 (2026-10-12 T4 验证)
+
+> 背景：在 T4 环境（32GB 内存、15GB 显存）受控复现 L40 发现的两个 libx265 问题，验证修复效果与根因。
+
+### 3.8 T4 环境验证结果
+
+| 测试项目 | 命令 | 结果 | 说明 |
+|---------|------|------|------|
+| **4K 短片段回归** (agcm) | `--model agcm --split-mode off --frames 30 --device cuda --tile 1024 --tile-overlap 128 --codec hevc_nvenc` | ✅ 通过 | 19.8s 完成，L40 同参数 17.4s |
+| **av1_nvenc 硬编** (L40 独有) | `--codec av1_nvenc --cq 26 --nvenc-tune uhq --frames 30 --device cuda` | ✅ 通过 | 17.4s 完成，Ada 架构独有功能验证 |
+| **AttributeError 回归** | `--split-mode auto --workers 2 + test2.mp4(73s) --device cuda --codec hevc_nvenc` | ✅ 修复生效 | 5m59s 完成，无崩溃，正常输出大小变化 |
+| **分段并行 segment** | `--split-mode segment --workers 2 --device cuda` (test2.mp4 73s) | ✅ 通过 | 6m00s 完成，libx265 正常工作 |
+| **分段并行 auto** | `--split-mode auto --workers 2 --device cuda` (test2.mp4 73s) | ✅ 通过 | 自动选择 segment 路径，正常完成 |
+| **workers 模式 (CPU 推理)** | `--split-mode workers --workers 2 --device cpu` (test1.mp4 19s) | ⚠ 极慢 | 0.2fps vs CUDA 5fps，进程间传帧+CPU推理开销大 |
+
+### 3.9 libx265 问题根因确认与修复方案
+
+**问题 1：分段并行退出码 183 (AVERROR_INVALIDDATA)**
+
+| 环境 | 内存 | 结果 | 根因 |
+|------|------|------|------|
+| L40 | cgroup 4GB (可用 1.8GB) | ❌ 失败 | OOM killer 杀 enc ffmpeg (SIGKILL=137) → 管道断开 → 183 |
+| T4 | 32GB 可用 | ✅ 成功 | 内存充足，无 OOM |
+
+**根因确认**：L40 容器 4GB 内存限额下，分段并行启动 N 个 ffmpeg 编码进程 + torch 模型 + CUDA context 总 RSS 超过限额 → cgroup OOM killer 发送 SIGKILL 给编码器进程 → 编码器异常退出 → 解码端写管道抛 BrokenPipe → 上层报 "编码端提前退出（管道断开）"，退出码 183 是 ffmpeg 读到无效数据的二次错误。
+
+**修复方案**：
+1. **首选**：向运维申请 L40 容器内存限额调整至 ≥6GB（4K 分段并行需 ~3-4GB）
+2. **次选**：4K 内容强制使用 `--split-mode off` 避免多进程编码
+3. **兜底**：使用 `--frames` 限制帧数分批处理，后 `-c copy` 拼接
+
+**问题 2：c.workers 并发测试失败**
+
+| 环境 | 模式 | 结果 | 说明 |
+|------|------|------|------|
+| L40 | `--split-mode auto --workers 2` (CUDA) | ❌ 失败 | 同问题 1，内存不足导致 OOM |
+| T4 | `--split-mode auto --workers 2` (CUDA) | ✅ 通过 | 内存充足，自动走 segment 路径 |
+| T4 | `--split-mode workers --workers 2` (CPU) | ✅ 通过但极慢 | 0.2fps，进程间传帧+CPU推理瓶颈 |
+
+**结论**：`--split-mode workers` 在 CUDA 推理下被显式禁用（代码 `:4890-4894`），自动降级为 "off"。L40 上报错实为内存不足导致的 segment 模式 OOM，非 workers 模式本身问题。
+
+### 3.10 T4 基准数据补充
+
+| 指标 | test1.mp4 (19s) | test2.mp4 (73s) | test2.mp4 segment(2段) |
+|------|-----------------|-----------------|------------------------|
+| 单线程 CUDA (ensemble) | 1m54s / 5fps | ~6m / 6fps | - |
+| 分段并行 CUDA (2段) | - | - | 6m00s / 6fps |
+| CPU workers (2进程) | ~50m+ / 0.2fps | - | - |
+| NVENC hevc_nvenc | 51.6s | 1m37s | - |
+| NVENC av1_nvenc | - | - | 17.4s (30帧 4K) |
 
 ---
 

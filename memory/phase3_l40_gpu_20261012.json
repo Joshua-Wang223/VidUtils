@@ -1,0 +1,267 @@
+{
+  "bench_version": "1.0",
+  "argv": [
+    "-i",
+    "../input_videos/test2.mp4",
+    "--layers",
+    "d",
+    "--codecs",
+    "av1_nvenc",
+    "--crf-ref",
+    "21",
+    "--model",
+    "ensemble",
+    "--frames",
+    "30",
+    "--repeats",
+    "1",
+    "--work",
+    "1",
+    "--json",
+    "memory/phase3_l40_gpu_20261012.json"
+  ],
+  "source": {
+    "path": "../input_videos/test2.mp4",
+    "width": 1280,
+    "height": 720,
+    "fps": 30.0,
+    "duration": 73.133333,
+    "nb_frames": 2194,
+    "pix_fmt": "yuv420p",
+    "vcodec": "h264",
+    "has_audio": true,
+    "color_transfer": "bt709",
+    "size": 15207780
+  },
+  "env": {
+    "ffmpeg": "/usr/bin/ffmpeg",
+    "ffprobe": "/usr/bin/ffprobe",
+    "torch": true,
+    "torch_version": "2.10.0+cu128",
+    "cuda": true,
+    "model_repo": "/workspace/HDRTVNet-plus",
+    "model_codes": true,
+    "model_weights": true,
+    "model_ready": true,
+    "filters": {
+      "libvmaf": true,
+      "tonemap": true,
+      "zscale": true
+    },
+    "hw_codecs": [
+      "av1_nvenc",
+      "h264_nvenc",
+      "hevc_nvenc"
+    ],
+    "hw_decode": true,
+    "has_nvidia_dev": true,
+    "cpu": 48,
+    "cpu_src": "cgroup (/sys/fs/cgroup/cpu.max)",
+    "mem_total_gb": 184.98849868774414,
+    "mem_avail_gb": 175.03635787963867,
+    "mem_src": "/proc/meminfo"
+  },
+  "anchor": {
+    "mode": "quality",
+    "crf_ref": 21,
+    "note": "crf_sent 是真正下发的原生值；ref 处无编码器恒等"
+  },
+  "repeats": 1,
+  "results": [
+    {
+      "cid": "d.plain",
+      "layer": "d",
+      "desc": "hevc_nvenc 等质量基线（crf-ref=21，无调优）",
+      "group": "d.tune",
+      "status": "OK",
+      "skip_reason": "",
+      "fail_reason": "",
+      "wall_min": 4.136166043579578,
+      "wall_median": 4.136166043579578,
+      "wall_all": [
+        4.136166043579578
+      ],
+      "script_reported_elapsed": [
+        2.0
+      ],
+      "frames": 30,
+      "frames_from": "产物容器自报",
+      "out_bytes": 423421,
+      "crf_sent": 26,
+      "quality_axis": "cq",
+      "actual_path": "off",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [
+        "提示：--crf-ref 21（libx264 CRF 基准） → hevc_nvenc 的 -cq 26。",
+        "提示：--preset 'p4' 已映射为 'medium' (libx265 使用 libx264 风格 preset)。",
+        "警告：NVENC 不写入 mastering display / MaxCLL，HDR10 静态元数据会丢失（色彩三参数与 10bit 位深仍保留）；如需完整 HDR10 元数据请用 libx265"
+      ],
+      "out_path": "/workspace/VidUtils/1/d.plain.mp4",
+      "cmd": "/root/.pyenv/versions/3.11.1/bin/python3 /workspace/VidUtils/convert_sdr_to_hdr.py -i ../input_videos/test2.mp4 -o 1/d.plain.mp4 --codec hevc_nvenc --crf-ref 21 --fallback-policy auto"
+    },
+    {
+      "cid": "d.hevc_nvenc.cq",
+      "layer": "d",
+      "desc": "hevc_nvenc -cq 档位（等质量换算）",
+      "group": "d.codec",
+      "status": "OK",
+      "skip_reason": "",
+      "fail_reason": "",
+      "wall_min": 4.084704406559467,
+      "wall_median": 4.084704406559467,
+      "wall_all": [
+        4.084704406559467
+      ],
+      "script_reported_elapsed": [
+        2.0
+      ],
+      "frames": 30,
+      "frames_from": "产物容器自报",
+      "out_bytes": 423421,
+      "crf_sent": 26,
+      "quality_axis": "cq",
+      "actual_path": "off",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [
+        "提示：--crf-ref 21（libx264 CRF 基准） → hevc_nvenc 的 -cq 26。",
+        "提示：--preset 'p4' 已映射为 'medium' (libx265 使用 libx264 风格 preset)。",
+        "警告：NVENC 不写入 mastering display / MaxCLL，HDR10 静态元数据会丢失（色彩三参数与 10bit 位深仍保留）；如需完整 HDR10 元数据请用 libx265"
+      ],
+      "out_path": "/workspace/VidUtils/1/d.hevc_nvenc.cq.mp4",
+      "cmd": "/root/.pyenv/versions/3.11.1/bin/python3 /workspace/VidUtils/convert_sdr_to_hdr.py -i ../input_videos/test2.mp4 -o 1/d.hevc_nvenc.cq.mp4 --codec hevc_nvenc --crf-ref 21 --fallback-policy auto"
+    },
+    {
+      "cid": "d.av1_nvenc.cq",
+      "layer": "d",
+      "desc": "av1_nvenc -cq 档位（等质量换算）",
+      "group": "d.codec",
+      "status": "OK",
+      "skip_reason": "",
+      "fail_reason": "",
+      "wall_min": 4.085465043783188,
+      "wall_median": 4.085465043783188,
+      "wall_all": [
+        4.085465043783188
+      ],
+      "script_reported_elapsed": [
+        2.0
+      ],
+      "frames": 30,
+      "frames_from": "产物容器自报",
+      "out_bytes": 356732,
+      "crf_sent": 32,
+      "quality_axis": "cq",
+      "actual_path": "off",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [
+        "提示：--crf-ref 21（libx264 CRF 基准） → av1_nvenc 的 -cq 32。",
+        "提示：--preset 'p4' 已映射为 'medium' (libx265 使用 libx264 风格 preset)。",
+        "警告：NVENC 不写入 mastering display / MaxCLL，HDR10 静态元数据会丢失（色彩三参数与 10bit 位深仍保留）；如需完整 HDR10 元数据请用 libx265"
+      ],
+      "out_path": "/workspace/VidUtils/1/d.av1_nvenc.cq.mp4",
+      "cmd": "/root/.pyenv/versions/3.11.1/bin/python3 /workspace/VidUtils/convert_sdr_to_hdr.py -i ../input_videos/test2.mp4 -o 1/d.av1_nvenc.cq.mp4 --codec av1_nvenc --crf-ref 21 --fallback-policy auto"
+    },
+    {
+      "cid": "d.aq",
+      "layer": "d",
+      "desc": "hevc_nvenc + --nvenc-aq",
+      "group": "d.tune",
+      "status": "OK",
+      "skip_reason": "",
+      "fail_reason": "",
+      "wall_min": 4.0938911363482475,
+      "wall_median": 4.0938911363482475,
+      "wall_all": [
+        4.0938911363482475
+      ],
+      "script_reported_elapsed": [
+        2.0
+      ],
+      "frames": 30,
+      "frames_from": "产物容器自报",
+      "out_bytes": 439087,
+      "crf_sent": 26,
+      "quality_axis": "cq",
+      "actual_path": "off",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [
+        "提示：--crf-ref 21（libx264 CRF 基准） → hevc_nvenc 的 -cq 26。",
+        "提示：--preset 'p4' 已映射为 'medium' (libx265 使用 libx264 风格 preset)。",
+        "警告：NVENC 不写入 mastering display / MaxCLL，HDR10 静态元数据会丢失（色彩三参数与 10bit 位深仍保留）；如需完整 HDR10 元数据请用 libx265"
+      ],
+      "out_path": "/workspace/VidUtils/1/d.aq.mp4",
+      "cmd": "/root/.pyenv/versions/3.11.1/bin/python3 /workspace/VidUtils/convert_sdr_to_hdr.py -i ../input_videos/test2.mp4 -o 1/d.aq.mp4 --codec hevc_nvenc --crf-ref 21 --nvenc-aq"
+    },
+    {
+      "cid": "d.tune_uhq",
+      "layer": "d",
+      "desc": "hevc_nvenc + --nvenc-tune uhq",
+      "group": "d.tune",
+      "status": "OK",
+      "skip_reason": "",
+      "fail_reason": "",
+      "wall_min": 4.338761352002621,
+      "wall_median": 4.338761352002621,
+      "wall_all": [
+        4.338761352002621
+      ],
+      "script_reported_elapsed": [
+        2.3
+      ],
+      "frames": 30,
+      "frames_from": "产物容器自报",
+      "out_bytes": 421639,
+      "crf_sent": 26,
+      "quality_axis": "cq",
+      "actual_path": "off",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [
+        "提示：--crf-ref 21（libx264 CRF 基准） → hevc_nvenc 的 -cq 26。",
+        "提示：--preset 'p4' 已映射为 'medium' (libx265 使用 libx264 风格 preset)。",
+        "警告：NVENC 不写入 mastering display / MaxCLL，HDR10 静态元数据会丢失（色彩三参数与 10bit 位深仍保留）；如需完整 HDR10 元数据请用 libx265"
+      ],
+      "out_path": "/workspace/VidUtils/1/d.tune_uhq.mp4",
+      "cmd": "/root/.pyenv/versions/3.11.1/bin/python3 /workspace/VidUtils/convert_sdr_to_hdr.py -i ../input_videos/test2.mp4 -o 1/d.tune_uhq.mp4 --codec hevc_nvenc --crf-ref 21 --nvenc-tune uhq"
+    },
+    {
+      "cid": "d.rc_cbr",
+      "layer": "d",
+      "desc": "hevc_nvenc + rc-mode cbr（与基线同为 crf-ref 锚定）",
+      "group": "d.tune",
+      "status": "OK",
+      "skip_reason": "",
+      "fail_reason": "",
+      "wall_min": 4.093418411910534,
+      "wall_median": 4.093418411910534,
+      "wall_all": [
+        4.093418411910534
+      ],
+      "script_reported_elapsed": [
+        2.0
+      ],
+      "frames": 30,
+      "frames_from": "产物容器自报",
+      "out_bytes": 1386398,
+      "crf_sent": 26,
+      "quality_axis": "cq",
+      "actual_path": "off",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [
+        "提示：--bitrate 与质量参数同时给出 → 按 ffmpeg 语义是「受码率约束的恒定质量」。要纯恒定质量请去掉 --bitrate。",
+        "提示：--crf-ref 21（libx264 CRF 基准） → hevc_nvenc 的 -cq 26。",
+        "提示：--preset 'p4' 已映射为 'medium' (libx265 使用 libx264 风格 preset)。",
+        "警告：NVENC 不写入 mastering display / MaxCLL，HDR10 静态元数据会丢失（色彩三参数与 10bit 位深仍保留）；如需完整 HDR10 元数据请用 libx265"
+      ],
+      "out_path": "/workspace/VidUtils/1/d.rc_cbr.mp4",
+      "cmd": "/root/.pyenv/versions/3.11.1/bin/python3 /workspace/VidUtils/convert_sdr_to_hdr.py -i ../input_videos/test2.mp4 -o 1/d.rc_cbr.mp4 --codec hevc_nvenc --crf-ref 21 --rc-mode cbr --bitrate 8M"
+    }
+  ],
+  "quality_gate": [],
+  "note": "墙钟含 Python 启动与模型加载；script_reported_elapsed 不含模型加载且三条执行路径口径不一致，仅供交叉核对。SKIP 不等于通过。"
+}

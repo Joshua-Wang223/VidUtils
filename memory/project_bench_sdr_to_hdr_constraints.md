@@ -17,8 +17,16 @@ type: project
 
 `print_summary` 的「均速」用 `j.info["nb_frames"]`（**源探测帧数**）而非实际输出帧数。
 用 `--frames 10` 截断时实测打印「均速 7fps、峰值 4fps」—— 均速高于峰值，逻辑上不可能；
-真实值 2.9fps（10 帧 / 3.5s）。`j.speed` 全仓库无人赋值、恒为 `-`，别解析它。
-⇒ benchmark 只信自己 `time.monotonic()` 测的墙钟 + 自己 `-count_frames` 数帧。
+真实值 2.9fps（10 帧 / 3.5s）。⇒ benchmark 只信自己 `time.monotonic()` 测的墙钟 +
+自己 `-count_frames` 数帧。
+
+⚠ `j.speed` 曾在很长一段时间里**全仓库无人赋值、恒为 `-`**（进度条里 `speed=` 后面空/只有
+`-`）。根因：本脚本用 Python 逐帧串「解码→推理→编码」，**没有 ffmpeg 的 `-progress` 流可解析**
+（孪生脚本 `vidcrop_cpu_v2.py` 有，所以那边 `speed` 正常）——移植时漏了赋值这一步。
+2026-10-12 已修：新增 `_speed_str(fps, src_fps)`（= `fps / 源帧率`，ffmpeg 口径），在
+`run_job` / `run_job_multiproc` / `run_job_segmented` 三条路径更新 `job.speed`（分段路径是
+各段 fps 之和 ÷ 源帧率 = 聚合 speed）。此值仍是从 `job.fps` 派生的显示量，**不是**独立计时，
+benchmark 依旧别拿它当权威 fps。
 
 ## 2. 三条执行路径的 `job.elapsed` 口径不一致，不可横向比
 

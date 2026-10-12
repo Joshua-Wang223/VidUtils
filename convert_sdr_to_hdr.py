@@ -2938,6 +2938,18 @@ def _bar(p: float, width: int = _BAR_WIDTH) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+def _speed_str(fps: float, src_fps: float) -> str:
+    """把处理帧率折算成 ffmpeg 口径的 ``speed`` 字符串（如 ``1.23x``）。
+
+    本脚本用 Python 逐帧串起「解码→推理→编码」，没有 ffmpeg 的 ``-progress``
+    流可解析，所以 ``job.speed`` 得自己算：ffmpeg 的 speed = 已处理媒体时长 /
+    墙钟时长 = 处理帧率 ÷ 源帧率。两者任一非正时返回空串（显示层会退回 ``-``）。
+    """
+    if fps > 0 and src_fps > 0:
+        return f"{fps / src_fps:.2f}x"
+    return ""
+
+
 @dataclass
 class Job:
     src: Path
@@ -4468,6 +4480,7 @@ def run_job(args: argparse.Namespace, job: Job, plan: Dict,
                 job.fps = n_done / el
                 if job.fps > job.peak_fps:
                     job.peak_fps = job.fps
+            job.speed = _speed_str(job.fps, plan["fps"])
             # 进度计算：已知总帧数时按百分比，未知时仅累计帧数（progress 保持 0，显示层处理）
             if total is not None and total > 0:
                 job.progress = min(1.0, n_done / total)
@@ -4922,6 +4935,8 @@ def run_job_segmented(args: argparse.Namespace, job: Job, meta: Dict,
             job.fps = sum(s.fps for s in seg_jobs if s.fps > 0)
             if job.fps > job.peak_fps:
                 job.peak_fps = job.fps
+            # 段并发：各段 fps 相加即「总处理帧率」，除以源帧率就是聚合 speed
+            job.speed = _speed_str(job.fps, float(meta.get("fps") or 0.0))
             if on_update:
                 on_update(job)
 
@@ -4997,6 +5012,7 @@ def run_job_segmented(args: argparse.Namespace, job: Job, meta: Dict,
         if job.elapsed > 0 and n_frames > 0:
             job.fps = n_frames / job.elapsed
             job.peak_fps = max(job.peak_fps, job.fps)
+        job.speed = _speed_str(job.fps, float(meta.get("fps") or 0.0))
     return rc
 
 
@@ -5107,6 +5123,7 @@ def run_job_multiproc(args: argparse.Namespace, job: Job, meta: Dict,
                 job.fps = n_done / el
                 if job.fps > job.peak_fps:
                     job.peak_fps = job.fps
+            job.speed = _speed_str(job.fps, plan["fps"])
             if total:
                 job.progress = min(1.0, n_done / total)
             if on_update and (now - last_cb >= 0.25 or (total and n_done == total)):

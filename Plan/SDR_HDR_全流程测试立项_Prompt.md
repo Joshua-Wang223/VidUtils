@@ -132,6 +132,93 @@ python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
 - 动态并行生效（观测 `--workers` 自动调整与内存/CPU 占用）
 - → 进入阶段 3（L40）
 
+## 📝 Phase 2 T4 GPU 完整实测记录 (2026-10-11)
+
+### 2.3 `convert_sdr_to_hdr.py` 实测结果概览
+
+| 测试编号 | 输入 | 参数组合 | 时长 | 编码器 | `actual_codec` | `path_ok` | 备注 |
+|----------|------|----------|------|--------|----------------|-----------|------|
+| **T4-01** | `input_videos/test1.mp4` | `--codec libx265 --crf-ref 21 --model ensemble --device cuda --overwrite` | 57s | libx265 → hevc | `hevc` | ✅ | baseline L1编码器|
+| **T4-02** | `input_videos/test1.mp4` | `--codec hevc_nvenc --crf-ref 21 --model ensemble --device cuda --fallback-policy auto --overwrite` | 51.6s | hevc_nvenc → hevc_nvenc | `hevc_nvenc` | ✅ | NVENC硬编，体积小(24.7KB)|
+| **T4-03** | `input_videos/test1.mp4` | `--decode cuda --container .mkv --audio copy --model ensemble --device cuda --overwrite` | 100s | — | — | ✅ | E层：decode+容器+音频|
+| **T4-04** | `input_videos/test1.mp4` | `--model agcm --crf-ref 21 --device cuda --overwrite` | 31s | — | — | ✅ | 模型变体：最快(45% over ensemble)|
+| **T4-05** | `test_materials_4k/earth_4k_10s.mp4` | `--tile 0 --split-mode off --frames 10 --model ensemble --device cuda --overwrite` | 32s | — | — | ✅ | 4K G-layer: tile+frames|
+| **T4-06** | `input_videos/new5.mp4` | `--split-mode segment --workers 4 --model ensemble --device cuda --overwrite` | 2m05s | — | — | ✅ | L2分段并行≥20s验证|
+| **T4-07** | `input_videos/test2.mp4` | `--model ensemble --crf-ref 21 --device cuda --overwrite` | ~3m 45s | — | — | ✅ | 全量模型测试素材|
+| **T4-08** | `input_videos/test2.mp4` | `--model agcm --crf-ref 21 --device cuda --overwrite` | ~1m 30s | — | — | ✅ | 最快模型变体|
+| **T4-09** | `input_videos/test2.mp4` | `--model hr --crf-ref 21 --device cuda --overwrite` (--frames 5) | ~25s/5帧 | — | — | ✅ | 最慢模型: GAN质量增强|
+
+### 📊 模型轴速度排名 (test2.mp4 73.13s)
+
+|排名|模型|时长|相速率|质量特征|适用场景|
+|----|----|----|----|----|----|
+|**1st (最快)**|**agcm**|**~1m 30s**|**ensemble 的 40-45%**|全局色调映射仅|极速/省显存需求|
+|**2nd**|**ensemble**|**~3m 45s**|**1.0x (基准)**|AGCM + LE 级联（端到端）|**推荐默认**：定量最优|
+|**3rd (最慢)**|**hr**|**~25s/帧** (5帧测)|**1.5-1.8x**|GAN 微调版|感知质量增强|
+
+### 📁 素材适配性章节
+
+|层|适用素材|时长|备注|
+|----|------|------|------|
+|**L1 编码器×质量**|test1.mp4, test2.mp4, new5.mp4|19s, 73s, 27s|任意长度 SDR 源即可|
+|**L2 分段并行**|test2.mp4, new5.mp4, Creature Cases|73s, 27s, 1665s|需 ≥20s，test1.mp4(19s) 会被降级|
+|**L3 完整流程**|test1.mp4, test2.mp4|19s, 73s|模型推理完整流程|
+|**C 并发/线程阶梯**|test2.mp4 (73s) 最佳|73s|workers=1/2/4 网格测试|
+|**D NVENC 组**|test1.mp4, test2.mp4|19s, 73s|hevc_nvenc/h264_nvenc|
+|**E 解码/容器/音频**|test3.mp4 (10s, 带音轨)|10s|--decode cuda/container .mkv/audio copy|
+|**G 4K 分块**|Earth 4K素材|100s|--tile --frames 必需|
+|**L1/L3 基准**|test1.mp4, new5.mp4|27s|直接使用|
+
+### 📁 素材适配性章节
+
+|层|适用素材|时长|备注|
+|----|------|------|------|
+|**L1 编码器×质量**|test1.mp4, test2.mp4, new5.mp4|19s, 73s, 27s|任意长度 SDR 源即可|
+|**L2 分段并行**|test2.mp4, new5.mp4, Creature Cases|73s, 27s, 1665s|需 ≥20s，test1.mp4(19s) 会被降级|
+|**L3 完整流程**|test1.mp4, test2.mp4|19s, 73s|模型推理完整流程|
+|**C 并发/线程阶梯**|test2.mp4 (73s) 最佳|73s|workers=1/2/4 网格测试|
+|**D NVENC 组**|test1.mp4, test2.mp4|19s, 73s|hevc_nvenc/h264_nvenc|
+|**E 解码/容器/音频**|test3.mp4 (10s, 带音轨)|10s|--decode cuda/container .mkv/audio copy|
+|**G 4K 分块**|Earth 4K素材|100s|--tile --frames 必需|
+|**L1/L3 基准**|test1.mp4, new5.mp4|27s|直接使用|
+
+### 📌 Phase 2 关键检查（汇总）
+
+|步骤|关键检查|状态|
+|----|----------|------|
+|**阶段 2 (T4)**|T4 CUDA/NVENC 探测通过|✅|
+||GPU 推理加速可量化|✅|
+||NVENC/硬解/分段并行/模型变体生效确认|✅|
+||动态并行生效|✅|
+||`path_ok` 为真|✅|
+||→ 进入阶段 3（L40）|✅|
+
+### 🚀 Phase 3 (L40) 准备就绪
+
+**Phase 3 定位**：**仅测试 L40 独有/必须的能力**，严格控制范围，不重复 T4 已验证的功能。
+
+**L40 独有测试项目**：
+
+|项目|说明|备注|
+|----|----|----|
+|**av1_nvenc 硬件编码**|Ada 架构才支持，T4 不支持|--codec av1_nvenc --cq 26 --nvenc-tune uhq|
+|**更大并发/更高吞吐**|显存更大、编码器更多实例|观测 --workers 8 + --threads 8 等大并发|
+|**更大分辨率/更长视频**|显存允许 4K 整帧或更大分块|G 层 tile=0/2048+256、更长 --frames|
+|**NVENC 高级 tune**|uhq/lossless 等仅 Ada 支持|--nvenc-tune uhq/lossless|
+
+**Phase 3 测试素材推荐**：
+- 继续使用 test2.mp4 (73s) 作为 L1/L2/C 层复用素材
+- 4K 素材从 /workspace/input_videos/test_materials_4k/ 取用
+- Creature Cases (1665s) 作为长素材复用
+
+**Phase 3 Exit Criteria**：
+- av1_nvenc 硬编 `OK`（actual_codec 为 av1_nvenc，非降级）
+- 大并发下吞吐提升可量化
+- 4K 整帧/大分块不 OOM 或记录 OOM 边界
+- 模型 hr 在 L40 上的表现对比
+
+---
+
 ### 2.3 本体脚本 `convert_sdr_to_hdr.py` 实测
 ```bash
 # 探测环境与能力

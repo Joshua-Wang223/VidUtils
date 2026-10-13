@@ -2347,6 +2347,7 @@ def build_encode_cmd(width: int, height: int, fps: float,
                      st: EncodeSettings,
                      has_audio: bool,
                      is_hdr_input: bool = False,
+                     frames: Optional[int] = None,
                      warn: Optional[Callable[[str], None]] = None,
                      extra_args: Optional[List[str]] = None,
                      ffmpeg: str = "ffmpeg") -> List[str]:
@@ -2468,10 +2469,11 @@ def build_encode_cmd(width: int, height: int, fps: float,
         cmd += ["-pix_fmt", st.pix_fmt]
 
     # --threads：只对**软件编码器**下发（硬件编码器不吃帧级线程）
-    # 模型模式下不下发 -threads：高线程数会导致 libx265 初始化慢，
-    # 配合 --frames 短输入极易出现 "Could not open encoder before EOF"
-    if st.threads and c not in _HW_ENCODERS and not is_hdr_input:
-        cmd += ["-threads", str(max(1, st.threads))]
+    # libx265 线程数上限 16：高线程数（>16）会导致初始化耗时超过管道超时，
+    # 出现 "Could not open encoder before EOF"。其他编码器不受此限制。
+    if st.threads and c not in _HW_ENCODERS:
+        _max_threads = 16 if c == "libx265" else st.threads
+        cmd += ["-threads", str(max(1, min(st.threads, _max_threads)))]
 
     # ── 色彩四参（HDR10 交付口径）──
     # 模型模式下已由 setparams 滤镜写入，避免与 -vf setparams 冲突
@@ -4253,6 +4255,7 @@ def build_plan(args: argparse.Namespace, meta: Dict,
                                   start=seg_start if _seg else None)
     encode_cmd = build_encode_cmd(ow, oh, fps, dst, src, st, meta["has_audio"],
                                   is_hdr_input=not args.no_model,
+                                  frames=args.frames,
                                   warn=warn or _default_warn,
                                   extra_args=getattr(args, "extra_args", None))
     # 两阶段（keep + 源流时长缺失）：阶段1 先写 `_stage1`，remux 成功才移到 dst。
@@ -4503,9 +4506,35 @@ def run_job(args: argparse.Namespace, job: Job, plan: Dict,
         except (BrokenPipeError, OSError):
             pass
         enc_t.join(timeout=5.0)
+        # ⚠ 帧循环可能因 `n_done >= total` 在解码器 EOF 之前退出，此时解码器仍在
+        # 往 stdout 写剩余帧；主进程停止读 ⇒ 64KiB 管道缓冲写满 ⇒ 解码器阻塞在
+        # write() 永不退出 ⇒ 下面 dec.wait() 死锁。故先**排空** dec.stdout。
+        try:
+            while dec.stdout and dec.stdout.read(1 << 16):
+                pass
+        except (BrokenPipeError, OSError, ValueError):
+            pass
         dec_t.join(timeout=5.0)
-        enc_rc = enc.wait()
-        dec_rc = dec.wait()
+
+        # ⚠ enc.wait() 无超时：若编码器（已知 av1_nvenc 在 Ada/容器组合下）收到
+        # 全部帧 + stdin EOF 后 NVENC 会话卡在 flush 不退出，主线程会永久挂起 ——
+        # 表现为「GPU 归零但显存恒定不降、进度停在 收尾中」。加超时 + 优雅终止兜底。
+        _enc_to = 120 if not args.dry_run else 60
+        try:
+            enc_rc = enc.wait(timeout=_enc_to)
+        except subprocess.TimeoutExpired:
+            job.warn_cb and job.warn_cb(
+                f"编码器 {_enc_to}s 未退出，已强制终止（末帧收尾卡住）")
+            _terminate(enc)
+            try:
+                enc_rc = enc.wait(timeout=10)
+            except Exception:
+                enc_rc = -1
+        try:
+            dec_rc = dec.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            _terminate(dec)
+            dec_rc = dec.poll() if dec.poll() is not None else -1
         job.elapsed = time.time() - t0
         finished_normal = True
 
@@ -5470,7 +5499,7 @@ def main() -> int:
                 continue
             try:
                 meta = probe_source(job.src)
-                plan = build_plan(args, meta, src=job.src, dst=job.dst)
+                plan = build_plan(args, meta, src=job.src, dst=job.dst, threads=threads)
             except ValueError as exc:
                 print(f"✘ 失败 {job.name}: {exc}", file=sys.stderr)
                 continue

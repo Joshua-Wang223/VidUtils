@@ -561,7 +561,41 @@ T4 实测 test2.mp4（73.13s，hevc_nvenc，cuda）三模型全量对比：
 - ✅ 完整视频 73s libx265 ensemble (1m43s 完成)  
 - ✅ 分段并行 `--split-mode segment --workers 2 --device cuda` (1m35s 完成)
 - ✅ 4K 30帧 `--model agcm --codec libx265 --frames 30 --device cuda` (18s 完成)
-- ✅ NVENC (hevc_nvenc/av1_nvenc) 正常工作
+- ✅ NVENC (hevc_nvenc) 正常工作
+
+### 3.12 av1_nvenc 收尾挂起：根因锁定与防御性修复 (2026-10-13)
+
+> 背景：L40（Ada，第8代 NVENC）上 `av1_nvenc` 全片转码进度到 100%「收尾中...」后
+> 停止输出，GPU 利用率降 0 但显存恒定 ~11.5GB 不释放 ⇒ 编码器 ffmpeg 进程活着但
+> 不再退出。改 MKV 容器同样挂起 ⇒ 与容器 moov finalize 无关。ESC 中断后无产物。
+
+**归因实验矩阵（收紧结论）：**
+
+| 编码器 | 环境 | 输入 | 收尾结果 |
+|--------|------|------|----------|
+| libx265 (软编 CPU) | T4 | 73s 全片 | ✅ 1m43s 正常 |
+| hevc_nvenc (硬编) | T4 | 73s 全片 | ✅ 5m47s 正常 |
+| libsvtav1 (AV1 软编) | T4 | 60 帧 | ✅ 5.2s 正常 |
+| libaom-av1 (AV1 软编) | T4 | 60 帧 | ✅ 12.7s 正常 |
+| **av1_nvenc (硬编)** | **L40** | **73s 全片** | **❌ 收尾死锁**（MP4/MKV 均挂） |
+
+**根因（已精确锁定）：**
+- AV1 编码本身、管道逻辑、容器 finalize、Python 帧循环 **全部正常**（T4 全组合通过）
+- 精确根因 = **av1_nvenc 硬件 NVENC 会话**（Ada/驱动/容器环境组合）在收到全部帧 +
+  stdin EOF 后卡在 flush 不退出，主线程 `enc.wait()` 无超时 ⇒ 永久挂起
+
+**代码健壮性缺陷（已修复）：**
+
+| 缺陷 | 风险 | 修复 | 位置 |
+|------|------|------|------|
+| `enc.wait()` 无超时 | 编码器不退出 ⇒ 永久挂起（本次症状） | 120s 超时 + `_terminate` 优雅终止 | `run_job:4510` |
+| `dec.wait()` 无超时 | 解码器 stdout 写阻塞 ⇒ 永久挂起 | 10s 超时 + 终止 | `run_job:4523` |
+| 帧循环提前退出未排空 dec.stdout | 64KiB 管道写满 ⇒ 解码器阻塞在 write() | 收尾前 `read()` 排空到 EOF | `run_job:4509` |
+
+**状态：**
+- T4 hevc_nvenc 回归 ✅（5m47s，未破坏正常路径）
+- ⏳ L40 av1_nvenc 复测**待切回 L40 验证**：预期不再死锁，超时后优雅终止并报告
+  （极端情况下产物 finalize 未完成会如实报失败，而非静默挂起）
 
 ---
 

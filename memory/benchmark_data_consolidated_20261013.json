@@ -7,74 +7,323 @@
     "本会话 T4 直测",
     "Plan/SDR_HDR_全流程测试立项_Prompt.md 3.8-3.12 节"
   ],
-
   "environments": {
-    "L40": {"gpu": "NVIDIA L40 (Ada, 46GB)", "vram_gb": 46, "cpu": "48 逻辑核", "mem_gb": 192, "nvenc": ["hevc_nvenc", "h264_nvenc", "av1_nvenc(第8代)"]},
-    "T4":  {"gpu": "Tesla T4 (Turing, 15GB)", "vram_gb": 15, "cpu": "8 逻辑核", "mem_gb": 32, "nvenc": ["hevc_nvenc", "h264_nvenc"]}
+    "L40": {
+      "gpu": "NVIDIA L40 (Ada, 46GB)",
+      "vram_gb": 46,
+      "cpu": "48 逻辑核",
+      "mem_gb": 192,
+      "nvenc": [
+        "hevc_nvenc",
+        "h264_nvenc",
+        "av1_nvenc(第8代)"
+      ]
+    },
+    "T4": {
+      "gpu": "Tesla T4 (Turing, 15GB)",
+      "vram_gb": 15,
+      "cpu": "8 逻辑核",
+      "mem_gb": 32,
+      "nvenc": [
+        "hevc_nvenc",
+        "h264_nvenc"
+      ]
+    }
   },
-
   "materials": {
-    "test1.mp4": {"res": "1280x720", "dur_s": 19, "fps": 30, "audio": true},
-    "test2.mp4": {"res": "1280x720", "dur_s": 73.13, "fps": 30, "audio": true, "nb_frames": 2194},
-    "earth_4k_30s.mp4": {"res": "3840x2160", "dur_s": 30.12, "fps": 23.976, "audio": true}
+    "test1.mp4": {
+      "res": "1280x720",
+      "dur_s": 19,
+      "fps": 30,
+      "audio": true
+    },
+    "test2.mp4": {
+      "res": "1280x720",
+      "dur_s": 73.13,
+      "fps": 30,
+      "audio": true,
+      "nb_frames": 2194
+    },
+    "earth_4k_30s.mp4": {
+      "res": "3840x2160",
+      "dur_s": 30.12,
+      "fps": 23.976,
+      "audio": true
+    }
   },
-
   "results": {
     "L40": [
-      {"id": "L40-libx265-full-ens",  "codec": "libx265",    "model": "ensemble", "src": "test2.mp4",  "frames": null, "wall_s": 103, "throughput_fps": 21, "out_mb": 24.0, "size_delta": "+65%", "status": "OK",  "note": "模型模式全片；libx265 线程上限16"},
-      {"id": "L40-libx265-5f-ens",     "codec": "libx265",    "model": "ensemble", "src": "test2.mp4",  "frames": 5,    "wall_s": 0.7, "throughput_fps": 3262, "out_mb": 0.08, "status": "OK", "note": "短帧回归（修复前 exit183）"},
-      {"id": "L40-libx265-seg2",       "codec": "libx265",    "model": "ensemble", "src": "test2.mp4",  "frames": null, "wall_s": 98,  "throughput_fps": 22, "out_mb": 24.0, "status": "OK", "note": "--split-mode segment --workers 2"},
-      {"id": "L40-libx265-4k-agcm",    "codec": "libx265",    "model": "agcm",     "src": "earth_4k",   "frames": 30,   "wall_s": 18.1,"throughput_fps": 53, "out_mb": 0.87, "status": "OK", "note": "4K 分块前置准备"},
-      {"id": "L40-hevc_nvenc-4k-agcm", "codec": "hevc_nvenc", "model": "agcm",     "src": "earth_4k",   "frames": 30,   "wall_s": 17.7,"throughput_fps": 54, "out_mb": 1.4, "status": "OK", "note": "4K 硬编；nv-tune uhq"},
-      {"id": "L40-nomodel-libx265-t8", "codec": "libx265",    "model": "no-model",  "src": "test2.mp4",  "frames": null, "wall_s": 14.7,"throughput_fps": 150,"out_mb": 13.3, "status": "OK", "note": "threads=8 上限验证"},
-      {"id": "L40-av1_nvenc-full",     "codec": "av1_nvenc",  "model": "ensemble", "src": "test2.mp4",  "frames": null, "wall_s": null,"throughput_fps": null, "status": "HANG", "note": "100%收尾死锁；GPU归零显存11.5G恒定；MP4+MKV均挂"},
-      {"id": "L40-av1_nvenc-mkv",      "codec": "av1_nvenc",  "model": "ensemble", "src": "test2.mp4",  "frames": null, "wall_s": null,"throughput_fps": null, "status": "HANG", "note": "MKV 容器同样挂死 ⇒ 排除 moov finalize"}
+      {
+        "id": "L40-libx265-full-ens",
+        "codec": "libx265",
+        "model": "ensemble",
+        "src": "test2.mp4",
+        "frames": null,
+        "wall_s": 103,
+        "throughput_fps": 21,
+        "out_mb": 24.0,
+        "size_delta": "+65%",
+        "status": "OK",
+        "note": "模型模式全片；libx265 线程上限16"
+      },
+      {
+        "id": "L40-libx265-5f-ens",
+        "codec": "libx265",
+        "model": "ensemble",
+        "src": "test2.mp4",
+        "frames": 5,
+        "wall_s": 0.7,
+        "throughput_fps": 3262,
+        "out_mb": 0.08,
+        "status": "OK",
+        "note": "短帧回归（修复前 exit183）"
+      },
+      {
+        "id": "L40-libx265-seg2",
+        "codec": "libx265",
+        "model": "ensemble",
+        "src": "test2.mp4",
+        "frames": null,
+        "wall_s": 98,
+        "throughput_fps": 22,
+        "out_mb": 24.0,
+        "status": "OK",
+        "note": "--split-mode segment --workers 2"
+      },
+      {
+        "id": "L40-libx265-4k-agcm",
+        "codec": "libx265",
+        "model": "agcm",
+        "src": "earth_4k",
+        "frames": 30,
+        "wall_s": 18.1,
+        "throughput_fps": 53,
+        "out_mb": 0.87,
+        "status": "OK",
+        "note": "4K 分块前置准备"
+      },
+      {
+        "id": "L40-hevc_nvenc-4k-agcm",
+        "codec": "hevc_nvenc",
+        "model": "agcm",
+        "src": "earth_4k",
+        "frames": 30,
+        "wall_s": 17.7,
+        "throughput_fps": 54,
+        "out_mb": 1.4,
+        "status": "OK",
+        "note": "4K 硬编；nv-tune uhq"
+      },
+      {
+        "id": "L40-nomodel-libx265-t8",
+        "codec": "libx265",
+        "model": "no-model",
+        "src": "test2.mp4",
+        "frames": null,
+        "wall_s": 14.7,
+        "throughput_fps": 150,
+        "out_mb": 13.3,
+        "status": "OK",
+        "note": "threads=8 上限验证"
+      },
+      {
+        "id": "L40-av1_nvenc-full",
+        "codec": "av1_nvenc",
+        "model": "ensemble",
+        "src": "test2.mp4",
+        "frames": null,
+        "wall_s": 106,
+        "throughput_fps": 21,
+        "status": "OK",
+        "note": "修复后复测通过：MP4×2 + MKV×1 均 1m46s/21fps 干净退出",
+        "out_mb": 37.1
+      },
+      {
+        "id": "L40-av1_nvenc-mkv",
+        "codec": "av1_nvenc",
+        "model": "ensemble",
+        "src": "test2.mp4",
+        "frames": null,
+        "wall_s": 106,
+        "throughput_fps": 21,
+        "status": "OK",
+        "note": "修复后复测通过：MP4×2 + MKV×1 均 1m46s/21fps 干净退出",
+        "out_mb": 37.1
+      }
     ],
     "T4": [
-      {"id": "T4-hevc_nvenc-full",     "codec": "hevc_nvenc", "model": "ensemble", "src": "test2.mp4",  "frames": null, "wall_s": 347, "throughput_fps": 6, "out_mb": 27.9, "size_delta": "+92%", "status": "OK", "note": "回归验证修复未破坏正常路径"},
-      {"id": "T4-libx265-full-ens",    "codec": "libx265",    "model": "ensemble", "src": "test2.mp4",  "frames": null, "wall_s": 103, "throughput_fps": 21, "out_mb": 24.0, "status": "OK", "note": "（同 L40 参数，模型瓶颈主导）"},
-      {"id": "T4-libsvtav1-60f-agcm",  "codec": "libsvtav1",  "model": "agcm",     "src": "test2.mp4",  "frames": 60,   "wall_s": 5.2, "throughput_fps": 420,"out_mb": 0.6, "status": "OK", "note": "AV1 软编收尾正常"},
-      {"id": "T4-libaom-av1-60f-agcm", "codec": "libaom-av1", "model": "agcm",     "src": "test2.mp4",  "frames": 60,   "wall_s": 12.7,"throughput_fps": 173,"out_mb": 0.58,"status": "OK", "note": "AV1 软编收尾正常"}
+      {
+        "id": "T4-hevc_nvenc-full",
+        "codec": "hevc_nvenc",
+        "model": "ensemble",
+        "src": "test2.mp4",
+        "frames": null,
+        "wall_s": 347,
+        "throughput_fps": 6,
+        "out_mb": 27.9,
+        "size_delta": "+92%",
+        "status": "OK",
+        "note": "回归验证修复未破坏正常路径"
+      },
+      {
+        "id": "T4-libx265-full-ens",
+        "codec": "libx265",
+        "model": "ensemble",
+        "src": "test2.mp4",
+        "frames": null,
+        "wall_s": 103,
+        "throughput_fps": 21,
+        "out_mb": 24.0,
+        "status": "OK",
+        "note": "（同 L40 参数，模型瓶颈主导）"
+      },
+      {
+        "id": "T4-libsvtav1-60f-agcm",
+        "codec": "libsvtav1",
+        "model": "agcm",
+        "src": "test2.mp4",
+        "frames": 60,
+        "wall_s": 5.2,
+        "throughput_fps": 420,
+        "out_mb": 0.6,
+        "status": "OK",
+        "note": "AV1 软编收尾正常"
+      },
+      {
+        "id": "T4-libaom-av1-60f-agcm",
+        "codec": "libaom-av1",
+        "model": "agcm",
+        "src": "test2.mp4",
+        "frames": 60,
+        "wall_s": 12.7,
+        "throughput_fps": 173,
+        "out_mb": 0.58,
+        "status": "OK",
+        "note": "AV1 软编收尾正常"
+      }
     ]
   },
-
   "model_axis": {
     "note": "test2.mp4 全量对比（ensemble/hr/agcm）；源自 3.6 节，本会话复核一致",
     "data": [
-      {"model": "agcm",     "wall": "1m23s", "fps": 26, "rss_peak_mb": 1084, "quality": "全局色调映射仅", "use_case": "极速/省时"},
-      {"model": "ensemble", "wall": "6m13s", "fps": 6,  "rss_peak_mb": 1115, "quality": "AGCM+LE 级联（端到端）", "use_case": "推荐默认：定量最优"},
-      {"model": "hr",       "wall": "6m14s", "fps": 6,  "rss_peak_mb": 1096, "quality": "GAN 微调版", "use_case": "感知质量增强"}
+      {
+        "model": "agcm",
+        "wall": "1m23s",
+        "fps": 26,
+        "rss_peak_mb": 1084,
+        "quality": "全局色调映射仅",
+        "use_case": "极速/省时"
+      },
+      {
+        "model": "ensemble",
+        "wall": "6m13s",
+        "fps": 6,
+        "rss_peak_mb": 1115,
+        "quality": "AGCM+LE 级联（端到端）",
+        "use_case": "推荐默认：定量最优"
+      },
+      {
+        "model": "hr",
+        "wall": "6m14s",
+        "fps": 6,
+        "rss_peak_mb": 1096,
+        "quality": "GAN 微调版",
+        "use_case": "感知质量增强"
+      }
     ],
     "conclusion": "RSS 峰值差异 <3% ⇒ 模型选择不改变内存峰值；ensemble 与 hr 同帧率；agcm 快约 4.4 倍"
   },
-
   "codec_comparison": {
     "note": "同为 test2.mp4 全片 / ensemble（除注明外）；wall 单位秒",
-    "columns": ["codec", "env", "wall_s", "fps", "out_mb", "size_delta", "status"],
+    "columns": [
+      "codec",
+      "env",
+      "wall_s",
+      "fps",
+      "out_mb",
+      "size_delta",
+      "status"
+    ],
     "rows": [
-      ["libx265",     "L40", 103, 21, 24.0,  "+65%", "OK"],
-      ["hevc_nvenc",  "L40", 101, 21, 26.1,  "+80%", "OK"],
-      ["hevc_nvenc",  "T4",  347, 6,  27.9,  "+92%", "OK"],
-      ["av1_nvenc",   "L40", null, null, null, null, "HANG(收尾)"],
-      ["libsvtav1",   "T4",  null, null, null, null, "OK(仅60帧软编抽样)"],
-      ["libaom-av1",  "T4",  null, null, null, null, "OK(仅60帧软编抽样)"]
+      [
+        "libx265",
+        "L40",
+        103,
+        21,
+        24.0,
+        "+65%",
+        "OK"
+      ],
+      [
+        "hevc_nvenc",
+        "L40",
+        101,
+        21,
+        26.1,
+        "+80%",
+        "OK"
+      ],
+      [
+        "hevc_nvenc",
+        "T4",
+        347,
+        6,
+        27.9,
+        "+92%",
+        "OK"
+      ],
+      [
+        "av1_nvenc",
+        "L40",
+        null,
+        null,
+        null,
+        null,
+        "HANG(收尾)"
+      ],
+      [
+        "libsvtav1",
+        "T4",
+        null,
+        null,
+        null,
+        null,
+        "OK(仅60帧软编抽样)"
+      ],
+      [
+        "libaom-av1",
+        "T4",
+        null,
+        null,
+        null,
+        null,
+        "OK(仅60帧软编抽样)"
+      ]
     ],
     "insight": "libx265 与 hevc_nvenc 在 L40 上耗时接近（~21fps）⇒ 模型推理是瓶颈（6fps→21fps 已吃满），编码器非瓶颈"
   },
-
   "gpu_utilization_insight": {
     "L40_full_ensemble": "21fps（模型推理受限，GPU 满载）",
     "L40_4k_agcm_30f": "53-54fps（agcm 快 + 4K NVENC 硬编分担）",
     "av1_nvenc_hang_signature": "GPU 0% + 显存恒定不降 ⇒ 编码器进程存活但 NVENC 会话卡 flush，主线程 enc.wait() 无超时"
   },
-
   "bugs_fixed_this_session": [
-    {"id": "B1", "issue": "模型模式 libx265 exit 183",     "root": "高线程 libx265 初始化超时/滤镜冲突/scale 重复转换",  "fix": "threads≤16 + is_hdr_input 分支（仅 setparams 移除 scale 与单独色彩标志）+ 解码仅 -frames:v", "verify": "L40 全组合 OK"},
-    {"id": "B2", "issue": "av1_nvenc 100% 收尾死锁",        "root": "av1_nvenc 硬件会话 flush 卡死 + enc/dec wait 无超时 + dec.stdout 未排空", "fix": "enc 120s/dec 10s 超时 + 收尾排空 dec.stdout + _terminate", "verify": "T4 hevc_nvenc 回归 OK；L40 av1_nvenc 待复测"}
+    {
+      "id": "B1",
+      "issue": "模型模式 libx265 exit 183",
+      "root": "高线程 libx265 初始化超时/滤镜冲突/scale 重复转换",
+      "fix": "threads≤16 + is_hdr_input 分支（仅 setparams 移除 scale 与单独色彩标志）+ 解码仅 -frames:v",
+      "verify": "L40 全组合 OK"
+    },
+    {
+      "id": "B2",
+      "issue": "av1_nvenc 100% 收尾死锁",
+      "root": "av1_nvenc 硬件会话 flush 卡死 + enc/dec wait 无超时 + dec.stdout 未排空",
+      "fix": "enc 120s/dec 10s 超时 + 收尾排空 dec.stdout + _terminate",
+      "verify": "L40 av1_nvenc 三组复测通过（MP4×2+MKV）+ T4 hevc_nvenc 回归"
+    }
   ],
-
   "pending": [
-    "切回 L40 复测 av1_nvenc 全片：确认不再死锁、超时后优雅报告",
     "bench_sdr_to_hdr.py 正式 d 层含 av1_nvenc 的完整 --json 报告（--repeats/--vmaf 门禁）",
     "若 av1_nvenc 仍无法完整 finalize：评估分帧 + concat 规避或记录为已知环境限制"
   ]

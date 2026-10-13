@@ -1,0 +1,44 @@
+{
+  "topic": "CPU 测试机画像与 bench 并发约束（2026-10-13 实测）",
+  "machine": {"cpu_effective_cores": 4, "cpu_cgroup": "400000/100000", "mem_cgroup_gb": 8, "host_mem_gb": 30, "gpu": "无"},
+  "critical_constraint": {
+    "rule": "bench 并行度上限 = floor(mem_cgroup_gb / 2.6)，不是核数",
+    "measured": {
+      "3_concurrent_bench": "系统性 -9 OOM（ensemble 双网络进程优先被杀）；5+ 组合误失败",
+      "2_concurrent_bench": "全部 OK"
+    },
+    "per_process_mem_gb": 2.6,
+    "breakdown": "模型 ~1GB（ensemble=AGCM+LE 双网络更重）+ 双 ffmpeg + 帧缓冲"
+  },
+  "cpu_inference_speed": {
+    "unit": "720p 单帧（推理+libx265编码），--frames 30 实测折算",
+    "agcm_s_per_frame": 3.51,
+    "ensemble_s_per_frame": 15.52,
+    "hr_s_per_frame": 15.79,
+    "note": "倍率 agcm:ensemble:hr = 1:4.4:4.5，与 T4/L40 GPU 轴一致 ⇒ 模型轴倍率与设备无关，CPU 侧测一次即可",
+    "full_video_estimate_hours": 8,
+    "mandate": "CPU 侧必须 --frames 限帧（30-60）；全片 2191 帧不可行"
+  },
+  "l1_software_codec_costs_30frames_agcm": {
+    "librav1e": 292.25,
+    "libx265": 413.64,
+    "libaom-av1": 560.09,
+    "libsvtav1": null,
+    "note": "librav1e 最快（比 libx265 快 29%）；libaom-av1 最慢；libsvtav1 待续跑"
+  },
+  "bench_fixes": [
+    {"id": "F1", "issue": "m 层 KeyError('le') 崩溃", "fix": "改为遍历 MODEL_VARIANTS 实际键（le 不可单独推理）", "file": "Accessory/probe/bench_sdr_to_hdr.py:827"},
+    {"id": "F2", "issue": "--device 覆盖提示行语义错误（n_same 在覆盖后计算恒等于总数）", "fix": "改为覆盖前统计 n_before", "file": "Accessory/probe/bench_sdr_to_hdr.py"},
+    {"id": "F3", "issue": "bench 无 --device 参数，CPU 层硬编码无法迁移", "fix": "新增 --device {cpu,cuda,auto} 全局覆盖 + cuda 不可用时退出2 + apply_device_override()", "file": "Accessory/probe/bench_sdr_to_hdr.py"}
+  ],
+  "phase1_remaining": [
+    "libsvtav1 单跑（L1 缺格）",
+    "l2,c 分段/并发路径（21s 素材，不带 --frames）",
+    "g 层 4K 分块（--frames 2）",
+    "c.threads 线程树 1/2/4/8"
+  ],
+  "json_artifacts": [
+    "memory/phase1_cpu_l1_20261013.json",
+    "memory/phase1_cpu_l3m_20261013.json"
+  ]
+}

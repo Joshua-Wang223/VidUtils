@@ -9,7 +9,126 @@
   2. **本体脚本测试**——`convert_sdr_to_hdr.py` 的全流程实测，含 GPU（T4/L40）加速、编码器矩阵、分段并行、字幕、音频等高级功能。
 - **模型推理测试**：**全阶段均使用真实模型推理（`--model ensemble` 等），不再包含 `--no-model`**。基准测试的目的是指导生产，必须是实际执行大模型推理的输出。
 - **动态并行**：测试执行时应根据环境资源使用情况动态加大并行力度，多进程加速测试（`bench_sdr_to_hdr.py` 的 `--workers` / `--repeats` 与 `convert_sdr_to_hdr.py` 的 `--workers` / `--threads`）。
+  > ⚠ **并发上限受 cgroup 内存约束，不是核数**（2026-10-13 实测）：8GB cgroup 机器上跑 **3 个** bench 进程会
+  > **系统性 OOM**（`-9`，ensemble 双网络进程优先被杀）；**2 个并发**才安全。4 核 8G 机的经验值：
+  > 每进程约需 2–2.6GB（模型 1GB + 双 ffmpeg + 缓冲），故并行度 ≈ `floor(mem_cgroup_gb / 2.6)`。
 - **渐进原则**：下级阶段能测的绝不在上级阶段重复；素材准备、软编基线等准备工作下放到 CPU 阶段。
+- **阶段任务重排（2026-10-13，优先级高于原 1/2/3 节的分层描述）**：
+  > 原则：**能 CPU 侧完成的绝不推给 T4，能 T4 胜任的绝不推给 L40**。
+  > 实现手段：bench 新增 `--device {cpu,cuda,auto}` **全局覆盖**（替换 L2/L3/c.workers/G 硬编码的
+  > `--device cpu`，或给 L1/c.threads/D/E/M 补上缺省值），使同一矩阵可在对应机器上跑。
+  > 各层归属与理由见 **§4 阶段任务重排总表**。
+
+---
+
+## 📋 阶段任务重排总表（2026-10-13 起执行）
+
+> 判据：**结论是否依赖被检设备**。依赖 GPU/编码器行为的层上移，纯 CPU/内存/路径行为的层下沉。
+
+| Bench 层 | 组合数 | 归属 | 理由 |
+|----------|--------|------|------|
+| **L1** 软编等质量（libx265/libsvtav1/libaom-av1/librav1e） | 4 | **CPU 机** | 编码器成本对比与推理设备无关；软编在 T4/L40 上纯浪费 |
+| **L1** CUDA 推理版（`--device cuda` 直跑本体脚本） | — | T4 | GPU 推理链路的编码器对比 |
+| **L2** 执行路径（split×3 + tile×2） | 6 | **CPU 机** | 分段/分块是**内存与管道**行为；`split.workers` 多进程推理**仅 CPU 可用**（CUDA 下被脚本禁用） |
+| **L2** segment 的 GPU 版 | — | T4 | `--device cuda` 覆盖，验证 GPU 推理下分段路径（已在 T4/L40 实测通过） |
+| **L3** 完整流程 CPU 基线 | 1 | **CPU 机** | 就是 CPU 基线定义 |
+| **C.workers** 并发阶梯 1/2/4 | 3 | **CPU 机** | workers=分段数，测的是**过订/内存**行为（非单调已在仓内记录） |
+| **C.threads** ffmpeg 线程 1/2/4/8 | 4 | **CPU 机**（自动版在 T4 复核一次） | 线程树与推理设备基本正交；GPU 上仅需抽验 |
+| **D** NVENC 组 | 6 | **T4** | T4 有 hevc/h264_nvenc，`av1_nvenc` 会正确 SKIP |
+| **D** av1_nvenc + `--nvenc-tune uhq/lossless` | ~3 | **L40 独有** | Ada（第8代 NVENC）才支持，T4 硬件无 AV1 编码器 |
+| **E** 解码/容器/音频 | 8 | **T4** | `--decode cuda` 需真硬解；容器/音频轴不依赖具体卡 |
+| **E** 字幕 burn/keep | — | T4 | libass 与色域链交互，任意 GPU 机即可 |
+| **G** 4K 分块 tile 0/1024/2048 | 3 | **CPU 机** | 分块目的是**压 RAM**；L40 的 46GB VRAM 上 tile=0 无压力、测不出意义 |
+| **G** 4K 整帧/大分块（长 `--frames`） | — | L40 | 显存允许下验证 4K 整帧与 OOM 边界 |
+| **M** 模型变体 | 3 | **两处都要** | CPU 机测相对倍率（agcm/hr 已测）；T4/L40 测 GPU 绝对速度 |
+
+### 4.1 CPU 侧执行约束（2026-10-13 实测，位于 4核/8G cgroup）
+
+| 约束 | 实测值 | 处置 |
+|------|--------|------|
+| CPU 推理速度 | agcm 720p ≈ **3.5 s/帧**（无竞争）；hr ≈ 15.8 s/帧 | **必须 `--frames` 限帧**（30–60）；全片 2191 帧需 8h+ |
+| 并发上限 | **2 个 bench 进程**（3 个即系统性 `-9` OOM） | 并行度按 `floor(mem_gb/2.6)` 算，不按核数 |
+| 内存画像 | 每进程 ~2–2.6GB（模型+双 ffmpeg+缓冲）；8GB cgroup | ensemble（AGCM+LE 双网络）是最先被 OOM killer 选中者 |
+| L2/C 分段轴 | 需 ≥20s 素材 **且不能带 `--frames`**（互斥降级） | 分段轴单独用 21s 短素材跑；非分段轴用 `--frames` 跑 |
+
+### 4.2 各阶段执行清单（重排后）
+
+**阶段 1 – CPU 机（4核/8G，`--device cpu` 或矩阵原生）**
+```bash
+# L1 四软编等质量（限帧 30；libsvtav1 单独跑避免并发 OOM）
+bench -i test1.mp4 --layers l1 --codecs libx265,libaom-av1,librav1e --model agcm --crf-ref 21 \
+     --frames 30 --repeats 1 --warmup 0 --device cpu
+bench -i test1.mp4 --layers l1 --codecs libsvtav1 --model agcm --crf-ref 21 --frames 30 --device cpu
+# L3 + M（ensemble 单独跑；agcm/hr 可并行）
+bench -i test1.mp4 --layers l3   --model ensemble --frames 30 --device cpu
+bench -i test1.mp4 --layers m    --model ensemble --frames 30 --device cpu
+bench -i test1.mp4 --layers l1 --codecs libx265 --model agcm --frames 30 --device cpu   # agcm 基线
+# L2 + C 分段路径（21s 短素材，不带 --frames，跑一次即可）
+bench -i clip21s.mp4 --layers l2,c --model agcm --device cpu
+# G 4K 分块（显存/内存压力测试，CPU 4K 单帧 ~89s ⇒ 限帧）
+bench -i tmp_dark_4k.mp4 --layers g --model agcm --frames 2 --device cpu
+```
+
+**阶段 2 – T4（`--device cuda` 覆盖 CPU 层 + 原生 GPU 层）**
+```bash
+# D/E 原生（T4 有 hevc_nvenc/h264_nvenc，av1_nvenc 自动 SKIP）
+bench -i test2.mp4 --layers d,e --model ensemble --device cuda --repeats 3
+# GPU 版 L2/L1/M 复核（用覆盖把 CPU 层搬上 GPU）
+bench -i clip21s.mp4 --layers l2,c --model agcm --device cuda
+bench -i test2.mp4  --layers m    --model ensemble --device cuda --repeats 3
+```
+
+**阶段 3 – L40（仅 Ada 独有 + 大显存）**
+```bash
+# av1_nvenc 独有（含 tune uhq/lossless）
+bench -i test2.mp4 --layers d --codecs av1_nvenc --model ensemble --device cuda \
+     --crf-ref 21 --repeats 3 --nvenc-tune uhq --json memory/phase3_l40_gpu_YYYYMMDD.json
+# 4K 整帧/大分块（46GB VRAM 才允许）
+bench -i tmp_dark_4k.mp4 --layers g --model agcm --device cuda --tile 0 --frames 60 --repeats 1
+# 大并发（48 核）
+convert_sdr_to_hdr.py -i test2.mp4 --split-mode segment --workers 8 --device cuda
+```
+
+### 4.3 阶段 1 CPU 侧已取得实测数据（2026-10-13，4核/8G cgroup）
+
+> 执行方式：bench `--device cpu` + `--frames 30`（分段轴用 21s 素材另跑）。
+> 落盘：`memory/phase1_cpu_l1_20261013.json`、`memory/phase1_cpu_l3m_20261013.json`。
+
+**模型轴 CPU 定速（720p，30 帧，推理+libx265 编码总时长）**
+
+| 变体 | 墙钟 | 折算 s/帧 | 相对 agcm | 数据来源 |
+|------|------|-----------|-----------|----------|
+| **agcm** | **105.36s** | 3.51 | 1.0× | m.agcm OK |
+| **ensemble** | 465.72s | 15.52 | **4.4×** | l3.full OK（2 并发单独跑） |
+| **hr** | 473.83s | 15.79 | **4.5×** | m.hr OK |
+
+⇒ 与 L40/T4 上的 GPU 轴结论一致（agcm 快约 4.4×），**证明模型轴倍率与设备无关**，
+这是「模型轴只在 CPU 侧测一次即可」的依据。
+
+**L1 四软编（30 帧，agcm 推理 + 目标编码器编码）**
+
+| 编码器 | 墙钟 | 结果 |
+|--------|------|------|
+| libx265 | 413.64s | ✅ |
+| libaom-av1 | 560.09s | ✅（最慢软编） |
+| librav1e | 292.25s | ✅（**最快软编**，比 libx265 快 29%） |
+| libsvtav1 | — | ⏸ 未测（被调度中断，待续跑） |
+
+**并发约束实证（重要，指导后续所有并行执行）**
+
+| 并发数 | 结果 |
+|--------|------|
+| 3 个 bench 进程 | **系统性 `-9` OOM**：m.ensemble/l3.full/libsvtav1/l2.split.off/c.workers 等 5+ 组合被杀 |
+| 2 个 bench 进程 | 全部 OK（l3.full ensemble 465.72s 通过） |
+
+⇒ 8GB cgroup 上 **并行度上限 = 2**（每进程 ~2–2.6GB）。此前 A/B/C 三并行的设计超出内存容量，
+其 `-9` 失败**不代表组合本身不可跑**—— 已用 2 并发复核证实。
+
+**阶段 1 待续跑（新客户端接管）**
+1. `libsvtav1` 单跑（L1 缺格）—— `bench -i test1.mp4 --layers l1 --codecs libsvtav1 --model agcm --frames 30 --device cpu`
+2. `l2,c` 分段/并发路径（21s 素材，**不带 `--frames`**，单跑或 2 并发）
+3. `g` 层 4K 分块（`--frames 2`，CPU 上 4K 单帧约 89s）
+4. `c.threads` 线程树 1/2/4/8
 
 ---
 

@@ -1,0 +1,182 @@
+{
+  "bench_version": "1.0",
+  "argv": [
+    "-i",
+    "../input_videos/test1.mp4",
+    "--layers",
+    "l3,m",
+    "--model",
+    "ensemble",
+    "--crf-ref",
+    "21",
+    "--frames",
+    "30",
+    "--repeats",
+    "1",
+    "--warmup",
+    "0",
+    "--device",
+    "cpu",
+    "--timeout",
+    "7200",
+    "--work",
+    "Accessory/temp/bench_B",
+    "--json",
+    "memory/phase1_cpu_l3m_20261013.json"
+  ],
+  "source": {
+    "path": "../input_videos/test1.mp4",
+    "width": 1280,
+    "height": 720,
+    "fps": 30.0,
+    "duration": 19.133333,
+    "nb_frames": 574,
+    "pix_fmt": "yuv420p",
+    "vcodec": "h264",
+    "has_audio": true,
+    "color_transfer": "bt709",
+    "size": 3355915
+  },
+  "env": {
+    "ffmpeg": "/usr/bin/ffmpeg",
+    "ffprobe": "/usr/bin/ffprobe",
+    "torch": true,
+    "torch_version": "2.10.0+cu128",
+    "cuda": false,
+    "model_repo": "/workspace/HDRTVNet-plus",
+    "model_codes": true,
+    "model_weights": true,
+    "model_ready": true,
+    "filters": {
+      "libvmaf": true,
+      "tonemap": true,
+      "zscale": true
+    },
+    "hw_codecs": [],
+    "hw_decode": false,
+    "has_nvidia_dev": false,
+    "cpu": 4,
+    "cpu_src": "cgroup (/sys/fs/cgroup/cpu.max)",
+    "mem_total_gb": 30.96739959716797,
+    "mem_avail_gb": 21.26727294921875,
+    "mem_src": "/proc/meminfo"
+  },
+  "anchor": {
+    "mode": "quality",
+    "crf_ref": 21,
+    "note": "crf_sent 是真正下发的原生值；ref 处无编码器恒等"
+  },
+  "repeats": 1,
+  "results": [
+    {
+      "cid": "l3.full",
+      "layer": "l3",
+      "desc": "完整流程（ensemble 模型）",
+      "group": "l3.infer",
+      "status": "FAIL",
+      "skip_reason": "",
+      "fail_reason": "退出码 -9：  [██████░░░░░░░░░░░░░░░░░░]  26.7%  8/30帧  fps=  0.0  speed= 0.00x  已用 3m34s  剩余 9m49s       ⏐   [███████░░░░░░░░░░░░░░░░░]  30.0%  9/30帧  fps=  0.0  speed= 0.00x  已用 4m00s  剩余 9m20s       ⏐   [████████░░░░░░░░░░░░░░░░]  33.3%  10/30帧  fps=  0.0  speed= 0.00x  已用 4m24s  剩余 8m48s       ⏐   [████████",
+      "wall_min": null,
+      "wall_median": null,
+      "wall_all": [],
+      "script_reported_elapsed": [],
+      "frames": 0,
+      "frames_from": "",
+      "out_bytes": 0,
+      "crf_sent": 21,
+      "quality_axis": "crf",
+      "actual_path": "",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [],
+      "out_path": "",
+      "cmd": "/root/.pyenv/versions/3.11.1/bin/python3 /workspace/VidUtils/convert_sdr_to_hdr.py -i ../input_videos/test1.mp4 -o Accessory/temp/bench_B/l3.full.mp4 --split-mode off --device cpu"
+    },
+    {
+      "cid": "m.ensemble",
+      "layer": "m",
+      "desc": "模型变体 ensemble (AGCM + LE 级联（默认，定量最优）)",
+      "group": "m.variant",
+      "status": "FAIL",
+      "skip_reason": "",
+      "fail_reason": "退出码 -9：[模型] Ensemble_AGCM_LE (ensemble) 已加载：/workspace/HDRTVNet-plus/pretrained_models/Ensemble_AGCM_LE.pth ⏐ [模型] 参数量 591,158，设备 cpu ⏐ [1/1] test1.mp4 ⏐   [█░░░░░░░░░░░░░░░░░░░░░░░]   3.3%  1/30帧  fps=  0.0  speed= 0.00x  已用 35.3s  剩余 17m04s      ",
+      "wall_min": null,
+      "wall_median": null,
+      "wall_all": [],
+      "script_reported_elapsed": [],
+      "frames": 0,
+      "frames_from": "",
+      "out_bytes": 0,
+      "crf_sent": 21,
+      "quality_axis": "crf",
+      "actual_path": "",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [],
+      "out_path": "",
+      "cmd": "/root/.pyenv/versions/3.11.1/bin/python3 /workspace/VidUtils/convert_sdr_to_hdr.py -i ../input_videos/test1.mp4 -o Accessory/temp/bench_B/m.ensemble.mp4 --model ensemble --crf-ref 21 --device cpu"
+    },
+    {
+      "cid": "m.agcm",
+      "layer": "m",
+      "desc": "模型变体 agcm (全局色调映射（ConditionNet 仅，极速/省显存）)",
+      "group": "m.variant",
+      "status": "OK",
+      "skip_reason": "",
+      "fail_reason": "",
+      "wall_min": 105.35545033216476,
+      "wall_median": 105.35545033216476,
+      "wall_all": [
+        105.35545033216476
+      ],
+      "script_reported_elapsed": [
+        97.0
+      ],
+      "frames": 30,
+      "frames_from": "产物容器自报",
+      "out_bytes": 370486,
+      "crf_sent": 21,
+      "quality_axis": "crf",
+      "actual_path": "off",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [
+        "提示：--crf-ref 21（libx264 CRF 基准） → libx265 的 -crf 21。"
+      ],
+      "out_path": "/workspace/VidUtils/Accessory/temp/bench_B/m.agcm.mp4",
+      "cmd": "/root/.pyenv/versions/3.11.1/bin/python3 /workspace/VidUtils/convert_sdr_to_hdr.py -i ../input_videos/test1.mp4 -o Accessory/temp/bench_B/m.agcm.mp4 --model agcm --crf-ref 21 --device cpu"
+    },
+    {
+      "cid": "m.hr",
+      "layer": "m",
+      "desc": "模型变体 hr (感知质量增强版（GAN 微调，同架构不同权重）)",
+      "group": "m.variant",
+      "status": "OK",
+      "skip_reason": "",
+      "fail_reason": "",
+      "wall_min": 473.8263556957245,
+      "wall_median": 473.8263556957245,
+      "wall_all": [
+        473.8263556957245
+      ],
+      "script_reported_elapsed": [
+        468.0
+      ],
+      "frames": 30,
+      "frames_from": "产物容器自报",
+      "out_bytes": 354295,
+      "crf_sent": 21,
+      "quality_axis": "crf",
+      "actual_path": "off",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [
+        "提示：--crf-ref 21（libx264 CRF 基准） → libx265 的 -crf 21。"
+      ],
+      "out_path": "/workspace/VidUtils/Accessory/temp/bench_B/m.hr.mp4",
+      "cmd": "/root/.pyenv/versions/3.11.1/bin/python3 /workspace/VidUtils/convert_sdr_to_hdr.py -i ../input_videos/test1.mp4 -o Accessory/temp/bench_B/m.hr.mp4 --model hr --crf-ref 21 --device cpu"
+    }
+  ],
+  "quality_gate": [],
+  "note": "墙钟含 Python 启动与模型加载；script_reported_elapsed 不含模型加载且三条执行路径口径不一致，仅供交叉核对。SKIP 不等于通过。"
+}

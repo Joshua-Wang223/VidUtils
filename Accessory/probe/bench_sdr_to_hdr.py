@@ -824,7 +824,9 @@ def build_matrix(layers: List[str], crf_ref: int,
     # ── M 模型变体对比 ──────────────────────────────────────────
     # 对比 ensemble/agcm/le/hr 四种模型的推理速度与效果差异
     if "m" in layers:
-        for variant in ("ensemble", "agcm", "le", "hr"):
+        # ⚠ 只列 MODEL_VARIANTS 里真实存在的变体：`le` 需以 AGCM 输出为输入、
+        # 不能单独推理（见 MODEL_VARIANTS 上方注释），硬列会在 build 时 KeyError。
+        for variant in MODEL_VARIANTS:
             out.append(Combo(
                 cid=f"m.{variant}", layer="m",
                 desc=f"模型变体 {variant} ({MODEL_VARIANTS[variant]['description']})",
@@ -851,6 +853,34 @@ def build_matrix(layers: List[str], crf_ref: int,
                 group="g.tile", need_torch=True, need_model=True,
             ))
     return out
+
+
+def apply_device_override(combos: List["Combo"], device: Optional[str]) -> int:
+    """把 --device 覆盖应用到每个组合的 args，返回被改写的组合数。
+
+    ⚠ 覆盖必须**显式**：矩阵里 L2/L3/c.workers/G 硬编码 `--device cpu`、其余靠
+    `auto`（有卡即 cuda）。若不覆盖就把 CPU 层交给 T4/L40 跑，既占着 GPU 又测不到
+    GPU 行为。改写规则：
+      · args 里已有 `--device X` ⇒ 替换 X（L2/L3/c.workers/G 走这条）
+      · args 里没有 `--device`   ⇒ 追加（L1/c.threads/D/E/M 从 auto 变成指定值）
+    ⚠ 不动 need_hw_codec / need_hw_decode 等前置判据 —— 那些与推理设备无关。
+    """
+    if not device:
+        return 0
+    n = 0
+    for c in combos:
+        args = list(c.args)
+        if "--device" in args:
+            i = args.index("--device")
+            if i + 1 < len(args):
+                if args[i + 1] != device:
+                    args[i + 1] = device
+                    c.args = args
+                    n += 1
+        else:
+            c.args = args + ["--device", device]
+            n += 1
+    return n
 
 
 def check_combo_preconditions(c: Combo, env: Dict, meta: Dict) -> Tuple[bool, str]:
@@ -1965,6 +1995,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="给被测脚本限帧（G 层必需：CPU 上 4K 单帧约 89 秒）。"
                         "⚠ 与分段并行互斥 —— 被测脚本会因此把 segment 降级成 off"
                         "（:4079），所以带 --frames 时 C/D组的分段轴会自动 SKIP")
+    p.add_argument("--device", choices=("cpu", "cuda", "auto"), default=None,
+                   help="推理设备**全局覆盖**：替换各组合自带/缺省的 --device。"
+                        "默认 None=按矩阵原样（L2/L3/c.workers/G 为硬编码 cpu，"
+                        "其余 auto）。用于把 CPU 侧可完成的层下放到 CPU 机、"
+                        "或把 L2/G 段轴改到 GPU 上测（省 CPU 机时间）")
     p.add_argument("--work", default=None,
                    help="工作目录（默认 Accessory/temp/bench_sdr_to_hdr）")
     p.add_argument("--keep", action="store_true", help="保留产物（默认跑完删）")
@@ -2138,6 +2173,17 @@ def main() -> int:
     print()
 
     combos = build_matrix(layers, args.crf_ref, codec_list)
+    # --device 全局覆盖：先校验再改写（覆盖要显式，不可静默改推理设备）
+    if args.device:
+        if args.device == "cuda" and not env["cuda"]:
+            print(f"  ✘ --device cuda 但本机 CUDA 不可用（torch={env['torch']}）", flush=True)
+            return 2
+        n_before = sum(1 for c in combos
+                       if "--device" in c.args
+                       and c.args[1 + c.args.index("--device")] == args.device)
+        n_over = apply_device_override(combos, args.device)
+        print(f"  推理设备  : --device {args.device} 覆盖全部 {len(combos)} 个组合"
+              f"（{n_before} 个本就为此值，{n_over} 个被改写/追加）")
     results: List[Result] = []
     t_start = time.monotonic()
     for i, c in enumerate(combos, 1):

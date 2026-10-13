@@ -2246,9 +2246,8 @@ def build_decode_cmd(src: Path,
         cmd += ["-t", f"{duration:.6f}"]
     cmd += ["-i", str(src), "-an", "-sn", "-dn"]
     if frames is not None:
-        # ⚠ -frames:v 是**输出**选项，必须放在 -i 之后：放在前面会被 ffmpeg 当成
-        # 输入选项并直接报错退出（实测 "cannot be applied to input url … Move this
-        # option before the file it belongs to"，退出码 234）。
+        # ⚠ 仅用 -frames:v：精确输出 N 帧，避免 -t 导致定位偏移产生异常首帧
+        # 编码器初始化由 run_job 侧首帧写入前的隐式等待保证
         cmd += ["-frames:v", str(frames)]
     if decode == "cuda":
         dl_fmt = "p010le" if int(src_bits or 8) >= 10 else "nv12"
@@ -2347,6 +2346,7 @@ def build_encode_cmd(width: int, height: int, fps: float,
                      out: Path, src: Path,
                      st: EncodeSettings,
                      has_audio: bool,
+                     is_hdr_input: bool = False,
                      warn: Optional[Callable[[str], None]] = None,
                      extra_args: Optional[List[str]] = None,
                      ffmpeg: str = "ffmpeg") -> List[str]:
@@ -2408,17 +2408,20 @@ def build_encode_cmd(width: int, height: int, fps: float,
                      f"流复制（未走 build_plan 的自动降级）：`-shortest` 会丢掉这些帧。"
                      f"改用 `--audio-codec aac` 可补静音保住帧数。")
 
-    # ── 字幕 burn：把 libass 片段**接在 _hdr_vf 之前** ──
-    # ⚠ 顺序理由（实测两种顺序都可行，但语义不同）：字幕先按**源色域**渲染，
-    #   随后的 scale/setparams 再把整帧（含字幕）一起转到 BT.2020/PQ ⇒ 字幕颜色
-    #   与画面一致。反过来（先转 HDR 再烧）字幕会按 PQ/BT.2020 渲染再被转一次，
-    #   白字会偏色/过亮。
+# ── 字幕 burn：把 libass 片段**接在滤镜链之前** ──
+    # ⚠ 顺序理由：字幕先按**源色域**渲染，随后的滤镜链把整帧（含字幕）一起处理。
     # ⚠ libass 能直接吃 gbrp16le（实测），所以 burn **不需要中间编码** ——
     #   整条链仍是「解码→NN 推理→一次编码」，不存在二次编码的画质损失。
-    _vf = _hdr_vf(st.color_range)
+    if is_hdr_input:
+        # 模型输出已是 PQ/BT.2020：仅写入元数据，不做 scale 色域转换
+        _vf = (f"setparams=colorspace=bt2020nc:color_primaries=bt2020:"
+               f"color_trc=smpte2084:range={st.color_range}")
+    else:
+        # SDR 输入：需 scale 转色域 + setparams 写元数据
+        _vf = _hdr_vf(st.color_range)
     if st.subs_burn_file:
         _sub_path = str(st.subs_burn_file).replace("\\", "\\\\") \
-                                .replace(":", r"\:").replace("'", r"\'")
+                        .replace(":", r"\:").replace("'", r"\'")
         _vf = f"subtitles='{_sub_path}',{_vf}"
     cmd += ["-vf", _vf, "-c:v", st.codec]
 
@@ -2465,14 +2468,18 @@ def build_encode_cmd(width: int, height: int, fps: float,
         cmd += ["-pix_fmt", st.pix_fmt]
 
     # --threads：只对**软件编码器**下发（硬件编码器不吃帧级线程）
-    if st.threads and c not in _HW_ENCODERS:
+    # 模型模式下不下发 -threads：高线程数会导致 libx265 初始化慢，
+    # 配合 --frames 短输入极易出现 "Could not open encoder before EOF"
+    if st.threads and c not in _HW_ENCODERS and not is_hdr_input:
         cmd += ["-threads", str(max(1, st.threads))]
 
-    # ── 色彩四参（HDR10 交付口径；由 --color-range 控制 range，默认 pc）──
-    cmd += ["-colorspace", "bt2020nc",
-            "-color_primaries", "bt2020",
-            "-color_trc", "smpte2084",
-            "-color_range", st.color_range]
+    # ── 色彩四参（HDR10 交付口径）──
+    # 模型模式下已由 setparams 滤镜写入，避免与 -vf setparams 冲突
+    if not is_hdr_input:
+        cmd += ["-colorspace", "bt2020nc",
+                "-color_primaries", "bt2020",
+                "-color_trc", "smpte2084",
+                "-color_range", st.color_range]
 
     # ── 音频（按容器修正：WebM 只收 Opus/Vorbis，必要时代用 libopus 重编码）──
     audio_codec = resolve_audio_codec_for_container(st.audio_codec, out.suffix, src,
@@ -4245,6 +4252,7 @@ def build_plan(args: argparse.Namespace, meta: Dict,
                                   src_bits=meta.get("src_bits", 8),
                                   start=seg_start if _seg else None)
     encode_cmd = build_encode_cmd(ow, oh, fps, dst, src, st, meta["has_audio"],
+                                  is_hdr_input=not args.no_model,
                                   warn=warn or _default_warn,
                                   extra_args=getattr(args, "extra_args", None))
     # 两阶段（keep + 源流时长缺失）：阶段1 先写 `_stage1`，remux 成功才移到 dst。

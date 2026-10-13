@@ -545,6 +545,24 @@ T4 实测 test2.mp4（73.13s，hevc_nvenc，cuda）三模型全量对比：
 | NVENC hevc_nvenc | 51.6s | 1m37s | - |
 | NVENC av1_nvenc | - | - | 17.4s (30帧 4K) |
 
+### 3.11 L40 模型模式 libx265 修复记录 (2026-10-13)
+
+> 背景：L40 环境验证中发现 `--model ensemble --codec libx265 --frames 5` 等短帧模型模式失败，退出码 183 (AVERROR_INVALIDDATA)。经系统排查定位并修复。
+
+| 问题 | 根因 | 修复位置 | 修复方案 |
+|------|------|----------|----------|
+| **模型模式 `--frames N` 失败** | `-threads 48` 导致 libx265 初始化耗时 > 输入时长 | `build_encode_cmd:2471` | 模型模式 (`is_hdr_input=True`) 下不下发 `-threads` |
+| **滤镜链冲突** | `setparams` 滤镜与单独 `-colorspace/-color_primaries` 等标志同时下发冲突 | `build_encode_cmd:2478` | 模型模式仅用 `setparams` 写元数据，移除单独色彩四参标志 |
+| **解码命令异常首帧** | `-t` 时长限制导致 ffmpeg 定位偏移，产生异常首帧 | `build_decode_cmd:2255` | 仅用 `-frames:v` 精确截帧，移除 `-t` |
+| **滤镜链重复转换** | 模型输出已是 PQ/BT.2020，滤镜链 `scale=out_color_matrix=bt2020nc` 重复转换 | `build_encode_cmd:2422` | 模型模式仅用 `setparams` 写元数据，移除 `scale` 色域转换 |
+
+**验证通过场景：**
+- ✅ `--model ensemble --codec libx265 --frames 5 --device cuda` (0.7s 完成)
+- ✅ 完整视频 73s libx265 ensemble (1m43s 完成)  
+- ✅ 分段并行 `--split-mode segment --workers 2 --device cuda` (1m35s 完成)
+- ✅ 4K 30帧 `--model agcm --codec libx265 --frames 30 --device cuda` (18s 完成)
+- ✅ NVENC (hevc_nvenc/av1_nvenc) 正常工作
+
 ---
 
 **祝测试顺利 🚀**

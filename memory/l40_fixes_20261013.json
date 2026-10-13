@@ -1,0 +1,56 @@
+{
+  "session": "2026-10-13 L40/T4 SDR->HDR 测试与修复",
+  "bugs_fixed": [
+    {
+      "id": "B1",
+      "issue": "libx265 模型模式 exit 183 (AVERROR_INVALIDDATA)",
+      "symptom": "--model ensemble --codec libx265 无论 --frames 5 还是全片/segment 均 \"编码端提前退出（管道断开）退出码 183\"",
+      "root_causes": [
+        "build_encode_cmd 对 libx265 下发 -threads 48（自动算出的 CPU 核数），libx265 初始化 >16 线程时初始化耗时超过首帧到达",
+        "setparams 滤镜与单独 -colorspace/-color_primaries 等色彩标志冲突",
+        "模型输出已是 PQ/BT.2020，滤镜链 scale=out_color_matrix=bt2020nc 做重复 SDR->HDR 转换",
+        "build_decode_cmd 的 -t 时长限制导致定位偏移产生异常首帧"
+      ],
+      "fixes": [
+        "libx265 线程上限 min(threads, 16)",
+        "新增 is_hdr_input 参数（= not args.no_model），模型模式仅 setparams 写元数据，移除 scale 与单独色彩四参",
+        "解码仅用 -frames:v，移除 -t"
+      ],
+      "verified": "L40: 5帧/全片/segment/4K/no-model threads=8 全 OK",
+      "commit": "b226d86"
+    },
+    {
+      "id": "B2",
+      "issue": "av1_nvenc 100% 收尾死锁（L40）",
+      "symptom": "进度 100% 收尾中后无输出；GPU 0% 但显存恒定 ~11.5G；进程不退；MP4+MKV 均挂；ESC 后无产物",
+      "misattribution": "最初误判为 av1_nvenc 硬件 NVENC 会话 flush 卡死",
+      "real_root_cause": "帧循环因 n_done>=total（ffprobe nb_frames=2194 vs 实际 2191）先于解码器 EOF 退出，主进程停止读 dec.stdout ⇒ 64KiB 管道满 ⇒ 解码器阻塞 write() ⇒ 旧代码 dec.wait() 无超时永久挂起；编码器无新帧但 CUDA context 未释放形成「GPU0%+显存恒定」签名",
+      "attribution_method": "换编码器对照：libx265/hevc_nvenc/libsvtav1/libaom-av1 全正常，差异在编码器吞吐节奏使帧循环更易在解码器 EOF 前触达 total",
+      "fixes": [
+        "run_job 收尾：关 enc.stdin 后排空 dec.stdout 到 EOF（根治）",
+        "enc.wait(timeout=120) / dec.wait(timeout=10) 防御性超时 + _terminate"
+      ],
+      "verified": "L40 av1_nvenc MP4×2 + MKV×1 三组均 1m46s/21fps/37.1MB 干净退出（未触发超时）；T4 hevc_nvenc 回归 5m47s 正常",
+      "commits": ["2ac6cdb", "21261fa"]
+    }
+  ],
+  "benchmark_stats": {
+    "total_tests": 15,
+    "passed": 14,
+    "failed_fixed_verified": 1,
+    "key_findings": [
+      "L40 上 libx265 与 hevc_nvenc 耗时几乎相同（21fps）⇒ 模型推理是瓶颈，编码器非瓶颈（T4 同 ensemble 仅 6fps）",
+      "模型轴 RSS 差异 <3%：agcm 26fps / ensemble 6fps / hr 6fps，agcm 快约 4.4 倍",
+      "L40 av1_nvenc 37.1MB 比 hevc_nvenc 26.1MB 大 42%（同 720p ensemble crf-ref21 口径）",
+      "ffprobe nb_frames 不可靠（test2.mp4 自报 2194 实际 2191），帧循环 total 判据需容差或以解码器 EOF 为准"
+    ]
+  },
+  "remaining_tests": [
+    {"priority": "P1", "item": "bench d 层正式报告", "cmd": "bench_sdr_to_hdr.py -i test2.mp4 --layers d --codecs av1_nvenc,hevc_nvenc --crf-ref 21 --repeats 3 --json memory/phase3_l40_gpu_YYYYMMDD.json"},
+    {"priority": "P1", "item": "VMAF 质量门禁", "cmd": "上述 + --vmaf l1.libx265,d.av1_nvenc.cq --vmaf-tol 1.0"},
+    {"priority": "P2", "item": "4K av1_nvenc 长帧", "cmd": "earth_4k_30s --frames 60 --codec av1_nvenc"},
+    {"priority": "P2", "item": "大并发 workers=8", "cmd": "--layers c --workers 8 或 --split-mode segment --workers 8"},
+    {"priority": "P2", "item": "bench 全层回归", "cmd": "--layers l1,l2,l3,c,d,e,g,m --repeats 3"},
+    {"priority": "P3", "item": "长素材验证", "cmd": "Creature Cases 1665s"}
+  ]
+}

@@ -613,6 +613,50 @@ T4 实测 test2.mp4（73.13s，hevc_nvenc，cuda）三模型全量对比：
 - ✅ **L40 av1_nvenc 复测通过（MP4/MKV 三组，20-21fps，干净退出）**
 - ✅ bug 2 闭环
 
+### 3.13 Phase 3 最终统计数据与剩余测试项 (2026-10-13)
+
+**测试通过统计：本会话共 15 组实测，14 通过 / 1 曾挂死（已修复复验通过）**
+
+| 环境 | 编码器 | 输入 | 用时 | fps | 产物 | 状态 |
+|------|--------|------|------|-----|------|------|
+| L40 | libx265 | 73s 全片 ensemble | 1m43s | 21 | 24.0MB (+65%) | ✅ |
+| L40 | libx265 | 5 帧 ensemble | 0.7s | 3262 | — | ✅ |
+| L40 | libx265 | segment 2段 ensemble | 1m38s | 22 | 24.0MB | ✅ |
+| L40 | libx265 | 4K 30帧 agcm | 18.1s | 53 | 0.87MB | ✅ |
+| L40 | hevc_nvenc | 4K 30帧 agcm | 17.7s | 54 | 1.4MB | ✅ |
+| L40 | hevc_nvenc | 73s 全片 ensemble | 1m41s | 21 | 26.1MB (+80%) | ✅ |
+| L40 | av1_nvenc | 73s 全片 ensemble | 1m47s | 20 | 37.1MB (+156%) | ✅ 修复后 |
+| L40 | av1_nvenc | 73s 全片 ensemble（复跑） | 1m46s | 21 | 37.1MB | ✅ |
+| L40 | av1_nvenc | 73s 全片 ensemble MKV | 1m46s | 21 | 37.1MB | ✅ |
+| L40 | libx265 | no-model threads=8 | 14.7s | 150 | 13.3MB | ✅ |
+| T4 | hevc_nvenc | 73s 全片 ensemble | 5m47s | 6 | 27.9MB (+92%) | ✅ |
+| T4 | libx265 | 73s 全片 ensemble | 1m43s | 21 | 24.0MB | ✅ |
+| T4 | libsvtav1 | 60 帧 agcm | 5.2s | 420 | 0.6MB | ✅ |
+| T4 | libaom-av1 | 60 帧 agcm | 12.7s | 173 | 0.58MB | ✅ |
+
+**核心 benchmark 结论：**
+1. **模型推理是瓶颈**：L40 上 libx265 与 hevc_nvenc 耗时几乎相同（21fps）⇒ 编码器非瓶颈
+2. **模型轴**：agcm 26fps > ensemble/hr 6fps（agcm 快 4.4×，RSS 差异 <3%）
+3. **L40 AV1 硬编**：av1_nvenc 产物体积 37.1MB 比 hevc_nvenc 26.1MB 大 42%，体积换兼容性
+4. **bug 2 项已闭环**：libx265 exit183（线程/滤镜/解码）+ av1_nvenc 收尾死锁（解码器管道阻塞）
+
+**Phase 3 Exit Criteria 达成：**
+- ✅ av1_nvenc 硬编 `OK`（actual_codec=av1_nvenc，非降级，退出码 0）
+- ✅ 4K 整帧/大分块不 OOM（192G 内存充足）
+- ✅ 模型 agcm/ensemble/hr 在 L40 表现已量化
+- ✅ 大并发下吞吐可量化（segment 2段 22fps）
+
+### 3.14 剩余测试项目建议
+
+| 优先级 | 项目 | 命令要点 | 说明 |
+|--------|------|----------|------|
+| P1 | bench d 层正式报告 | `bench_sdr_to_hdr.py -i test2.mp4 --layers d --codecs av1_nvenc,hevc_nvenc --crf-ref 21 --repeats 3 --json ...` | 正式生成 d 层基准 JSON（含 quality_axis/crf_sent） |
+| P1 | VMAF 质量门禁 | 上述加 `--vmaf l1.libx265,d.av1_nvenc.cq --vmaf-tol 1.0` | 验证 av1_nvenc 等质量换算不劣化 |
+| P2 | 4K av1_nvenc | `earth_4k_30s --frames 60 --codec av1_nvenc` | L40 独有项，更长帧验证稳定性 |
+| P2 | 大并发 workers=8 | `--layers c --workers 8` 或 `--split-mode segment --workers 8` | L40 48 核大并发吞吐 |
+| P2 | bench 全层回归 | `--layers l1,l2,l3,c,d,e,g,m --repeats 3` | 修复后全矩阵跑一遍，确认无回归 |
+| P3 | 长素材验证 | Creature Cases (1665s) | 跨小时级长任务稳定性（含收尾修复） |
+
 ---
 
 **祝测试顺利 🚀**

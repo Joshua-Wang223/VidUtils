@@ -330,6 +330,9 @@ _HW_ENCODERS = {
     "h264_videotoolbox", "hevc_videotoolbox",
 }
 
+# 编码器收尾总预算的硬上限（秒）。仅兜底，正常路径靠「无推进时长」判定卡死。
+_ENC_HARD_CAP = 3600.0
+
 # 只认 `-qp`、既不认 `-crf` 也不认 `-cq` 的编码器（VAAPI 族，实测 `-qp (0 to 52)`）。
 # 不列入任何能力集会让用户给的质量值被静默丢弃，故单列并归一到基准轴后经 -qp 下发。
 _QP_ONLY_CODECS = {"h264_vaapi", "hevc_vaapi"}
@@ -2368,7 +2371,10 @@ def build_encode_cmd(width: int, height: int, fps: float,
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
            "-f", "rawvideo", "-pixel_format", RAW_PIX_FMT,
            "-video_size", f"{width}x{height}", "-framerate", f"{fps:.6f}",
-           "-i", "pipe:0"]
+           "-i", "pipe:0",
+           # 收尾期进度心跳（走 stderr）：让调用方能区分「flush 慢但在推进」与
+           # 「flush 卡死不动」。2s 间隔足够细，又不会把 stderr 灌满。
+           "-stats_period", "2", "-progress", "pipe:2"]
 
     if st.audio_codec != "none" and has_audio:
         # 音频直接从源文件流复制/重编码，不再解一次视频码。
@@ -3692,6 +3698,19 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     g.add_argument("--frames", type=int, default=None,
                    help="只处理前 N 帧（比 --duration 精确，调试/冒烟用）")
 
+    g = p.add_argument_group("健壮性")
+    g.add_argument("--enc-stall", type=int, default=0, metavar="SEC",
+                   help="编码器收尾期「连续无推进」多少秒后判定卡死并终止。"
+                        "0=自动 180s。判定依据是 ffmpeg -progress 心跳：慢速编码器"
+                        "（librav1e 等）flush 期间心跳持续刷新，不会被误杀；"
+                        "真卡死（如 av1_nvenc 会话 flush 不退出）心跳停止则立即收手")
+    g.add_argument("--enc-timeout", type=int, default=0, metavar="SEC",
+                   help="编码器收尾的总预算上限（秒），仅作兜底。"
+                        "0=自动（帧循环耗时的 6 倍，下限 300s、上限 3600s）。"
+                        "⚠ 不要用它当主要判据：flush 真实耗时与帧循环耗时不成固定"
+                        "比例（实测 librav1e 720p 30 帧帧循环 104s、flush 364s），"
+                        "固定预算猜小了会误杀正常编码的慢编码器")
+
     args = p.parse_args(argv)
     return args
 
@@ -4379,7 +4398,9 @@ def _read_exact(stream, n: int) -> bytes:
 
 
 def _spawn_stderr_drain(proc: subprocess.Popen, sink: List[str],
-                        cap: int = 500) -> threading.Thread:
+                        cap: int = 500,
+                        on_heartbeat: Optional[Callable[[str], None]] = None
+                        ) -> threading.Thread:
     """给子进程的 stderr 起一个**守护线程**持续排空，返回该线程。
 
     ⚠ 这是硬需求而不是优化：两个 ffmpeg 的 stderr 都开了 PIPE，若父进程在帧循环
@@ -4393,7 +4414,13 @@ def _spawn_stderr_drain(proc: subprocess.Popen, sink: List[str],
     def _drain() -> None:
         try:
             for raw in iter(proc.stderr.readline, b""):
-                sink.append(raw.decode("utf-8", "replace").rstrip())
+                line = raw.decode("utf-8", "replace").rstrip()
+                # `-progress pipe:2` 的心跳行（frame=/out_time_us= 等）只用于
+                # 推进检测，不算诊断信息 —— 混进 sink 会把真正的错误行挤出去。
+                if on_heartbeat and line[:1] and "=" in line and _PROGRESS_KEY_RE.match(line):
+                    on_heartbeat(line)
+                    continue
+                sink.append(line)
                 if len(sink) > cap:
                     del sink[:cap // 2]
         except Exception:
@@ -4402,6 +4429,57 @@ def _spawn_stderr_drain(proc: subprocess.Popen, sink: List[str],
     t = threading.Thread(target=_drain, daemon=True)
     t.start()
     return t
+
+
+# ffmpeg `-progress pipe:2` 输出的是 key=value 行。只需认这几个推进相关键，
+# 避免把普通 stderr 文本（也含 '='）误判成心跳。
+_PROGRESS_KEY_RE = re.compile(
+    r"^(frame|out_time_us|out_time_ms|out_time|dup_frames|drop_frames|"
+    r"total_size|speed|progress)=\S*$")
+
+
+def _wait_enc_flush(enc, args, job, frames_elapsed, on_heartbeat_state):
+    """等编码器收尾退出。**按「无推进时长」判定卡死，而非固定总预算**。
+
+    为什么不能用固定预算：编码器 flush 的真实耗时与帧循环耗时**不成固定比例**。
+    实测 librav1e 720p 30 帧：帧循环 104s，而 stdin EOF 后 flush 用了 364s（3.5×）；
+    而同 30 帧以文件喂入的裸 ffmpeg 总共只要 150s。任何 `k × 帧循环` 的固定预算
+    都是在猜——猜小了误杀正在正常编码的慢编码器（无产物失败），猜大了真卡死时
+    要多等几小时。原 av1_nvenc 收尾卡死（NVENC 会话 flush 不退出）正是这类
+    **零推进**，用推进检测可精确区分。
+
+    判据：连续 ``stall`` 秒没有收到 `-progress` 心跳 ⇒ 认定卡死，优雅终止。
+    ``stall`` 默认 180s（远大于 2s 的 stats_period，又不会让真卡死拖太久）；
+    总预算 ``enc_timeout`` 仅作兜底上限，0=自适应（见 `_ENC_HARD_CAP`）。
+    """
+    stall = getattr(args, "enc_stall", 0) or 180
+    hard = getattr(args, "enc_timeout", 0) or int(
+        min(_ENC_HARD_CAP, max(300.0, 6.0 * frames_elapsed)))
+    t_start = time.time()
+    while True:
+        try:
+            return enc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            pass
+        now = time.time()
+        # 心跳可能一条都没收到过（老版本 ffmpeg / 启动即卡）：以启动时刻为基准
+        idle = now - max(on_heartbeat_state[0] or t_start, t_start)
+        if idle > stall:
+            job.warn_cb and job.warn_cb(
+                f"编码器 {int(idle)}s 无任何推进，已强制终止（末帧收尾卡死）")
+            _terminate(enc)
+            try:
+                return enc.wait(timeout=10)
+            except Exception:
+                return -1
+        if now - t_start > hard:
+            job.warn_cb and job.warn_cb(
+                f"编码器收尾超过总预算 {hard}s，已强制终止")
+            _terminate(enc)
+            try:
+                return enc.wait(timeout=10)
+            except Exception:
+                return -1
 
 
 def run_job(args: argparse.Namespace, job: Job, plan: Dict,
@@ -4453,8 +4531,12 @@ def run_job(args: argparse.Namespace, job: Job, plan: Dict,
     _register_proc(enc)
     dec_sink: List[str] = []
     enc_sink: List[str] = []
+    # 编码器心跳（-progress）时间戳，供收尾期「无推进」判定，见 _wait_enc_flush。
+    enc_hb: List[Optional[float]] = [None]
     dec_t = _spawn_stderr_drain(dec, dec_sink)
-    enc_t = _spawn_stderr_drain(enc, enc_sink)
+    enc_t = _spawn_stderr_drain(enc, enc_sink,
+                                on_heartbeat=lambda _ln: enc_hb.__setitem__(
+                                    0, time.time()))
 
     n_done = 0
     truncated = False
@@ -4501,6 +4583,11 @@ def run_job(args: argparse.Namespace, job: Job, plan: Dict,
                 on_update(job)
 
         # ── 正常收尾：关 stdin 让编码端 flush，再等两侧退出码 ──
+        # 帧循环耗时（含推理+并行编码）是编码器 flush 耗时的**下界参照**：编码通常是与
+        # 推理并列的瓶颈，flush 要把缓冲帧编完，量级同写帧。曾硬编码 120s，结果把
+        # librav1e 这类慢速编码器误杀（720p 30 帧裸 ffmpeg 实测需 2m30s 才编完，
+        # 见 memory/bugfix_librav1e_finalization.md）。故改为自适应。
+        _frames_elapsed = time.time() - t0
         try:
             enc.stdin.close()
         except (BrokenPipeError, OSError):
@@ -4516,20 +4603,11 @@ def run_job(args: argparse.Namespace, job: Job, plan: Dict,
             pass
         dec_t.join(timeout=5.0)
 
-        # ⚠ enc.wait() 无超时：若编码器（已知 av1_nvenc 在 Ada/容器组合下）收到
-        # 全部帧 + stdin EOF 后 NVENC 会话卡在 flush 不退出，主线程会永久挂起 ——
-        # 表现为「GPU 归零但显存恒定不降、进度停在 收尾中」。加超时 + 优雅终止兜底。
-        _enc_to = 120 if not args.dry_run else 60
-        try:
-            enc_rc = enc.wait(timeout=_enc_to)
-        except subprocess.TimeoutExpired:
-            job.warn_cb and job.warn_cb(
-                f"编码器 {_enc_to}s 未退出，已强制终止（末帧收尾卡住）")
-            _terminate(enc)
-            try:
-                enc_rc = enc.wait(timeout=10)
-            except Exception:
-                enc_rc = -1
+        # ⚠ enc.wait() 原本无超时：编码器收到全部帧 + stdin EOF 后若会话卡在 flush
+        # 不退出，主线程永久挂起（表现为「GPU 归零但显存恒定、进度停在 收尾中」）。
+        # 修法不是加固定预算 —— 固定预算无法区分「慢但正常推进」与「真卡死」，
+        # 详见 _wait_enc_flush 的实测依据。
+        enc_rc = _wait_enc_flush(enc, args, job, _frames_elapsed, enc_hb)
         try:
             dec_rc = dec.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -5163,8 +5241,12 @@ def run_job_multiproc(args: argparse.Namespace, job: Job, meta: Dict,
     _register_proc(enc)
     dec_sink: List[str] = []
     enc_sink: List[str] = []
+    # 编码器心跳（-progress）时间戳，供收尾期「无推进」判定，见 _wait_enc_flush。
+    enc_hb: List[Optional[float]] = [None]
     dec_t = _spawn_stderr_drain(dec, dec_sink)
-    enc_t = _spawn_stderr_drain(enc, enc_sink)
+    enc_t = _spawn_stderr_drain(enc, enc_sink,
+                                on_heartbeat=lambda _ln: enc_hb.__setitem__(
+                                    0, time.time()))
 
     def _frames():
         while True:
@@ -5246,8 +5328,13 @@ def run_job_multiproc(args: argparse.Namespace, job: Job, meta: Dict,
         pass
     enc_t.join(timeout=5.0)
     dec_t.join(timeout=5.0)
-    enc_rc = enc.wait()
-    dec_rc = dec.wait()
+    # ⚠ 同 run_job：原本是无超时 wait，编码器 flush 卡死时永久挂起。
+    enc_rc = _wait_enc_flush(enc, args, job, time.time() - t0, enc_hb)
+    try:
+        dec_rc = dec.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        _terminate(dec)
+        dec_rc = dec.poll() if dec.poll() is not None else -1
     _unregister_proc(dec)
     _unregister_proc(enc)
 

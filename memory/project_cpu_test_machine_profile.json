@@ -40,8 +40,13 @@
     "applies_to": "所有后续 CPU 侧测试排期"
   },
   "l1_software_codec_costs_30frames_agcm": {
-    "m1_4core": {"librav1e": 292.25, "libx265": 413.64, "libaom-av1": 560.09, "libsvtav1": null},
-    "note": "M1 结论：librav1e 最快（比 libx265 快 29%），libaom-av1 最慢；libsvtav1 待补（在 ffmpeg 9.0.2 上复跑，软编性能可能随版本变）"
+    "m1_4core_ffmpeg71": {"librav1e": 292.25, "libx265": 413.64, "libaom-av1": 560.09, "libsvtav1": null},
+    "m2_24core_ffmpeg90_独占复测": {"libsvtav1": 835.87, "libaom-av1": 1053.67, "libx265": 1147.40, "librav1e": 1194.60},
+    "m2_bench_json_全通": {"l1.libsvtav1": "OK 0.73x", "l1.libaom-av1": "OK 0.92x", "l1.libx265": "OK 1.00x", "l1.librav1e": "OK 1.04x"},
+    "排序翻转": "librav1e 从 4核机最快(292s) 变成 9.0.2 最慢(1195s，4.1x 变慢)；libaom-av1 反向 1.9x 变快 ⇒ **软编绝对成本排序强绑定 ffmpeg 版本，跨版本不可迁移**",
+    "作废结论": "4核机『librav1e 比 libx265 快 29%、libaom-av1 最慢』已作废。现结论 libsvtav1 > libaom-av1 > libx265 > librav1e",
+    "口径警告": "librav1e 只支持 -qp（跨轴换算 -qp 64），与前三者 -crf 不同口径，排序中含口径成分",
+    "方法论": "M2 数据须标注『独占』或『并发』：L1 为独占复测，c.threads/m/g 为 6 路并发态，两类不可跨组比"
   },
   "cthreads_findings_NEW": {
     "result": "M2 上 c.threads 1/2/4/8 实测 s/帧 = 15.08/15.08/15.07/15.00，四档差 <0.6%",
@@ -60,12 +65,12 @@
     {"id": "F4", "issue": "bench 不透传 torch 线程数，无法实施『多进程×少线程』策略", "fix": "用 OMP_NUM_THREADS 环境变量控制（脚本 args.torch_threads 默认 0 不覆盖，torch 默认读 OMP_NUM_THREADS）", "file": "N/A 环境变量方案"}
   ],
   "phase1_remaining": [
-    {"item": "libsvtav1 单跑（L1 唯一缺格，ffmpeg 9.0.2 上需复跑）", "cmd": "bench -i test1.mp4 --layers l1 --codecs libsvtav1 --model agcm --frames 30 --device cpu", "priority": "P1", "status": "❌ 已复跑：SIGSEGV(-11) 段错误，裸 ffmpeg 也 dumped core ⇒ **该 ffmpeg 9.0.2 构建的 SVT-AV1 损坏**，需换构建"},
-    {"item": "librav1e 复跑", "priority": "P1", "status": "❌ 编码 ffmpeg 退出码 255 + 120s 超时强制终止 ⇒ 与 av1_nvenc 死锁同源，软编也复现；B2 修复有效但无产物"},
-    {"item": "l2,c 分段/并发路径", "cmd": "convert_sdr_to_hdr.py -i clip20s_15f.mp4 --model agcm --split-mode {segment,workers} --workers 2 --device cpu", "priority": "P1", "status": "✅ 完成：segment 300/300帧 4m42s、workers 300/300帧 4m16s，均正常激活无降级无死锁"},
-    {"item": "g 层 4K 分块（--frames 2）", "cmd": "bench -i 4k_6s.mp4 --layers g --model agcm --frames 2 --device cpu", "priority": "P2", "status": "✅ tile0 523.52s < tile1024 672.88s < tile2048 750.32s ⇒ CPU 上 4K 整帧最快，分块纯增开销"},
-    {"item": "长素材 73s 复验 l2,c 分段收益", "priority": "P2", "status": "待跑（21s 小素材上分段无收益，需确认是否素材太短）"},
-    {"item": "librav1e 收尾卡死根治", "priority": "P2", "status": "与 av1_nvenc 死锁同源，评估是否需编码器 flush 兜底（当前仅 120s 超时后无产物）"}
+    {"item": "libsvtav1 复测", "priority": "P1", "status": "✅ 已修复并复测通过：30 帧 1m46s，327055 bytes，av1/yuv420p10le/smpte2084/bt2020；先前 SIGSEGV 系 ffmpeg 构建问题（用户已修）"},
+    {"item": "librav1e 收尾卡死", "priority": "P1", "status": "✅ 已根治（非死锁而是固定 120s 超时误杀慢编码器）⇒ 改为 -progress 心跳的『无推进时长』判定，见 memory/bugfix_librav1e_finalization.md。30 帧 4m33s 成功出片"},
+    {"item": "l2,c 分段/并发路径（30s@6fps 长素材）", "priority": "P1", "status": "✅ 五档全通过：off 17m06s / segment2 14m25s(0.84×) / segment4 12m55s(0.76×) / workers2 12m59s(0.76×) / workers4 8m50s(0.52×)。长素材上分段/并发**确有收益**，推翻 21s 小素材上的『无收益』"},
+    {"item": "g 层 4K 分块（--frames 2）", "priority": "P2", "status": "✅ tile0 523.52s < tile1024 672.88s < tile2048 750.32s ⇒ CPU 上 4K 整帧最快，分块纯增开销"},
+    {"item": "av1_nvenc 真死锁 GPU 回归", "priority": "P1", "status": "本机无 GPU 无法复现；其零推进特征现会被 --enc-stall(180s) 捕获，GPU 阶段需确认告警文案变为『无任何推进』"},
+    {"item": "D/E 层（hevc/h264_nvenc/av1_nvenc）", "priority": "P2", "status": "需 T4/L40"}
   ],
   "l2c_partial_results_NEW": {
     "l2_split": {
@@ -117,10 +122,15 @@
     }
   },
   "ffmpeg_9_environment_defects_NEW": {
-    "libsvtav1": "SIGSEGV(-11) 段错误，裸 ffmpeg 也崩溃 ⇒ 该 9.0.2 构建的 SVT-AV1 损坏",
-    "librav1e": "收尾卡死不退出，触发 120s 超时兜底后无产物（退出码 255）",
-    "impact": "L1 四软编在此机只能测 libx265 + libaom-av1 两格；另两格需换 ffmpeg 构建",
-    "cross_significance": "librav1e 死锁与 av1_nvenc 死锁同源 ⇒ B2 类问题不限于硬件编码器，软编也复现，属通用管道健壮性缺口"
+    "libsvtav1": "曾 SIGSEGV(-11)（裸 ffmpeg 也 dumped core）⇒ 系 ffmpeg 9.0.2 构建问题，**已由用户修复**，复测通过",
+    "librav1e": "曾因收尾被固定 120s 超时误杀 ⇒ **非环境缺陷、非死锁**，是脚本缺陷，已根治（见 bugfix_librav1e_finalization.md）",
+    "correction": "上一版此处写的『librav1e 与 av1_nvenc 死锁同源』是**误判**：若同源，B2 排空 dec.stdout 就该治好它。实为 av1_nvenc 零推进真死锁 vs librav1e 持续推进的慢 flush（帧循环104s / flush 364s，比值 3.5× 且不稳定）",
+    "l2c_long_material_NEW": {
+      "material": "test2.mp4 → 30s@6fps/1280x720/180 帧（≥20s 满足 _SEGMENT_MIN_SECONDS，且避开 CPU 上 73s@30fps=2194帧需 2.5h 的成本）",
+      "results": {"off_12thr": "17m06s", "segment_2_6thr": "14m25s (0.84x)", "segment_4_3thr": "12m55s (0.76x)", "workers_2_6thr": "12m59s (0.76x)", "workers_4_3thr": "8m50s (0.52x)"},
+      "conclusion": "**长素材上分段/并发确有收益**（workers4 加速 1.94×，逼近线性 2.0×），推翻 21s 小素材上的『无收益』结论 ⇒ 21s 是素材太短而非机制无效。workers 模式优于 segment（同配置 1.32× vs 1.19×），因 segment 需解码后拼接有额外开销",
+      "cross_check": "workers4 每路仅 3 线程仍拿到 1.94× ⇒ 与『torch 线程 ~8 核后饱和、应多进程×少线程』的发现互相印证"
+    }
   },
   "json_artifacts": [
     "memory/phase1_cpu_l1_20261013.json",

@@ -60,10 +60,12 @@
     {"id": "F4", "issue": "bench 不透传 torch 线程数，无法实施『多进程×少线程』策略", "fix": "用 OMP_NUM_THREADS 环境变量控制（脚本 args.torch_threads 默认 0 不覆盖，torch 默认读 OMP_NUM_THREADS）", "file": "N/A 环境变量方案"}
   ],
   "phase1_remaining": [
-    {"item": "libsvtav1 单跑（L1 唯一缺格，ffmpeg 9.0.2 上需复跑）", "cmd": "bench -i test1.mp4 --layers l1 --codecs libsvtav1 --model agcm --frames 30 --device cpu", "priority": "P1", "status": "已启动后被中断，需重跑"},
-    {"item": "l2,c 分段/并发路径（21s 小素材 640x360，不带 --frames）", "cmd": "bench -i clip21s_small.mp4 --layers l2,c --model agcm --device cpu", "priority": "P1", "status": "L2 4组合 OK(off 348.71/segment 346.03/workers 346.63/tile512+64 249.19)；C组 workers 1/2/4 进行中", "note": "1/2/4 三档墙钟几乎相同(345.88/346/343.81) ⇒ 21s小素材上分段并发无收益（与 T4/L40 长素材结论不同，需在 73s 复验）"},
-    {"item": "g 层 4K 分块（--frames 2，4K 素材已备 4k_6s.mp4）", "cmd": "bench -i 4k_6s.mp4 --layers g --model agcm --frames 2 --device cpu", "priority": "P2", "status": "进行中"},
-    {"item": "4核机旧数据的 ffmpeg 9.0.2 复跑", "priority": "P3", "status": "软编性能随 ffmpeg 版本可能变，L1 排序需复核"}
+    {"item": "libsvtav1 单跑（L1 唯一缺格，ffmpeg 9.0.2 上需复跑）", "cmd": "bench -i test1.mp4 --layers l1 --codecs libsvtav1 --model agcm --frames 30 --device cpu", "priority": "P1", "status": "❌ 已复跑：SIGSEGV(-11) 段错误，裸 ffmpeg 也 dumped core ⇒ **该 ffmpeg 9.0.2 构建的 SVT-AV1 损坏**，需换构建"},
+    {"item": "librav1e 复跑", "priority": "P1", "status": "❌ 编码 ffmpeg 退出码 255 + 120s 超时强制终止 ⇒ 与 av1_nvenc 死锁同源，软编也复现；B2 修复有效但无产物"},
+    {"item": "l2,c 分段/并发路径", "cmd": "convert_sdr_to_hdr.py -i clip20s_15f.mp4 --model agcm --split-mode {segment,workers} --workers 2 --device cpu", "priority": "P1", "status": "✅ 完成：segment 300/300帧 4m42s、workers 300/300帧 4m16s，均正常激活无降级无死锁"},
+    {"item": "g 层 4K 分块（--frames 2）", "cmd": "bench -i 4k_6s.mp4 --layers g --model agcm --frames 2 --device cpu", "priority": "P2", "status": "✅ tile0 523.52s < tile1024 672.88s < tile2048 750.32s ⇒ CPU 上 4K 整帧最快，分块纯增开销"},
+    {"item": "长素材 73s 复验 l2,c 分段收益", "priority": "P2", "status": "待跑（21s 小素材上分段无收益，需确认是否素材太短）"},
+    {"item": "librav1e 收尾卡死根治", "priority": "P2", "status": "与 av1_nvenc 死锁同源，评估是否需编码器 flush 兜底（当前仅 120s 超时后无产物）"}
   ],
   "l2c_partial_results_NEW": {
     "l2_split": {
@@ -75,9 +77,54 @@
     "c_workers_21s_clip": {"w1": 345.88, "w2": 346.03, "w4": 343.81},
     "finding": "21s 小素材上分段/并发/workers 四条路径墙钟几乎相同（345-349s），tile512+64 反而快 28%（像素量减少）。⇒ 短素材分段并发无收益；与 T4/L40 长素材上 segment 有效的结论不矛盾但需注意素材长度前提"
   },
+  "m2_full_cpu_recheck_NEW": {
+    "date": "2026-10-14",
+    "method": "6 路并发 × OMP_NUM_THREADS=4，--repeats 1 --warmup 0 --frames 30，agcm 推理除非段轴",
+    "note_absolute_nonsense": "并发态绝对墙钟不可横向比（6进程×4线程=24 但含主线程/ffmpeg 超订），单帧约 26.5s = 隔离态 4.10s 的 ~6.5 倍。只可看组内倍率",
+    "model_axis": {
+      "ensemble": {"wall_s": 794.96, "s_per_frame_concurrent": 26.50, "s_per_frame_isolated": 18.69},
+      "agcm": {"wall_s": 153.43, "s_per_frame_concurrent": 5.11, "s_per_frame_isolated": 4.10},
+      "hr": {"wall_s": 846.60, "s_per_frame_concurrent": 28.22, "s_per_frame_isolated": 17.40},
+      "ratio_concurrent": "agcm 5.18× 快于 ensemble，ensemble/hr 相当(0.94×)",
+      "ratio_isolated": "agcm 4.56× 快于 ensemble，ensemble/hr 相当(1.07×)",
+      "conclusion": "两次独立复核一致 ⇒ 模型轴倍率与设备无关成立 ✅"
+    },
+    "l1_codecs": {
+      "libx265": {"wall_s": 795.30, "status": "OK"},
+      "libsvtav1": {"wall_s": null, "status": "FAIL SIGSEGV(-11)", "isolation": "裸 ffmpeg -c:v libsvtav1 也 dumped core；同输入 libx265 出 1.43MB ⇒ ffmpeg 9.0.2 构建的 SVT-AV1 损坏；产物 48 字节"},
+      "libaom-av1": {"wall_s": 826.87, "status": "OK", "ratio_vs_x265": 0.96},
+      "librav1e": {"wall_s": null, "status": "FAIL 退出码255 + 120s 强制终止", "isolation": "编码器收尾卡死，与 av1_nvenc 死锁同源 ⇒ 不限于 NVENC，软编也复现"}
+    },
+    "c_threads": {
+      "threads1": 800.84, "threads2": 736.95, "threads4": 634.18, "threads8": 601.58,
+      "ratios_vs_t1": {"t2": 1.09, "t4": 1.26, "t8": 1.33},
+      "conclusion": "CPU 软编下 ffmpeg 线程 1→8 有 ~33% 收益；**修正 4核机『<0.6% 无影响』旧结论**——那次是推理瓶颈掩盖编码收益。4→8 仅再 5%，趋饱和"
+    },
+    "g_4k_tiling": {
+      "tile0": 523.52, "tile1024": 672.88, "tile2048": 750.32,
+      "ratios_vs_t0": {"t1024": 0.78, "t2048": 0.70},
+      "conclusion": "**CPU 上 4K 整帧最快、分块反而慢 30%**。分块的『压内存』目的达成（无 OOM），但 CPU 无显存限制 ⇒ 分块纯增开销。⚠ 31G 内存机上 4K 整帧不 OOM，修正『4K 整帧已知 OOM』预设——该预设只在内存受限机成立"
+    },
+    "l2_paths_direct": {
+      "material": "20s@15fps 640x360 = 300 帧（bench 21s@30fps=632帧/组合需63min 不可行，降帧后 4.5min）",
+      "segment_workers2": {"status": "OK", "frames": "300/300", "wall": "4m42s", "size_mb": 3.0},
+      "workers_multiproc": {"status": "OK", "frames": "300/300", "wall": "4m16s", "size_mb": 3.0},
+      "conclusion": "两条路径在 ffmpeg 9.0.2 上均正常激活无降级（segment（2 路）/ workers（2 进程）），无死锁"
+    },
+    "b1_b2_regression_on_ffmpeg_9": {
+      "b1_libx265_short_frame": "rc=0", "b2_finalization_deadlock": "rc=0",
+      "significance": "B1/B2 修复原在 ffmpeg 7.1 验证，跨两个大版本复验无回归"
+    }
+  },
+  "ffmpeg_9_environment_defects_NEW": {
+    "libsvtav1": "SIGSEGV(-11) 段错误，裸 ffmpeg 也崩溃 ⇒ 该 9.0.2 构建的 SVT-AV1 损坏",
+    "librav1e": "收尾卡死不退出，触发 120s 超时兜底后无产物（退出码 255）",
+    "impact": "L1 四软编在此机只能测 libx265 + libaom-av1 两格；另两格需换 ffmpeg 构建",
+    "cross_significance": "librav1e 死锁与 av1_nvenc 死锁同源 ⇒ B2 类问题不限于硬件编码器，软编也复现，属通用管道健壮性缺口"
+  },
   "json_artifacts": [
     "memory/phase1_cpu_l1_20261013.json",
     "memory/phase1_cpu_l3m_20261013.json",
-    "/tmp/bench/{A,B,C,D,E,F}.json (M2 复核输出)"
+    "/tmp/bench/{A,B,C,F}.json (M2 复核输出)"
   ]
 }

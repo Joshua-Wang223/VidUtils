@@ -1194,6 +1194,18 @@ def execute(combo: Combo, res: Result, src: Path, meta: Dict, env: Dict,
     #   否则「copy 与 none 耗时相同」会被读成「音轨处理零开销」。
     n_out = _probe_frames_metadata(out)
     n_src = _to_int(meta.get("nb_frames"))
+    # ⚠ **期望帧数**要扣掉 `--frames` 截断：带限帧跑时产物本就只有 N 帧，
+    # 再拿它跟源总帧比会把「限帧的预期行为」误判成「静默丢帧」。
+    # （`--frames` 在 :2152 追加进 _EXTRA_SCRIPT_ARGS，这里按同一来源读取，
+    #   与 :924 判断分段轴互斥用的是同一个全局，避免两处口径漂移。）
+    _expected = n_src
+    if n_src and "--frames" in _EXTRA_SCRIPT_ARGS:
+        try:
+            _flim = _to_int(_EXTRA_SCRIPT_ARGS[_EXTRA_SCRIPT_ARGS.index("--frames") + 1])
+            if _flim:
+                _expected = min(n_src, _flim)
+        except (IndexError, ValueError):
+            pass
     # ⚠ 判据用**绝对帧数**而不是百分比。曾用「丢帧 >2% 才判失败」，结果
     # test3.mp4 实测丢 4 帧 = 1.32% 被归入「尾帧舍入」而放过—— 但同一逻辑在
     # 10 万帧的素材上就是「丢 1300 帧也算舍入」。百分比阈值随素材长度漂移，
@@ -1201,8 +1213,8 @@ def execute(combo: Combo, res: Result, src: Path, meta: Dict, env: Dict,
     # 容差取 2 帧：容器尾帧舍入实测就在这个量级（见 memory 里「时长不同 VMAF
     # 曲线不同」那类 ±1~2 帧的容器精度问题），超过它就该追问原因。
     _FRAME_TOL = 2
-    if combo.expect_audio_mux and n_out and n_src and (n_src - n_out) > _FRAME_TOL:
-        lost = n_src - n_out
+    if combo.expect_audio_mux and n_out and _expected and (_expected - n_out) > _FRAME_TOL:
+        lost = _expected - n_out
         res.status = "FAIL"
         res.fail_reason = (f"帧数不守恒：源 {n_src} 帧 → 产物 {n_out} 帧"
                            f"（丢 {lost} 帧）。疑似被测脚本的 `-shortest` 因"

@@ -258,21 +258,36 @@ CRF21 等质量口径下）。⚠ librav1e 的相对劣势部分源于它只支�
 ⇒ ③ workers=4 每路仅 3 线程仍拿 1.94×，与 ② 中「torch 线程 ~8 核后饱和、应多进程×少线程」
 互相印证。**阶段 1 推荐：`--split-mode workers --workers 4`。**
 
-#### C. 阶段 1 待续跑（2026-10-14 更新）
+#### C. 阶段 1 待续跑 —— **已全部完结（2026-10-14）** ✅
 
-1. ~~libsvtav1 复跑~~ ✅ 环境缺陷已修，复测通过
-2. ~~librav1e 收尾卡死根治~~ ✅ 已根治（3.15）
-3. ~~长素材复验 l2,c 收益~~ ✅ 已完成（上表）
-4. **av1_nvenc 真死锁回归 → 属 L40 而非 T4**：本机无 GPU 无法复现；**T4（Turing）
-   物理上没有 AV1 NVENC 编码器，压根跑不出该组合**（见 4.4 节）。其零推进特征现会被
-   `--enc-stall`(180s) 捕获，L40 阶段须确认告警文案变为「N s 无任何推进」而非旧的「未退出」。
-   **L40 阶段第一件事。**
+§4.4.1 待测清单 **C1~C7 全部执行完毕，OK 项零 FAIL**（详见 memory/phase1_cpu_c1c7_final_20261014.json）：
+
+| # | 项 | 结果 |
+|---|----|------|
+| C1 | L3 完整流程基线 | ✅ l3.full 878.95s（阶段出口项已补齐） |
+| C2 | L2 分块 ×2 | ✅ tile512+0 761.13s / tile512+64 685.07s；720p 分块比整帧快 13% |
+| C3 | E.cpu ×5 | ✅ 全通（从 T4 下沉）；另修 bench 一个误报缺陷 |
+| C4 | 字幕 burn/keep | ✅ burn 无字幕流已烧录 / keep 保留 subrip，HDR10 均正确 |
+| C5 | VMAF 质量门禁 | ✅ VMAF=100.00（基准自身），门禁在 CPU 侧可用 |
+| C6 | M 轴隔离态 | ✅ agcm 3.88 / ensemble 17.30 / hr 17.28 s/帧，倍率 **1:4.45:4.45** |
+| C7 | L1 隔离态中位数 | ✅ svtav1 499s(0.96×) / x265 518s / aom 703s(1.36×) / rav1e 857s(1.66×) |
+
+**CPU 侧出口条件满足 → 可进入阶段 2（T4）**。
+
+> ⚠ **C7 修正了 L1 排序**：真正「全线程独占」的数据是 svtav1 < x265 < aom-av1 < rav1e；
+> 而先前 §4.3 那份「独占复测」(svtav1 836s / x265 1147s) 实为 **4 路并发**下的数据，
+> 争用把 libx265 拖慢了 2.2 倍（1147→518s）。**以 C7 为准**。
+> C3 期间发现并修复 bench 缺陷 F5（帧数守恒检查未扣 `--frames` 截断，见 memory）。
+
+**仍属 GPU 侧（不可在 CPU 完成）**：
+4. **av1_nvenc 真死锁回归 → 属 L40 而非 T4**（T4/Turing 无 AV1 NVENC，物理跑不出）。
+   其零推进特征现会被 `--enc-stall`(180s) 捕获，L40 须确认告警文案变为「N s 无任何推进」。
 
 ### 4.4 三侧待测清单 (2026-10-14)
 
 > 口径：✅=本轮已通过；⬜=待测。**阶段出口判据：所属侧所有 ⬜ 清零且无 FAIL 才可进下一阶段。**
 
-#### 4.4.1 CPU 侧剩余（本机 24核/31G，可立即执行）
+#### 4.4.1 CPU 侧剩余 ~~（本机 24核/31G，可立即执行）~~ ✅ **全部完结（2026-10-14）**
 
 | # | 项 | 命令 | 估时 | 理由/备注 |
 |---|-----|------|------|----------|
@@ -353,7 +368,7 @@ L40 侧                L1(先跑)→L2→L3→L5→L4→L6→L7→L8
 | L1/L3 基准 720p | `input_videos/test1.mp4`, `new5_raw.mp4` | 直接使用 |
 | L2/C 分段并行（需 ≥20s） | `input_videos/大红狗 Clifford the Big Red Dog DVDR.58.mp4` | 验证时长 ≥20s |
 | E 组音频测试 | `input_videos/test3.mp4` (10s, aac 1ch, bt709 SDR) | 带音轨 |
-| E 组字幕测试 | `input_videos/The.Creature.Cases.S01E01.The.Mystery.on.the.Monsoon.Express.mkv` → `ffmpeg -i ... -ss 28 -t 20 tmp_sub.mkv` | 截取 20s |
+| E 组字幕测试 | `input_videos/The.Creature.Cases.S01E01.The.Mystery.on.the.Monsoon.Express.mkv` | **`ffmpeg -y -ss 120 -t 20 -i <src> -c copy tmp_sub.mkv`**（2026-10-14 实测：产出 11.4MB/1080p/subrip 1 轨，`--subs burn` 与 `--subs keep` 双双跑通；⚠ bench **无字幕轴组合**，只能跑本体脚本；素材不入库，此处记录生成命令） |
 | G 组 4K 分块 | `input_videos/Earth.at.Night.in.Color.S02E03.Kangaroo.Valley.2160p_T100_2xfps.mp4` → `ffmpeg -i ... -ss 300 -t 20 tmp_dark_4k.mp4` | 中段截 10s→20s |
 | G 组 4K 素材 | `test_materials_4k/` 下的 4K 视频 | 验证可用 |
 

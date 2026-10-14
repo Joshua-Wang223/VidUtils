@@ -311,7 +311,6 @@ CRF21 等质量口径下）。⚠ librav1e 的相对劣势部分源于它只支�
 | L5 | **VMAF 门禁（av1_nvenc 半）** | `bench -i test2.mp4 --layers d --codecs av1_nvenc --vmaf d.av1_nvenc.cq --vmaf-tol 1.0` | 验证 av1_nvenc 等质量换算不劣化（C5 的 GPU 对偶项） |
 | L6 | **4K 整帧/大分块长 frames** | `bench -i test_materials_4k/earth_4k_30s.mp4 --layers g --device cuda --tile 0 --frames 60 --repeats 1` | 46GB 显存下验证 4K 整帧与 OOM 边界 |
 | L7 | **大并发 workers=8** | `convert_sdr_to_hdr.py -i test2.mp4 --split-mode segment --workers 8 --model ensemble --device cuda` | 48 核吞吐 |
-| L8 | ⚠ **cgroup 内存边界复核** | 复跑 4K 分段并行 | 3.5 节记录 L40 容器 cgroup **限额 4GB（可用 1.8GB）**，是 B1/av1_nvenc 早期失败的根源。**跑前先确认限额是否放开**；未放开则 4K 相关项应标 SKIP 而非 FAIL |
 
 #### 4.4.4 B1/B2/B3 三修复的跨环境回归矩阵
 
@@ -565,7 +564,9 @@ python3 Accessory/probe/bench_sdr_to_hdr.py -i input_videos/test1.mp4 \
 | libx265 分段并行 | `--split-mode segment --workers 2 test2.mp4` | ✅ 6m00s | **L40 因内存不足失败** |
 | workers 模式(CPU) | `--split-mode workers --workers 2 --device cpu` | ⚠ 0.2fps | 进程间传帧开销大，非生产推荐 |
 
-**关键发现**：L40 上 libx265 失败根因是 cgroup 4GB 内存限额导致 OOM，非代码 bug。T4 (32GB) 全部通过。
+**关键发现（2026-10-14 更正）**：~~L40 上 libx265 失败根因是 cgroup 4GB 内存限额导致 OOM，非代码 bug~~
+⇒ **该结论错误**：L40 cgroup 实测 192GB/可用 ~189GB（见 3.5），并非 4GB；
+真根因是**代码缺陷**（B1 四项，3.11），已修复并在 L40 复验通过。T4 (32GB) 全部通过。
 
 ---
 
@@ -777,24 +778,55 @@ python3 convert_sdr_to_hdr.py -i input_videos/test1.mp4 \
 
 **T4 复现验证**：4K 素材 + `--frames 30` 命中并行路径，修复前必崩、修复后正常汇报。
 
-### 3.5 问题二：4K「管道断开」根因（证据链 → cgroup OOM）
+### 3.5 问题二：4K「管道断开」根因 ~~（证据链 → cgroup OOM）~~ → **归因作废，真根因见 3.11**
 
-| 实验 | 结果 | 排除/证实 |
-|----|----|----|
-| T4 同参数 `--split-mode off --frames 30` | ✅ 成功 ×2 | 排除分辨率本身 |
-| 裸 ffmpeg 4K HEVC NVENC p010 | ✅ 72 帧无错 | 排除编码器 4K 能力 |
-| 6 路并发 4K NVENC | ✅ 全部完成 | **排除会话超限** |
-| L40 环境 cgroup 内存 | **限额 4GB（可用 1.8GB）** vs T4 32GB | 关键环境差异 |
-| T4 RSS 实测：720p 完整管线 | 1.05–1.11GB | 已超 L40 可用量一半 |
-| T4 RSS 实测：**4K 完整管线** | **1.38GB**（`--no-model` 也 1.26GB） | 触顶即 OOM |
+> 🔴 **2026-10-14 更正：本节的归因前提「L40 cgroup 限额 4GB」是误报，整节结论作废。**
+> 下表保留仅为记录错误推理链，**不要再引用其中的 OOM 结论**。
 
-**根因**：L40 容器 4GB 内存限额下，4K 管线（RSS≈1.4GB + page cache）触顶 →
-cgroup OOM killer 杀 enc ffmpeg（SIGKILL=137）→ `enc.stdin.write` 抛
-BrokenPipe → 报「编码端提前退出（管道断开）」。
+**误报是怎么来的（可复核）**：同一份 session 日志里，L40 机器**自身**的 `--env`
+输出（脚本直接读 `/sys/fs/cgroup`）共 **28 次**报告：
 
-**诊断增强（已上线）**：BrokenPipe 分支现在带出 enc 退出码、
-`137=SIGKILL 疑似 OOM` 提示与 stderr 尾 6 行（`:4525-4540`、`:5153-5162`；
-单测验证输出「编码器退出码 137（SIGKILL，疑似 OOM）：hevc_nvenc: ...」）。
+```
+系统资源 : CPU 逻辑核 48（cgroup v2 (4800000/100000)） · 内存 总 192.0 GB / 可用 189.3~189.8 GB（cgroup v2）
+```
+
+而本节把它记成了「限额 4GB（可用 1.8GB）」——**`189.8 GB` 被读成 `1.8 GB`**（位数误读）。
+三处独立记载互相印证 L40 内存充裕：
+
+| 来源 | 记载 |
+|------|------|
+| L40 自身 `--env`（session 日志，28 次） | 总 **192.0 GB** / 可用 **189.3–189.8 GB** |
+| `memory/benchmark_data_consolidated_20261013.json` → `environments.L40.mem_gb` | **192** |
+| 本机 24 核机 `/sys/fs/cgroup/memory.max` | **无 cgroup v2 限额** |
+
+**同一日志还自证不是 OOM**（在本节推论之前）：
+
+> | 2. OOM 确认/规避 | ✅ **确认非 OOM** | L40 显存 44GB 充足，4K 分块 tile=1024 正常跑通 |
+> — 关键发现：「libx265 在分段并行下仍报 183，但 NVENC 完全正常；4K 分块 tile=1024/2048 均跑通」
+
+若真是 4GB 限额，4K 分块不可能在 L40 跑通。
+
+**真实根因是 3.11 记录的 B1 四项代码缺陷**（与内存无关）：
+`-threads 48` 致 libx265 初始化超时 / `setparams` 与单独色彩四参冲突 /
+解码 `-t` 定位偏移产生异常首帧 / 滤镜链 `scale` 重复色域转换。
+B1 修复后 L40 验证「4K 30 帧 `--model agcm --codec libx265 --frames 30` → 18s 完成」。
+
+⇒ **L40 的三次失败（4K 管道断开、libx265 exit 183、av1_nvenc 收尾死锁）全部是代码缺陷，
+没有一次是 OOM。** 前两归 B1、第三归 B2（3.12），均已修复并在 L40 复验通过。
+
+**与 av1_nvenc 是同一条线索**：三次失败**都被先后归因到「资源不够」**（cgroup 内存、
+NVENC 会话显存），而 `memory/l40_fixes_20261013.json` 记录 B2 时明确标了
+`"misattribution": "最初误判为 av1_nvenc 硬件 NVENC 会话 flush 卡死"`。
+真因是**管道与帧循环逻辑**：帧循环因 `n_done>=total`（ffprobe 自报 2194、实际 2191）
+先于解码器 EOF 退出 ⇒ 主进程停读 `dec.stdout` ⇒ 64KiB 管道满 ⇒ 解码器阻塞 `write()`
+⇒ 旧代码 `dec.wait()` 无超时永久挂起。**内存充裕与否不影响该 bug 是否触发。**
+
+⇒ 教训沉淀：**L40 上再现「资源类」症状时，先查代码管道逻辑，再查资源**；
+且**任何 cgroup 数字都必须现场读 `/sys/fs/cgroup/memory.max` 复核**，不可凭 `--env` 摘要转述。
+
+**仍然有效的部分**：BrokenPipe 分支带出 enc 退出码 + stderr 尾 6 行的**诊断增强**（`:4525-4540`、
+`:5153-5162`）是好的设计，保留。注意其提示文案「137=SIGKILL，疑似 OOM」措辞是**推测性**的
+（`措辞留"也可能是外部 kill"`），在无 cgroup 限额环境下不应据此断定 OOM。
 
 ### 3.6 问题三：「模型与编码并发冲突」——证伪
 
@@ -847,15 +879,21 @@ T4 实测 test2.mp4（73.13s，hevc_nvenc，cuda）三模型全量对比：
 
 | 环境 | 内存 | 结果 | 根因 |
 |------|------|------|------|
-| L40 | cgroup 4GB (可用 1.8GB) | ❌ 失败 | OOM killer 杀 enc ffmpeg (SIGKILL=137) → 管道断开 → 183 |
-| T4 | 32GB 可用 | ✅ 成功 | 内存充足，无 OOM |
+| L40 | ~~cgroup 4GB (可用 1.8GB)~~ | ❌ 失败 | 🔴 **该环境差异是误报**（见 3.5 更正）。真根因 = **B1 四项代码缺陷**（3.11）：`-threads 48` 致 libx265 初始化超时、`setparams` 与色彩四参冲突、解码 `-t` 偏移、滤镜链 `scale` 重复转换 |
+| T4 | 32GB 可用 | ✅ 成功 | ffmpeg 版本/参数组合不同，未命中 B1 四个条件 |
 
-**根因确认**：L40 容器 4GB 内存限额下，分段并行启动 N 个 ffmpeg 编码进程 + torch 模型 + CUDA context 总 RSS 超过限额 → cgroup OOM killer 发送 SIGKILL 给编码器进程 → 编码器异常退出 → 解码端写管道抛 BrokenPipe → 上层报 "编码端提前退出（管道断开）"，退出码 183 是 ffmpeg 读到无效数据的二次错误。
+**根因（更正）**：**不是 OOM**。同一组参数在 L40 失败、在 T4 成功，差异是
+**代码缺陷的触发条件**（L40 48 核 ⇒ `-threads 48` 触发 libx265 初始化超时），
+而非内存。退出码 183 是 libx265 未能正常初始化/收尾的**症状**，不是「管道断开」。
 
-**修复方案**：
-1. **首选**：向运维申请 L40 容器内存限额调整至 ≥6GB（4K 分段并行需 ~3-4GB）
-2. **次选**：4K 内容强制使用 `--split-mode off` 避免多进程编码
-3. **兜底**：使用 `--frames` 限制帧数分批处理，后 `-c copy` 拼接
+**修复（已落地并复验）**：**B1 四项修复**（`b226d86`，明细见 3.11），
+L40 验证「73s 全片 libx265 ensemble → 1m43s ✅」「4K 30 帧 → 18s ✅」「segment 2 段 → 1m35s ✅」。
+
+**~~原「向运维申请 ≥6GB」方案作废~~** —— 它是为一个不存在的内存约束开的药。
+> 注：同 repo 的 `memory/project_long_ffmpeg_jobs.md`（提交 `748b33e`）确实记录过
+> **8GiB cgroup 机器上** 4K 被 OOM 杀（峰值 RSS 4.23GB）。但那是**另一条更重的
+> 管线**（`interp_2x_safe.sh` + minterpolate + libx265 4K 放大）与**另一档机器**，
+> 不可与 L40 混为一谈。SDR→HDR 4K 管线实测峰值 RSS 仅 **1.38GB**（T4）。
 
 **问题 2：c.workers 并发测试失败**
 

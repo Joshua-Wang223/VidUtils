@@ -1,44 +1,83 @@
 {
-  "topic": "CPU 测试机画像与 bench 并发约束（2026-10-13 实测）",
-  "machine": {"cpu_effective_cores": 4, "cpu_cgroup": "400000/100000", "mem_cgroup_gb": 8, "host_mem_gb": 30, "gpu": "无"},
-  "critical_constraint": {
-    "rule": "bench 并行度上限 = floor(mem_cgroup_gb / 2.6)，不是核数",
-    "measured": {
-      "3_concurrent_bench": "系统性 -9 OOM（ensemble 双网络进程优先被杀）；5+ 组合误失败",
-      "2_concurrent_bench": "全部 OK"
+  "topic": "CPU 测试机画像、bench 并发约束、模型轴倍率复核（2026-10-13）",
+  "machines_measured": [
+    {
+      "name": "M1-4c8g",
+      "spec": "4核 / 8GB cgroup 限额 / 无 GPU",
+      "env": "python 3.11.1(pyenv) + torch 2.10 + ffmpeg 7.1 + 本地模型仓",
+      "concurrency_limit": "2（受 cgroup 内存约束，非核数）；3 并发即系统性 OOM(-9)"
     },
-    "per_process_mem_gb": 2.6,
-    "breakdown": "模型 ~1GB（ensemble=AGCM+LE 双网络更重）+ 双 ffmpeg + 帧缓冲"
-  },
+    {
+      "name": "M2-24c31g",
+      "spec": "24核 / 31GB 主机内存 / **无 cgroup 限额** / 无 GPU",
+      "env": "python 3.12.3 系统 + torch 2.14.1+cpu + numpy 2.5.2 + **ffmpeg 9.0.2(跨两个大版本)** + 上游 tarball 全新克隆模型仓",
+      "concurrency_limit": "~6（核数÷每进程4线程）；24G 内存峰值 20Gi 无 OOM",
+      "setup_actions": "pip install --break-system-packages torch --index-url download.pytorch.org/whl/cpu；模型仓 codeload tarball 解压至 /workspace/HDRTVNet-plus（github.com 直连超时，pypi 抖动，需重试）"
+    }
+  ],
+  "critical_constraints": [
+    {
+      "rule": "C1 cgroup 内存受限机（如 M1）：并行度 = floor(mem_cgroup_gb / 2.6)，每进程约需 2-2.6GB（模型 ~1GB，ensemble 双网络更重 + 双 ffmpeg + 帧缓冲）。M1 上 3 并发会系统性 -9 OOM，5+ 组合被误杀，不代表组合不可跑",
+      "verified": "M1"
+    },
+    {
+      "rule": "C2 无 cgroup 限额机（如 M2）上限改为核数÷每进程线程数；实测 6进程×4线程=24线程，峰值 20Gi/31Gi 安全",
+      "verified": "M2"
+    }
+  ],
   "cpu_inference_speed": {
-    "unit": "720p 单帧（推理+libx265编码），--frames 30 实测折算",
-    "agcm_s_per_frame": 3.51,
-    "ensemble_s_per_frame": 15.52,
-    "hr_s_per_frame": 15.79,
-    "note": "倍率 agcm:ensemble:hr = 1:4.4:4.5，与 T4/L40 GPU 轴一致 ⇒ 模型轴倍率与设备无关，CPU 侧测一次即可",
+    "unit": "720p 单帧稳态（推理，预热后 3 帧均值）",
+    "m1_4core": {"agcm": 3.51, "ensemble": 15.52, "hr": 15.79, "threads": 4, "note": " Indirect via --frames 30 墙钟折算"},
+    "m2_24core": {"agcm": 4.10, "ensemble": 18.69, "hr": 17.40, "threads": 24},
+    "ratio_recheck": "M2 倍率 agcm:ensemble:hr = 1:4.56:4.24，M1 = 1:4.42:4.50 ⇒ 一致，『模型轴倍率与设备无关』两次独立复核成立",
     "full_video_estimate_hours": 8,
     "mandate": "CPU 侧必须 --frames 限帧（30-60）；全片 2191 帧不可行"
   },
+  "torch_thread_saturation_NEW": {
+    "finding": "torch 线程在 ~8 核后饱和；4核→24核绝对速度零提升（属小算子延迟/内存带宽受限，非算力受限）",
+    "measured_m2_agcm_s_per_frame": {"1": 11.38, "2": 9.38, "4": 6.01, "8": 4.63, "16": 3.60, "24": 3.54},
+    "strategy_implication": "并行策略应为『多进程 × 少线程』而非单进程吃满核。每进程 4 线程（6.01 s/帧）开 6 并发 ⇒ 总吞吐 ~1.0 帧/s；单进程 24 线程仅 0.28 帧/s，差 3.5 倍",
+    "applies_to": "所有后续 CPU 侧测试排期"
+  },
   "l1_software_codec_costs_30frames_agcm": {
-    "librav1e": 292.25,
-    "libx265": 413.64,
-    "libaom-av1": 560.09,
-    "libsvtav1": null,
-    "note": "librav1e 最快（比 libx265 快 29%）；libaom-av1 最慢；libsvtav1 待续跑"
+    "m1_4core": {"librav1e": 292.25, "libx265": 413.64, "libaom-av1": 560.09, "libsvtav1": null},
+    "note": "M1 结论：librav1e 最快（比 libx265 快 29%），libaom-av1 最慢；libsvtav1 待补（在 ffmpeg 9.0.2 上复跑，软编性能可能随版本变）"
+  },
+  "cthreads_findings_NEW": {
+    "result": "M2 上 c.threads 1/2/4/8 实测 s/帧 = 15.08/15.08/15.07/15.00，四档差 <0.6%",
+    "conclusion": "CPU 软编下 ffmpeg 线程数几乎不影响墙钟——瓶颈在模型推理而非 ffmpeg 编码。该轴在 GPU（编码占比高）上才有意义",
+    "correction_note": "此结论修正了『线程树测试有 CPU 侧价值』的预设"
+  },
+  "b1_b2_regression_on_ffmpeg_9": {
+    "b1_libx265_short_frame": "rc=0 通过（--model agcm --codec libx265 --frames 5）",
+    "b2_finalization_deadlock": "rc=0 通过（--frames 30 触发帧循环提前退出收尾路径，无死锁）",
+    "significance": "B1/B2 修复原在 ffmpeg 7.1 验证，跨越两个大版本后复验无回归"
   },
   "bench_fixes": [
     {"id": "F1", "issue": "m 层 KeyError('le') 崩溃", "fix": "改为遍历 MODEL_VARIANTS 实际键（le 不可单独推理）", "file": "Accessory/probe/bench_sdr_to_hdr.py:827"},
     {"id": "F2", "issue": "--device 覆盖提示行语义错误（n_same 在覆盖后计算恒等于总数）", "fix": "改为覆盖前统计 n_before", "file": "Accessory/probe/bench_sdr_to_hdr.py"},
-    {"id": "F3", "issue": "bench 无 --device 参数，CPU 层硬编码无法迁移", "fix": "新增 --device {cpu,cuda,auto} 全局覆盖 + cuda 不可用时退出2 + apply_device_override()", "file": "Accessory/probe/bench_sdr_to_hdr.py"}
+    {"id": "F3", "issue": "bench 无 --device 参数，CPU 层硬编码无法迁移", "fix": "新增 --device {cpu,cuda,auto} 全局覆盖 + cuda 不可用时退出2 + apply_device_override()", "file": "Accessory/probe/bench_sdr_to_hdr.py"},
+    {"id": "F4", "issue": "bench 不透传 torch 线程数，无法实施『多进程×少线程』策略", "fix": "用 OMP_NUM_THREADS 环境变量控制（脚本 args.torch_threads 默认 0 不覆盖，torch 默认读 OMP_NUM_THREADS）", "file": "N/A 环境变量方案"}
   ],
   "phase1_remaining": [
-    "libsvtav1 单跑（L1 缺格）",
-    "l2,c 分段/并发路径（21s 素材，不带 --frames）",
-    "g 层 4K 分块（--frames 2）",
-    "c.threads 线程树 1/2/4/8"
+    {"item": "libsvtav1 单跑（L1 唯一缺格，ffmpeg 9.0.2 上需复跑）", "cmd": "bench -i test1.mp4 --layers l1 --codecs libsvtav1 --model agcm --frames 30 --device cpu", "priority": "P1", "status": "已启动后被中断，需重跑"},
+    {"item": "l2,c 分段/并发路径（21s 小素材 640x360，不带 --frames）", "cmd": "bench -i clip21s_small.mp4 --layers l2,c --model agcm --device cpu", "priority": "P1", "status": "L2 4组合 OK(off 348.71/segment 346.03/workers 346.63/tile512+64 249.19)；C组 workers 1/2/4 进行中", "note": "1/2/4 三档墙钟几乎相同(345.88/346/343.81) ⇒ 21s小素材上分段并发无收益（与 T4/L40 长素材结论不同，需在 73s 复验）"},
+    {"item": "g 层 4K 分块（--frames 2，4K 素材已备 4k_6s.mp4）", "cmd": "bench -i 4k_6s.mp4 --layers g --model agcm --frames 2 --device cpu", "priority": "P2", "status": "进行中"},
+    {"item": "4核机旧数据的 ffmpeg 9.0.2 复跑", "priority": "P3", "status": "软编性能随 ffmpeg 版本可能变，L1 排序需复核"}
   ],
+  "l2c_partial_results_NEW": {
+    "l2_split": {
+      "off": {"wall_s": 348.71, "ok": true},
+      "segment": {"wall_s": 346.03, "ok": true},
+      "workers": {"wall_s": 346.63, "ok": true},
+      "tile512_64": {"wall_s": 249.19, "ok": true}
+    },
+    "c_workers_21s_clip": {"w1": 345.88, "w2": 346.03, "w4": 343.81},
+    "finding": "21s 小素材上分段/并发/workers 四条路径墙钟几乎相同（345-349s），tile512+64 反而快 28%（像素量减少）。⇒ 短素材分段并发无收益；与 T4/L40 长素材上 segment 有效的结论不矛盾但需注意素材长度前提"
+  },
   "json_artifacts": [
     "memory/phase1_cpu_l1_20261013.json",
-    "memory/phase1_cpu_l3m_20261013.json"
+    "memory/phase1_cpu_l3m_20261013.json",
+    "/tmp/bench/{A,B,C,D,E,F}.json (M2 复核输出)"
   ]
 }

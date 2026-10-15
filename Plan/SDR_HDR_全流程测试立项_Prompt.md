@@ -285,47 +285,98 @@ CRF21 等质量口径下）。⚠ librav1e 的相对劣势部分源于它只支�
 
 ### 4.4 三侧待测清单 (2026-10-14)
 
-> 口径：✅=本轮已通过；⬜=待测。**阶段出口判据：所属侧所有 ⬜ 清零且无 FAIL 才可进下一阶段。**
+> 口径：✅=已完成；⬜=待测。**阶段出口判据：所属侧所有 ⬜ 清零且无 FAIL 才可进下一阶段。**
 
-#### 4.4.1 CPU 侧剩余 ~~（本机 24核/31G，可立即执行）~~ ✅ **全部完结（2026-10-14）**
+**总览（2026-10-15 复核）**
 
-| # | 项 | 命令 | 估时 | 理由/备注 |
-|---|-----|------|------|----------|
-| C1 | **L3 完整流程基线** | `bench -i test1.mp4 --layers l3 --model ensemble --frames 30 --device cpu` | ~25min | 24核机从未跑过 l3（4核机有 465.72s）。**L3 是阶段出口项，缺它阶段 1 不完整** |
-| C2 | **L2 分块 ×2** | `bench -i test1.mp4 --layers l2 --model agcm --frames 30 --device cpu`（只取 tile512+0/+64 两格） | ~30min | 本轮只直跑了 split×5，**tile512 两格未测**。l2 共 5 格 |
-| C3 | **E.cpu ×5**（新下沉） | `bench -i test3.mp4 --layers e --model agcm --frames 30 --device cpu` | ~40min | e.decode.cpu + e.container.mp4/mkv + e.audio.copy/none。⚠ `e.audio.copy` 需**带音轨素材** `test3.mp4`；本轮从未跑过任何 E 层组合 |
-| C4 | **字幕 burn/keep**（新下沉） | `convert_sdr_to_hdr.py -i tmp_sub.mkv --subs burn --subs-index 0 -o out.mp4 --model agcm --frames 30 --device cpu` | ~15min | libass 是**纯 CPU** 滤镜。**bench 无字幕轴组合，只能跑本体脚本**；需先备带字幕素材（1.1 节列了 `tmp_sub.mkv`，本轮未验证其可用性） |
-| C5 | **VMAF 质量门禁** | `bench -i test1.mp4 --layers l1 --model agcm --frames 30 --device cpu --vmaf l1.libx265 --vmaf-tol 1.0` | ~40min | 3.14 节 P1 项。libx265 是纯软编基准，**CPU 侧即可完成**；av1_nvenc 那半留给 L40（L5） |
-| C6 | **M 层独占复测** | `bench -i test1.mp4 --layers m --crf-ref 21 --frames 30 --repeats 1 --warmup 0 --device cpu`（**独占，不并发**） | ~35min | 现有 m 数据是 6 路并发态（ensemble 794.96s 等），只有隔离态 s/帧。补齐后 m 层才有可对外引用的绝对速度 |
-| C7 | **L1 独占取中位数** | 同上参数跑 `--layers l1`（**独占**） | ~50min | 现表已是独占复测，但只 1 次；补 `repeats 3` 取中位数消除单次抖动 |
+| 侧 | 状态 | 剩余 | 准入门槛 |
+|----|------|------|---------|
+| **CPU** | 🟡 **7/8 完结** | 仅 **C8**（VMAF 真门禁，约 1h，本机可跑） | — |
+| **T4** | ⬜ 未开始 | T1~T8（8 项） | **T7** 必须第一个跑（B3 跨版本风险） |
+| **L40** | ⬜ 未开始 | L1~L7（7 项） | **L1 → L2**（av1_nvenc 回归 + B3 回归） |
 
-> ⚠ **C3/C4/C5 是本清单的增量价值点**：它们此前被 §4 总表错误地推给 T4，实际**不依赖 GPU**，
-> 在 CPU 侧跑完可直接省掉 T4 阶段近一半工作量。
+> 本轮复核修正了清单里 3 类问题：①素材引用失效（`test3.mp4` 不存在、4K 路径错、
+> `tmp_dark_4k.mp4` 未生成）；②路径约定错误（素材在**兄弟目录**，须 `../input_videos/`）；
+> ③发现 C5 的 VMAF 是**空转**（参照池取第一个 OK 组合，只跑 libx265 时它自己就是参照）。
 
-#### 4.4.2 T4 侧剩余
+> 🔴 **命令里的路径约定（2026-10-14 实测校正，照抄前必读）**
+> 素材在项目根的**兄弟目录**，不是子目录：
+> ```
+> /workspace/            ← 素材
+>   input_videos/  test1.mp4 test2.mp4 test3.mp4(缺失) test_materials_4k/
+>   VidUtils/      ← 项目根（本方案所在）
+> ```
+> ⇒ **必须写 `../input_videos/test1.mp4`**，写 `input_videos/…` 或裸 `test1.mp4` 会
+> 「文件不存在」。本节所有命令已按此校正。
+>
+> **素材实况（2026-10-14 核对）**
+>
+> | 素材 | 状态 | 用途 | 备注 |
+> |------|------|------|------|
+> | `../input_videos/test1.mp4` | ✅ 19s/720p/**aac 1ch 音轨** | L1/L2/L3/c/m/E.audio | **有音轨**，E 音频轴用它 |
+> | `../input_videos/test2.mp4` | ✅ 73s/720p/2194 帧 | D/M/c 分段/GPU 侧 | |
+> | ~~`test3.mp4`~~ | ❌ **不存在** | — | 原清单多处引用它，**全部改用 test1.mp4** |
+> | `../input_videos/test_materials_4k/earth_4k_30s.mp4` | ✅ 17M | G 4K | 另有 5s/10s/60s 三档 |
+> | ~~`tmp_dark_4k.mp4`~~ | ❌ 未生成 | — | 需从 earth_4k_30s 截取；或直接用 30s 原片 + `--frames` |
+> | `tmp_sub.mkv` | ✅ 11.4M/1080p/subrip | 字幕 burn/keep | 已验证；生成命令见 §1.1，**不入库** |
+> | `seg30s_6f.mp4` | ⚠ 在 /tmp/bench | l2/c 分段轴 | 临时生成（test2 降帧到 6fps，180 帧），需重建 |
+
+#### 4.4.1 CPU 侧（24核/31G）—— 7/8 完结，**仅 C8 待跑**
+
+| # | 项 | 命令 | 状态 |
+|---|-----|------|------|
+| C1 | **L3 完整流程基线** | `bench -i ../input_videos/test1.mp4 --layers l3 --model ensemble --frames 30 --device cpu` | ✅ 878.95s |
+| C2 | **L2 分块 ×2** | `bench -i ../input_videos/test1.mp4 --layers l2 --model agcm --frames 30 --device cpu` | ✅ +0 761.13s / +64 685.07s |
+| C3 | **E.cpu ×5**（从 T4 下沉） | `bench -i ../input_videos/test1.mp4 --layers e --model agcm --frames 30 --device cpu` | ✅ 5/5（decode.cpu / container.mp4·mkv / audio.copy·none） |
+| C4 | **字幕 burn/keep**（从 T4 下沉） | `convert_sdr_to_hdr.py -i tmp_sub.mkv --subs {burn,keep} --subs-index 0 -o out --model agcm --frames 10 --split-mode off --device cpu` | ✅ burn 无字幕流已烧录 / keep 保留 subrip |
+| C5 | **VMAF 门禁（管线可用性）** | `bench … --layers l1 --codecs libx265 --vmaf l1.libx265` | ✅ 但**空转**，见 C8 |
+| C6 | **M 轴隔离态**（全线程独占） | `bench -i ../input_videos/test1.mp4 --layers m --crf-ref 21 --frames 30 --repeats 1 --warmup 0 --device cpu` | ✅ 3.88/17.30/17.28 s/帧 |
+| C7 | **L1 隔离态中位数** | 同上 `--layers l1 --repeats 3`（librav1e 单独 repeats 1） | ✅ 499/518/703/857s |
+| **C8** | 🟡 **VMAF 真门禁**（本轮新发现缺口） | `bench -i ../input_videos/test1.mp4 --layers l1 --codecs libx265,libsvtav1,libaom-av1,librav1e --vmaf l1.libsvtav1,l1.libaom-av1,l1.librav1e --vmaf-tol 1.0` | ⬜ **待跑** |
+
+**C8 为什么必须补**：VMAF 参照池取「**第一个 OK 组合**」（`quality_gate:1341`）。C5 只指定
+libx265 ⇒ 它自己成了参照，VMAF 恒为 100.00，**什么都没证明**。C8 让 libx265 做参照、
+另三个软编做被测，才能真正验证 §3.14 P1 的「等质量换算不劣化」——这是**唯一遗留的 CPU 侧缺口**，
+其余 7 项均已完结。
+
+> ⚠ **C7 修正了 L1 排序**：全线程独占的真实排序是 `libsvtav1(499s,0.96×) < libx265(518s)
+> < libaom-av1(703s,1.36×) < librav1e(857s,1.66×)`；而 §4.3 那份标「独占复测」的
+> (libx265 1147s) 实为 **4 路并发**数据，争用把它拖慢 2.2 倍。**以 C7 为准。**
+> ⚠ C7 的 librav1e 是单样本（repeats 3 对它性价比过低，被 2h timeout 截断），非中位数。
+
+#### 4.4.2 T4 侧剩余（8 项，**执行顺序 = 下表顺序**）
+
+> 🔴 **T7 必须第一个跑**，它是准入门槛而非并列项（理由见 4.4.4）。
+> ⚠ **av1_nvenc 在 T4 全部 SKIP**（Turing 无 AV1 NVENC）——不要在这里等它跑通，那是 L40 的事。
 
 | # | 项 | 命令 | 备注 |
 |---|-----|------|------|
-| T1 | **环境与能力探测** | `convert_sdr_to_hdr.py --env` + `bench --env` | 确认 CUDA + `hevc_nvenc,h264_nvenc`，且 av1_nvenc 正确报**不可用**（而非误报可用） |
-| T2 | **D 层 NVENC 组** | `bench -i test2.mp4 --layers d --codecs hevc_nvenc,h264_nvenc --crf-ref 21 --model ensemble --device cuda --repeats 3` | 含 cq / aq / tune_uhq / rc_cbr 调优轴 |
-| T3 | **E.cuda ×2** | `bench -i test3.mp4 --layers e --model ensemble --frames 30 --device cuda` | 只取 e.decode.cuda/auto 两格（E.cpu 五格已在 C3 完成） |
-| T4 | **M 轴 GPU 绝对速度** | `bench -i test2.mp4 --layers m --crf-ref 21 --model ensemble --device cuda --repeats 3` | GPU 侧倍率对照 CPU 侧 |
-| T5 | **L1 CUDA 推理版** | `bench -i test1.mp4 --layers l1 --codecs hevc_nvenc --model ensemble --device cuda` | 「GPU 推理 × 编码器」交叉格 |
-| T6 | **c.threads GPU 复核** | `bench -i test1.mp4 --layers c --model ensemble --frames 30 --device cuda` | CPU 侧结论（1→8 收益 33%）是否在 GPU 上翻转 |
-| T7 | 🔴 **B1/B2/B3 三修复回归** | 见 4.4.4 | **T4 必须第一个跑**（B3 的 `-stats_period` 是跨版本风险），详见 4.4.4 |
-| T8 | **C 轴 GPU 分段** | `convert_sdr_to_hdr.py -i test2.mp4 --split-mode segment --workers 4 --model ensemble --device cuda` | CUDA 下 workers 被禁用，只能测 segment |
+| **T7** | 🔴 **B3 跨版本回归（准入门槛）** | `convert_sdr_to_hdr.py -i ../input_videos/test1.mp4 --codec librav1e --crf-ref 21 --frames 30 --device cuda --overwrite`<br>`… --codec hevc_nvenc --fallback-policy auto --frames 30` | B3 给**所有编码器**加了 `-stats_period 2 -progress pipe:2`。目标机 ffmpeg 不认就会**整批失败**。先证伪再铺开 |
+| T1 | **环境与能力探测** | `convert_sdr_to_hdr.py --env` + `bench --env` | 确认 CUDA + `hevc_nvenc,h264_nvenc`；av1_nvenc 应正确报**不可用** |
+| T2 | **D 层 NVENC 组** | `bench -i ../input_videos/test2.mp4 --layers d --codecs hevc_nvenc,h264_nvenc --crf-ref 21 --model ensemble --device cuda --repeats 3` | 含 cq / aq / tune_uhq / rc_cbr 调优轴 |
+| T3 | **E.cuda ×2** | `bench -i ../input_videos/test1.mp4 --layers e --model ensemble --frames 30 --device cuda` | 只取 e.decode.cuda/auto；E.cpu 五格已在 C3 完成。⚠ 原写 test3.mp4 **不存在** |
+| T4 | **M 轴 GPU 绝对速度** | `bench -i ../input_videos/test2.mp4 --layers m --crf-ref 21 --model ensemble --device cuda --repeats 3` | 与 CPU 侧 1:4.45:4.45 对照 |
+| T5 | **L1 CUDA 推理版** | `bench -i ../input_videos/test1.mp4 --layers l1 --codecs hevc_nvenc --model ensemble --device cuda` | 「GPU 推理 × 编码器」交叉格 |
+| T6 | **c.threads GPU 复核** | `bench -i ../input_videos/test1.mp4 --layers c --model ensemble --frames 30 --device cuda` | CPU 侧 1→8 收益 33% 是否在 GPU 翻转。⚠ `--frames` 会 SKIP 掉 c.workers（预期） |
+| T8 | **C 轴 GPU 分段** | `convert_sdr_to_hdr.py -i ../input_videos/test2.mp4 --split-mode segment --workers 4 --model ensemble --device cuda --overwrite` | CUDA 下 workers 被脚本禁用，只能测 segment |
 
-#### 4.4.3 L40 侧剩余
+#### 4.4.3 L40 侧剩余（7 项，**执行顺序 = L1 → L2 → L3…**）
+
+> 🔴 **L1/L2 是准入门槛**：L1 验证 B2 在真 av1_nvenc 上仍干净退出，L2 验证 B3 新代码
+> 在 L40 上不破坏 NVENC 路径。二者过了再铺开 L3~L7。
 
 | # | 项 | 命令 | 备注 |
 |---|-----|------|------|
-| L1 | 🔴 **av1_nvenc 收尾真死锁回归** | `convert_sdr_to_hdr.py -i test2.mp4 --codec av1_nvenc --crf-ref 21 --model ensemble --device cuda --overwrite` | **本清单最高优先级**。验收：正常则干净退出码 0；若仍卡死，告警文案必须是「N s 无任何推进，已强制终止（末帧收尾卡死）」 |
-| L2 | 🔴 **B1/B2/B3 三修复回归** | 同 4.4.4 | B3（`-progress` 无推进判定）是**全新改动，L40 从未跑过** |
-| L3 | **D.av1_nvenc + tune 轴** | `bench -i test2.mp4 --layers d --codecs av1_nvenc --crf-ref 21 --device cuda --nvenc-tune uhq --repeats 3` | Ada 第8代 NVENC 独有 |
+| **L1** | 🔴 **av1_nvenc 收尾真死锁回归** | `convert_sdr_to_hdr.py -i ../input_videos/test2.mp4 --codec av1_nvenc --crf-ref 21 --model ensemble --device cuda --overwrite` | **全清单最高优先级**。验收：正常则退出码 0；若仍卡死，告警必须是「N s 无任何推进，已强制终止（末帧收尾卡死）」 |
+| **L2** | 🔴 **B1/B2/B3 三修复回归** | 见 4.4.4 | B3 是**全新代码，L40 从未跑过** |
+| L3 | **D.av1_nvenc + tune_uhq** | `bench -i ../input_videos/test2.mp4 --layers d --codecs av1_nvenc --crf-ref 21 --device cuda --nvenc-tune uhq --repeats 3` | Ada 第8代 NVENC 独有 |
 | L4 | **nvenc-tune lossless** | 同上 `--nvenc-tune lossless` | Ada 独有 |
-| L5 | **VMAF 门禁（av1_nvenc 半）** | `bench -i test2.mp4 --layers d --codecs av1_nvenc --vmaf d.av1_nvenc.cq --vmaf-tol 1.0` | 验证 av1_nvenc 等质量换算不劣化（C5 的 GPU 对偶项） |
-| L6 | **4K 整帧/大分块长 frames** | `bench -i test_materials_4k/earth_4k_30s.mp4 --layers g --device cuda --tile 0 --frames 60 --repeats 1` | 46GB 显存下验证 4K 整帧与 OOM 边界 |
-| L7 | **大并发 workers=8** | `convert_sdr_to_hdr.py -i test2.mp4 --split-mode segment --workers 8 --model ensemble --device cuda` | 48 核吞吐 |
+| L5 | **VMAF 门禁（av1_nvenc 半）** | `bench -i ../input_videos/test2.mp4 --layers d --codecs av1_nvenc --vmaf d.av1_nvenc.cq --vmaf-tol 1.0` | GPU 侧对偶项（C8 是 CPU 侧对偶项） |
+| L6 | **4K 整帧长 frames** | `bench -i ../input_videos/test_materials_4k/earth_4k_30s.mp4 --layers g --device cuda --tile 0 --frames 60 --repeats 1` | 46GB 显存下验证 4K 整帧 |
+| L7 | **大并发 workers=8** | `convert_sdr_to_hdr.py -i ../input_videos/test2.mp4 --split-mode segment --workers 8 --model ensemble --device cuda --overwrite` | 48 核吞吐 |
+
+> ⚠ 4K 分段并行在 L40 **无需**「确认内存限额」——cgroup 4GB 是误报（见 3.5 更正，
+> L40 实测 192GB/可用 ~189GB）。旧版清单里的 L8「内存边界复核」已删除。
 
 #### 4.4.4 B1/B2/B3 三修复的跨环境回归矩阵
 
@@ -345,7 +396,7 @@ CRF21 等质量口径下）。⚠ librav1e 的相对劣势部分源于它只支�
 #### 4.4.5 排期建议（最小路径）
 
 ```
-CPU 侧（本机，现在）   C1→C2→C3→C4→C5→C6→C7      约 4h，可 6 路并发（每进程 OMP_NUM_THREADS=4）
+CPU 侧（本机，现在）   ~~C1~C7 ✅ 完结~~ → C8（VMAF 真门禁，唯一遗留，约 1h）
         ↓ 出口：CPU 侧 ⬜ 清零、无 FAIL
 T4 侧                 T7(先跑)→T1→T2→T3→T8→T4→T5→T6
         ↓ 出口：T4 侧 ⬜ 清零、无 FAIL

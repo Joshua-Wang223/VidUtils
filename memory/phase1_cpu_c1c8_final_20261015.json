@@ -1,0 +1,201 @@
+{
+  "topic": "阶段1 CPU 侧收官：C1~C7 全部完成（2026-10-14）",
+  "machine": "24核/31G 无 cgroup 限额 / ffmpeg 9.0.2 / torch 2.14.1+cpu",
+  "summary": "§4.4.1 待测清单 C1~C7 全部执行完毕，OK 项零 FAIL；另修 bench 一个误报缺陷",
+  "results": {
+    "C1_l3": {
+      "combo": "l3.full",
+      "model": "ensemble",
+      "status": "OK",
+      "wall_s": 878.95,
+      "note": "L3 完整流程基线，阶段出口项已补齐"
+    },
+    "C2_l2_tile": {
+      "l2.split.off": {
+        "status": "OK",
+        "wall_s": 874.6
+      },
+      "l2.split.segment": {
+        "status": "SKIP",
+        "reason": "--frames 与分段互斥（预期）"
+      },
+      "l2.split.workers": {
+        "status": "SKIP",
+        "reason": "--frames 与分段互斥（预期）"
+      },
+      "l2.tile512+0": {
+        "status": "OK",
+        "wall_s": 761.13
+      },
+      "l2.tile512+64": {
+        "status": "OK",
+        "wall_s": 685.07,
+        "vs_tile512+0": 0.9
+      },
+      "note": "720p 分块 tile512 比整帧(874.6s) 快 13%；overlap64 比 overlap0 更快(0.90x)"
+    },
+    "C3_e_cpu": {
+      "e.decode.cpu": {
+        "status": "OK",
+        "wall_s": 878.61
+      },
+      "e.decode.cuda": {
+        "status": "SKIP",
+        "reason": "无 CUDA 硬解（本机无卡）"
+      },
+      "e.decode.auto": {
+        "status": "SKIP",
+        "reason": "无 CUDA 硬解"
+      },
+      "e.container.mp4": {
+        "status": "OK",
+        "wall_s": 883.52
+      },
+      "e.container.mkv": {
+        "status": "OK",
+        "wall_s": 859.63,
+        "vs_mp4": 0.97
+      },
+      "e.audio.copy": {
+        "status": "OK",
+        "wall_s": 72.48,
+        "frames3_run": "修复 bench 后复验通过"
+      },
+      "e.audio.none": {
+        "status": "OK",
+        "wall_s": 856.69
+      },
+      "note": "E.cpu 5 格全通过（从 T4 下沉）；音频 copy/none 耗时几乎相同(1.00x)但产物差 -1296B（copy 多带音轨）"
+    },
+    "C4_subtitle": {
+      "burn": {
+        "status": "OK",
+        "wall_s": 118,
+        "check": "产物无字幕流(已烧录进画面)、HDR10 标签 hevc/smpte2084/bt2020 正确"
+      },
+      "keep": {
+        "status": "OK",
+        "wall_s": 118,
+        "check": "产物保留 subrip 流、两阶段 remux（mkv -shortest 畸形兜底）、HDR10 正确"
+      },
+      "material": "tmp_sub.mkv（Creature Cases -ss120 -t20，1080p subrip）",
+      "note": "libass 纯 CPU，从 T4 下沉；bench 无字幕轴只能跑本体脚本"
+    },
+    "C5_l1_vmaf": {
+      "combo": "l1.libx265",
+      "status": "OK",
+      "wall_s": 876.9,
+      "vmaf": 100.0,
+      "note": "基准自身 VMAF=100，VMAF 门禁在 CPU 侧可用"
+    },
+    "C6_m_exclusive": {
+      "m.ensemble": {
+        "wall_s": 518.87,
+        "s_per_frame": 17.3
+      },
+      "m.agcm": {
+        "wall_s": 116.54,
+        "s_per_frame": 3.88
+      },
+      "m.hr": {
+        "wall_s": 518.53,
+        "s_per_frame": 17.28
+      },
+      "ratio": "agcm:ensemble:hr = 1:4.45:4.45（与两次复核一致）"
+    },
+    "C7_l1_exclusive": {
+      "method": "全线程独占，repeats=3 取 min（中位数口径）",
+      "libsvtav1": {
+        "wall_s": 499.19,
+        "vs_x265": 0.96
+      },
+      "libx265": {
+        "wall_s": 517.95,
+        "vs_x265": 1.0
+      },
+      "libaom-av1": {
+        "wall_s": 702.78,
+        "vs_x265": 1.36
+      },
+      "librav1e": {
+        "wall_s": 857.21,
+        "vs_x265": 1.66,
+        "note": "repeats3 对它性价比过低(timeout 截断)，单独隔离态单跑"
+      },
+      "ranking_solo": "libsvtav1 < libx265 < libaom-av1 < librav1e（干净独占数据）",
+      "note": "⚠ 隔离态数据与先前『6路并发态』排序不同——并发态 libx265 被争用拖慢(1147s→独占518s)。以本表为准。"
+    }
+  },
+  "bench_bugfix_this_round": {
+    "id": "F5",
+    "issue": "帧数守恒检查未考虑 --frames 截断：带限帧跑 e.audio.copy 时，产物30帧 vs 源574帧 被误判为『静默丢帧』FAIL",
+    "root_cause": "execute() 用 n_src=源总帧 比 n_out=产物帧，未扣 --frames 限帧",
+    "fix": "期望帧数改为 min(源帧数, --frames)；与 :924 判断分段互斥读同一个 _EXTRA_SCRIPT_ARGS 全局，避免口径漂移",
+    "verified": "C3fix（--frames 3）e.audio.copy OK 72.48s；selftest 全通过",
+    "file": "Accessory/probe/bench_sdr_to_hdr.py:1204",
+    "F6": {
+      "issue": "quality_gate docstring 未说明参照池取自 --vmaf 列表内",
+      "fix": "补 docstring 警示 + 踩坑留档",
+      "file": "Accessory/probe/bench_sdr_to_hdr.py:1320"
+    }
+  },
+  "cpu_side_completion": {
+    "all_ok": "C1~C8 全部执行，OK 项零 FAIL；C8 产出负面质量结论",
+    "remaining_cpu": "无。CPU 侧 8/8 完结（2026-10-15）",
+    "next": "阶段出口满足 → T4。**T7 必须第一个跑**（B3 -progress 跨版本风险）"
+  },
+  "artifacts": {
+    "jsons": [
+      "/tmp/bench/C1.json",
+      "/tmp/bench/C2.json",
+      "/tmp/bench/C5.json",
+      "/tmp/bench/C6.json",
+      "/tmp/bench/C7r.json",
+      "/tmp/bench/C3fix.json",
+      "/tmp/bench/C8r2.json"
+    ],
+    "subtitle_outputs": [
+      "/tmp/bench/C4_burn.mp4",
+      "/tmp/bench/C4_keep.mkv"
+    ],
+    "material": "tmp_sub.mkv（临时，可从 Creature Cases 重建）"
+  },
+  "C8_vmaf_real_gate": {
+    "date": "2026-10-15",
+    "method": "libx265 作参照，30帧，n_subsample=1，阈值 -1.0",
+    "reference": "l1.libx265 (REF 100.00)",
+    "results": {
+      "l1.libsvtav1": {
+        "crf_sent": 29,
+        "wall_s": 545.1,
+        "vmaf": 95.5,
+        "gate": "WARN -4.50"
+      },
+      "l1.libaom-av1": {
+        "crf_sent": 26,
+        "wall_s": 616.6,
+        "vmaf": 96.4,
+        "gate": "WARN -3.60"
+      },
+      "l1.librav1e": {
+        "qp_sent": 64,
+        "wall_s": 750.6,
+        "vmaf": 96.69,
+        "gate": "WARN -3.31"
+      }
+    },
+    "conclusion": "🔴 crf-ref 21 统一锚点下三个 AV1 软编全部低于 libx265 3.3~4.5 VMAF 点，无一通过 -1.0 门禁 ⇒『等质量换算』是『同锚点』不是『同画质』，生产选型优先 libx265；用 AV1 需下调 crf-ref 重新标定",
+    "caveats": [
+      "VMAF 在 PQ→8bit tonemap 后计算，衡量色调映射后的感知质量，非 HDR 绝对精度",
+      "libsvtav1/libaom-av1/librav1e 均无法写入 mastering display/MaxCLL，libx265 可以 ⇒ 元数据能力差（与 VMAF 正交）"
+    ],
+    "gpu_remainder": "av1_nvenc 那半仍待 T4/L40 跑（§4.4.3 L5）"
+  },
+  "bench_pitfall_vmaf_reference": {
+    "id": "P1",
+    "issue": "参照池取 --vmaf 列表内第一个 OK 组合（:2222 先过滤再传 quality_gate）",
+    "trap": "想拿 libx265 当参照却只写 --vmaf l1.libsvtav1,... ⇒ libx265 无任何 VMAF 记录，libsvtav1 悄悄成参照，门禁『跑完了』却答非所问",
+    "rule": "想让谁当基准，就必须把它写进 --vmaf 列表",
+    "action": "已加进 quality_gate docstring"
+  }
+}

@@ -291,11 +291,11 @@ CRF21 等质量口径下）。⚠ librav1e 的相对劣势部分源于它只支�
 
 | 侧 | 状态 | 剩余 | 准入门槛 |
 |----|------|------|---------|
-| **CPU** | 🟡 **7/8 完结** | 仅 **C8**（VMAF 真门禁，约 1h，本机可跑） | — |
+| **CPU** | ✅ **8/8 完结** | — （C8 已跑，结论见 4.4.1） | — |
 | **T4** | ⬜ 未开始 | T1~T8（8 项） | **T7** 必须第一个跑（B3 跨版本风险） |
 | **L40** | ⬜ 未开始 | L1~L7（7 项） | **L1 → L2**（av1_nvenc 回归 + B3 回归） |
 
-> 本轮复核修正了清单里 3 类问题：①素材引用失效（`test3.mp4` 不存在、4K 路径错、
+> **2026-10-15：CPU 侧 8/8 完结。** 下述清单复核修正了 3 类问题：①素材引用失效（`test3.mp4` 不存在、4K 路径错、
 > `tmp_dark_4k.mp4` 未生成）；②路径约定错误（素材在**兄弟目录**，须 `../input_videos/`）；
 > ③发现 C5 的 VMAF 是**空转**（参照池取第一个 OK 组合，只跑 libx265 时它自己就是参照）。
 
@@ -321,7 +321,7 @@ CRF21 等质量口径下）。⚠ librav1e 的相对劣势部分源于它只支�
 > | `tmp_sub.mkv` | ✅ 11.4M/1080p/subrip | 字幕 burn/keep | 已验证；生成命令见 §1.1，**不入库** |
 > | `seg30s_6f.mp4` | ⚠ 在 /tmp/bench | l2/c 分段轴 | 临时生成（test2 降帧到 6fps，180 帧），需重建 |
 
-#### 4.4.1 CPU 侧（24核/31G）—— 7/8 完结，**仅 C8 待跑**
+#### 4.4.1 CPU 侧（24核/31G）—— ✅ **8/8 全部完结（2026-10-15）**
 
 | # | 项 | 命令 | 状态 |
 |---|-----|------|------|
@@ -332,12 +332,36 @@ CRF21 等质量口径下）。⚠ librav1e 的相对劣势部分源于它只支�
 | C5 | **VMAF 门禁（管线可用性）** | `bench … --layers l1 --codecs libx265 --vmaf l1.libx265` | ✅ 但**空转**，见 C8 |
 | C6 | **M 轴隔离态**（全线程独占） | `bench -i ../input_videos/test1.mp4 --layers m --crf-ref 21 --frames 30 --repeats 1 --warmup 0 --device cpu` | ✅ 3.88/17.30/17.28 s/帧 |
 | C7 | **L1 隔离态中位数** | 同上 `--layers l1 --repeats 3`（librav1e 单独 repeats 1） | ✅ 499/518/703/857s |
-| **C8** | 🟡 **VMAF 真门禁**（本轮新发现缺口） | `bench -i ../input_videos/test1.mp4 --layers l1 --codecs libx265,libsvtav1,libaom-av1,librav1e --vmaf l1.libsvtav1,l1.libaom-av1,l1.librav1e --vmaf-tol 1.0` | ⬜ **待跑** |
+| **C8** | **VMAF 真门禁**（本轮新发现缺口） | `bench -i ../input_videos/test1.mp4 --layers l1 --codecs libx265,libsvtav1,libaom-av1,librav1e --vmaf l1.libx265,l1.libsvtav1,l1.libaom-av1,l1.librav1e --vmaf-tol 1.0` | ✅ **跑出负面结论，见下** |
 
-**C8 为什么必须补**：VMAF 参照池取「**第一个 OK 组合**」（`quality_gate:1341`）。C5 只指定
-libx265 ⇒ 它自己成了参照，VMAF 恒为 100.00，**什么都没证明**。C8 让 libx265 做参照、
-另三个软编做被测，才能真正验证 §3.14 P1 的「等质量换算不劣化」——这是**唯一遗留的 CPU 侧缺口**，
-其余 7 项均已完结。
+**C8 为什么必须补**：VMAF 参照池取「`--vmaf` 列表内的**第一个** OK 组合」（`quality_gate:1341`
++ 调用处 `:2222` 先过滤）。C5 只指定 libx265 ⇒ 它自己成了参照、VMAF 恒 100，**什么都没证明**。
+
+**C8 结果（2026-10-15，libx265 参照，30 帧，n_subsample=1，阈值 −1.0）**
+
+| 组合 | crf/qp_sent | 编码耗时 | VMAF | 门禁 |
+|------|------------|---------|------|------|
+| **l1.libx265** | crf 21 | 513.9s | **REF 100.00** | 参照池 |
+| l1.libsvtav1 | crf 29 | 545.1s | **95.50** | ⚠ WARN（−4.50） |
+| l1.libaom-av1 | crf 26 | 616.6s | **96.40** | ⚠ WARN（−3.60） |
+| l1.librav1e | qp 64 | 750.6s | **96.69** | ⚠ WARN（−3.31） |
+
+> 🔴 **C8 回答了 §3.14 P1 的悬念，结论是「不等质量」**：crf-ref 21 这个统一锚点下，
+> 三个 AV1 软编**全部低于 libx265 3.3~4.5 个 VMAF 点**，无一通过 −1.0 门禁。
+> ⇒ 「等质量换算」（libx265→crf21 / libsvtav1→crf29 / libaom-av1→crf26 / librav1e→qp64）
+> **并不等质量**，是「同锚点」而非「同画质」。**生产选型应优先 libx265**；
+> 若必须用 AV1（压缩率/兼容性诉求），需**下调 crf-ref**（提高质量）再标定，
+> 不能沿用当前表值。
+>
+> ⚠ 口径说明：VMAF 在 PQ→8bit tonemap 后计算（脚本既定口径），衡量的是**色调映射后的
+> 感知质量**，不直接等于 HDR 绝对精度。另 libsvtav1/libaom-av1/librav1e **均无法写入
+> mastering display / MaxCLL**（实测告警），而 libx265 可以 —— 这是**元数据能力差**，
+> 与 VMAF 结论正交，生产选型时需一并权衡。
+
+> ⚠ **踩坑留档（已加进 `quality_gate` docstring）**：想拿 libx265 当参照，却只写了
+> `--vmaf l1.libsvtav1,...` ⇒ libx265 被过滤掉、**一条 VMAF 记录都没有**，
+> 而 libsvtav1 悄悄成了参照。门禁"跑完了"却答非所问。
+> **想让谁当基准，就必须把它写进 `--vmaf` 列表。**
 
 > ⚠ **C7 修正了 L1 排序**：全线程独占的真实排序是 `libsvtav1(499s,0.96×) < libx265(518s)
 > < libaom-av1(703s,1.36×) < librav1e(857s,1.66×)`；而 §4.3 那份标「独占复测」的
@@ -396,7 +420,7 @@ libx265 ⇒ 它自己成了参照，VMAF 恒为 100.00，**什么都没证明**�
 #### 4.4.5 排期建议（最小路径）
 
 ```
-CPU 侧（本机，现在）   ~~C1~C7 ✅ 完结~~ → C8（VMAF 真门禁，唯一遗留，约 1h）
+CPU 侧（本机）         ~~C1~C8 ✅ 全部完结（2026-10-15）~~
         ↓ 出口：CPU 侧 ⬜ 清零、无 FAIL
 T4 侧                 T7(先跑)→T1→T2→T3→T8→T4→T5→T6
         ↓ 出口：T4 侧 ⬜ 清零、无 FAIL
@@ -1087,7 +1111,7 @@ L40 验证「73s 全片 libx265 ensemble → 1m43s ✅」「4K 30 帧 → 18s �
 | 优先级 | 项目 | 命令要点 | 说明 |
 |--------|------|----------|------|
 | P1 | bench d 层正式报告 | `bench_sdr_to_hdr.py -i test2.mp4 --layers d --codecs av1_nvenc,hevc_nvenc --crf-ref 21 --repeats 3 --json ...` | 正式生成 d 层基准 JSON（含 quality_axis/crf_sent） |
-| P1 | VMAF 质量门禁 | 上述加 `--vmaf l1.libx265,d.av1_nvenc.cq --vmaf-tol 1.0` | 验证 av1_nvenc 等质量换算不劣化 |
+| P1 | VMAF 质量门禁 | 上述加 `--vmaf l1.libx265,d.av1_nvenc.cq --vmaf-tol 1.0` | ⚠ **CPU 侧已跑（C8, 2026-10-15）并得出负面结论**：三个 AV1 软编比 libx265 低 3.3~4.5 VMAF 点，**不等质量**。**GPU 侧（av1_nvenc）那半仍待跑** |
 | P2 | 4K av1_nvenc | `earth_4k_30s --frames 60 --codec av1_nvenc` | L40 独有项，更长帧验证稳定性 |
 | P2 | 大并发 workers=8 | `--layers c --workers 8` 或 `--split-mode segment --workers 8` | L40 48 核大并发吞吐 |
 | P2 | bench 全层回归 | `--layers l1,l2,l3,c,d,e,g,m --repeats 3` | 修复后全矩阵跑一遍，确认无回归 |

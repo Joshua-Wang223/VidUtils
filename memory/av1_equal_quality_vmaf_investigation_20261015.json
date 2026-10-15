@@ -1,0 +1,56 @@
+{
+  "topic": "等质量表能否靠调参让 VMAF 门禁转正 —— 决定性实验与结论 (2026-10-15)",
+  "question": "C8 测出三个 AV1 软编比 libx265 低 3.3~4.5 VMAF 点，能否微调等质量表使其门禁转正（保质量不退）？",
+  "answer": "不能。差距不是质量档位问题，是 VMAF 口径的系统性偏差，调表只会白烧码率。",
+
+  "why_table_looked_wrong": "现表按**等体积**口径标定（calibrate_soft_offsets.py 方法说明自述「⚠ 等体积 ≠ 等质量」），却被当作等质量用。",
+
+  "experiment_design": {
+    "tool": "Accessory/probe/calibrate_av1_vmaf.py（新增）+ probe_vmaf_floor.py（新增）",
+    "method": "参照 = libx265 @ crf-ref 21；每候选走**生产同一条管线**（agcm 模型推理→PQ/BT.2020→编码），原生质量值经 --extra-args 注入；打分复用 bench 自己的 _tonemap_to_8bit / vmaf ⇒ 与门禁**逐字同口径**",
+    "sweep": "20 帧，agcm，CPU；libsvtav1 crf{26,23,20} / libaom-av1 crf{23,20,17} / librav1e qp{56,48,40}",
+    "floor_probe": "近无损档 libsvtav1 crf12 / libaom-av1 crf10 / librav1e qp20"
+  },
+
+  "data_vs_x265_reference": {
+    "reference": "libx265 crf-ref21 → VMAF 100.00, 237.4KB",
+    "libsvtav1": {"crf29_现表": 95.50, "crf26": {"vmaf": 95.46, "kb": 252.8}, "crf23": {"vmaf": 95.71, "kb": 314.9}, "crf20": {"vmaf": 95.80, "kb": 374.6}, "crf12_近无损": {"vmaf": 96.12, "kb": 702.4}},
+    "libaom_av1": {"crf26_现表": 96.40, "crf23": {"vmaf": 96.11, "kb": 238.5}, "crf20": {"vmaf": 96.21, "kb": 269.6}, "crf17": {"vmaf": 96.32, "kb": 318.6}, "crf10_近无损": {"vmaf": 96.60, "kb": 525.2}},
+    "librav1e": {"qp64_现表": 96.69, "qp56": {"vmaf": 96.45, "kb": 292.7}, "qp48": {"vmaf": 96.51, "kb": 335.4}, "qp40": {"vmaf": 96.59, "kb": 401.8}, "qp20_近无损": {"vmaf": 96.69, "kb": 819.9}}
+  },
+
+  "decisive_finding": {
+    "statement": "码率从 1× 拉到 2.2~3.5×（近无损），VMAF 只动了 0.2~0.6 分，天花板死死卡在 ~96，永远够不到 100。",
+    "slope": "≈0.15 VMAF 分 / 倍码率（≈0.02 分/%码率）",
+    "implication_1": "3.3~4.5 分的差距**无法用质量档位关闭** ⇒ 调表是徒劳的",
+    "implication_2": "为让门禁转正需付出 3 倍码率只换 0.3~0.6 分 ⇒ **性价比极差，明确不做**",
+    "implication_3": "C8 的门禁 FAIL 应重新解读为**度量口径问题**，而非「AV1 画质更差」的证据",
+    "corroboration": "bench 自己的注释早已预警：`_tonemap_to_8bit` docstring 写「PQ 码值域上跑 VMAF 不报错但**曲线压平**（实测 crf 20~32 只差 1.6 分），判据分辨率不足」—— 本实验是该预警的定量确认"
+  },
+
+  "root_cause_hypothesis": {
+    "issue": "参照物选错 —— quality_gate 用「基准里第一个 OK 组合」（libx265）当唯一锚点",
+    "why_wrong": "VMAF 模型在 tonemap 后的 SDR 域上评估，压缩失真形态不同则打分不同；libx265 作为锚点天然偏袒 HEVC 的失真形态 ⇒ 对 AV1 系存在系统性负偏",
+    "proper_fix": "等质量标定应以**公共近无损锚**（源片本身，或所有编码器都远高于目标的档位）为参照，衡量各编码器『相对同一锚』的距离；而不是互相比",
+    "alternative_metrics": ["tonemap 后 8bit 的 PSNR/SSIM", "HDR 域直接指标（PQ 码值上的 SSIM）", "以源片为公共锚的 VMAF"]
+  },
+
+  "actions_taken": {
+    "table_changed": false,
+    "reason": "证据表明调表不能改善 VMAF 门禁，只会损失压缩率。**保持现表不动**（等体积口径仍是合理的生产折中）",
+    "docs_updated": "方案 §3.14 P1 + §4.4.1 C8 均标注该结论；新增本 memory"
+  },
+
+  "practical_guidance": [
+    "生产选型仍以 libx265 为质量基准（它同时能写 mastering display/MaxCLL，AV1 三家都写不了）",
+    "不要用 VMAF 门禁的绝对分差来判定 AV1 是否达标 —— 该口径对 AV1 有 ~3~4 分系统性负偏",
+    "若确需 AV1 等质量标定，先把参照换成公共近无损锚，再重新标定"
+  ],
+
+  "pitfalls_hit": [
+    {"id": "P2", "issue": "--extra-args 的 flag 必须带连字符", "detail": "DEFAULT_GRID 存 \"crf\" 会让 ffmpeg 把 crf 当输出文件名 → 「Unable to choose an output format for 'crf'」退出码 234，标定静默全失败"},
+    {"id": "P3", "issue": "librav1e 无法经 --crf/--qp 直调", "detail": "表极粗：crf18~21 只对应 qp41/49/56/64 四档，无法细扫；必须 --extra-args -qp N 直接注入"}
+  ],
+
+  "artifacts": ["Accessory/probe/calibrate_av1_vmaf.py", "Accessory/probe/probe_vmaf_floor.py", "Accessory/temp/calib_av1_vmaf/result.json"]
+}

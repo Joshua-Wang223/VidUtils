@@ -73,3 +73,8 @@ core.*
 
 # —— 本地草稿（历史 ffmpeg 命令行笔记，含 /workspace/... 私有路径，不公开发布）——
 vidcrop.txt
+
+# 派生测试素材（由 input_videos 生成，生成命令见方案 §1.1，不入库）
+tmp_*.mkv
+tmp_*.mp4
+seg*.mp4

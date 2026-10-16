@@ -910,3 +910,61 @@ _EQQUAL_TIER_OVERRIDE = {
 4. **libx264/rav1e 的 per-tier 标定排期** —— §13.2 与 §13.10.1 的设计已定，但每档一套表
    意味着 8 档 × 9 编码器的标定量，需排进阶段二~五。
 
+### 13.14 质量‑tier 方案的专项测试计划
+
+为验证和落实 `--quality-tier` 八档方案，需分阶段（CPU → T4 → L40）完成以下专项测试。每项测试均应在空载机器上进行，以 CPU 时间为主要耗时判据，并采用 VMAF（或 SSIM）作为画质等价度量（阈值 ≥ 93 VMAF 或 ≥ 0.98 SSIM 视为等价）。
+
+**1. libaom‑av1 / libvpx‑vp9 恒等 effort 值定级**
+   - 目标：确定每个 tier（test/draft/preview/balanced/quality/archive/near‑lossless/lossless）对应的 `-cpu-used` 取值，使其在同等画质下与 balanced tier 的基准（preset 8）等价。
+   - 方法：
+     a. 在 CPU 机器（如本机 Xeon Platinum 8255）上，固定 CRF（例如 24），使用 libaom‑av1（或 libvpx‑vp9）在不同 `-cpu-used`（0~8）下编码同一素材（选取 10s 代表性切片）。
+     b. 采用 `ffmpeg -v libvmaf` 计算 VMAF 与 balanced tier（preset 8）的输出；寻找 VMAF ≥ 93 的 `-cpu-used` 作为该 tier 的恒等值。
+     c. 对 libvpx‑vp9 同理，但注意其 `-cpu-used` 允许负值（-8~8），负值表示更慢；在同等画质下寻找最接近 0 的取值（或根据实际需求）。
+     d. 记录结果填入 `QUALITY_MAP` 与 `SIZE_MAP`（若需要），并更新 `convert_crf.py` 中的注释。
+   - 分阶段：先在 CPU 上完成定级；若后期有 T4/L40 可用，可在 GPU 上使用对应的 NVENC（若 applicable）或保持 CPU 基线（因 aom/vp9 纯 CPU）。
+   - 产出：更新 `Plan/` 中的矩阵（§13.10）中 libaom‑av1 与 libvpx‑vp9 的 balanced 列从 “恒等值（待定）” 替换为具体数字。
+
+**2. NVENC 三行（h264_nvenc, hevc_nvenc, av1_nvenc）的量程与 p6/p7 可用性核验**
+   - 目标：在支持 NVENC 的 GPU（T4 或 L40）上测试 preset 取值范围，确认 p6、p7 是否可用（即不导致编码失败或画质异常）。
+   - 方法：
+     a. 准备一组多样化素材（分辨率 720p~4K，帧率 24~60fps）。
+     b. 对每个编码器，遍历 preset p1~p7（或 p1~p7 根据官方文件），记录返回码、输出文件大小、以及 VMAF 与基准（CPU libx264 medium 同 CRF）的画质。
+     c. 确定每个编码器的实际可用 preset 范围（例如 h264_nvenc 官方 p1~p7 均可用，但 p6/p7 在低延迟场景可能受限）。
+     d. 若发现 p6/p7 在某些素材下不可用（返回非零或 VMAF 骨折），则在矩阵中做相应标注或调整。
+   - 分阶段：先在 T4（若可用）完成基线测试；再在 L40 上确认是否有提升（更高帧率或更低延迟）。
+   - 产出：更新矩阵中 h264_nvenc/hevc_nvenc/av1_nvenc 的 preset 列（目前为 p1~p7），如有受限则相应调整（例如 p6 仅在特定条件下可用）。
+
+**3. `bench_preset_ab.py` 加「并发 ≤ 逻辑核数/2」默认上限**
+   - 目标：防止测试时因并发过高导致系统超订（如前他机教训），在脚本中增加一个守卫：默认最大并发数不得超过逻辑核数的半数（向下取整），但仍可通过 `--max-load` 或手动 `--jobs` 覆盖（仅在明确知道机器空载时）。
+   - 方法：
+     a. 在 `bench_preset_ab.py` 中读取 `os.cpu_count()`（或 `psutil.cpu_count(logical=True)`），计算上限 `max_jobs = cpu_count // 2`。
+     b. 若用户未通过 `--jobs` 显式指定，则使用此上限；若指定则取用户值与上限的最小值（以防超订）。
+     c. 在日志中输出所采用的并发数与上限。
+     d. 加入单元测试（或至少在脚本头部加注释）说明理由。
+   - 分阶段：此项为代码改动，不依赖硬件，可在任何机器上完成；完成后提交 PR。
+   - 产出：更新 `Accessory/probe/bench_preset_ab.py`（或脚本所在路径），并在提交说明中注明防超订。
+
+**4. libx264/rav1e 的 per‑tier 标定排期**
+   - 目标：为每个 tier（test/draft/preview/balanced/quality/archive/near‑lossless/lossless）生成各自的 `_EQQUAL_TIER_OVERRIDE` 条目（针对 libx264 的 preset、librav1e 的 speed），使得在未标定的 tier 时可回退 balanced 表并告警（已在 §13.2 中实现）。
+   - 方法：
+     a. 使用现有工具 `Accessory/probe/calibrate_equal_quality.py`（或类似），为每个编码器分别跑：
+        - 对 libx264：固定 CRF（如 24），遍历所有 preset（ultrafast~veryslow），计算 VMAF 与基准（libx264 medium 同 CRF）的画质；找出与目标 tier 的画质等价的 preset（即 VMAF ≥ 93）。
+        - 对 librav1e：固定 CRF，遍历 speed 0~10，同上寻找等价 speed。
+     b. 将结果写为 Python 元组 `(offset, scale, shift, max)` 格式（参看 `convert_crf.py` 中的 `QUALITY_MAP` 条目），存入 `_EQQUAL_TIER_OVERRIDE[tier][编码器]` 字典。
+     c. 对于已标定的 balanced tier（libx264 medium、librav1e native），其值应与现有 `QUALITY_MAP` 一致，作为止验。
+     d. 实施排期：建议按编码器逐个完成，每个编码器占用约 2‑4 小时（取决于素材数量与并发数）。可先在 CPU 上完成，后期若有 T4/L40 可用，可考虑使用对应的硬件加速器（如 NVENC）做交叉验证（非必需）。
+   - 分阶段：先在 CPU 机器上完成所有编码器的 per‑tier 标定；若后期有 GPU 可用，可做交叉核验（如使用 NVENC 的输出作为参考基线，但主要标定仍以 CPU 为准）。
+   - 产出：更新 `vidcrop_hwaccel.py`（或其他放置 `_EQQUAL_TIER_OVERRIDE` 的文件）中的字典；并在 `Plan/` 中的矩阵（§13.10）更新对应列的取值（例如 libx264 的 test/draft/preview 等列将从 “ ultrafast/veryfast/fast” 更新为测得的等价 preset；librav1e 的速度列同样更新）。
+
+**测试进度与里程碑**
+   - 阶段零（CPU 基线）：完成上述 1‑4 项的 CPU 基线测试和代码改动；预计时长 1‑2 周（依据可用素材与机器负载）。
+   - 阶段一（T4 验证）：若有 T4 机器可用，重复 NVENC 三行的可用性测试（项 2），以及使用 T4 上的 NVENC 输出作为参考核验 aom/vp9 的恒等 effort（项 1）和 libx264/rav1e 的 per‑tier 标定（项 4）是否在 GPU 加速路径下保持画质等价（可选）。
+   - 阶段二（L40 验证）：同上，在 L40 上确认更高编码效率或更低延迟是否影响 preset 取值。
+   - 每阶段结束后更新 `Plan/` 文档中的矩阵与备注，并提交 PR。
+
+**注意事项**
+   - 所有测试均应在空载机器上进行，建议使用 `uptime` 检查负载；若负载超过核数的 10%，则推迟测试。
+   - 耗时判据必须使用 CPU 时间（user+sys），而非墙钟，以避免被调度扭曲。
+   - 画质度量推荐使用 VMAF 4.0（模型 `vmaf_v0.6.1.pkl`）或 SSIM；若工具不可用，可临时使用 PSNR 但需注意其对感知质量的敏感度较低。
+   - 每项测试完成后，应记录原始日志、（可选）压缩的中间文件（如 YUV 原始帧）以及最终得到的参数表，以便后复现。
+

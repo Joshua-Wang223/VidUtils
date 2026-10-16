@@ -6,6 +6,7 @@
 - 状态：**实施中**（2026-10-15 批准）。进度台账见 §12.7；剩余待确认项见 §12.6。
 - 配套文档：`Plan/VidUtils_quality-tier全流程实测方案_v1_20261015.md`（实测与补标定）
 - 复测工具：`Accessory/probe/bench_preset_ab.py`（preset A/B 耗时专测，自动检测 AVX2、带负载守卫）
+- 最新输入：§13 `preset_matrix.xlsx` 评估与修正矩阵（2026-10-16，Q11 据此拍板为「区分」）
 
 ---
 
@@ -594,7 +595,7 @@ python3 vidcrop_hwaccel.py src.mp4 dst.mp4 --codec hevc_nvenc --quality-tier <qu
 
 | # | 问题 | 为什么重要 | 我的倾向 |
 |---|---|---|---|
-| **Q11** | `draft` 与 `test` 目前**策略完全相同、只差锚点**（都是 `p1`/`medium`/`veryfast`/`13` + `-tune ll`）。要不要给它们策略层区分？ | 不区分的话这两档就是同一策略的两个质量点，命名显冗余 | 倾向**不区分**：`test` 的价值是「极快 + 能解码」，与 `draft` 同策略合理，真正区分在锚点（36 vs 45）。若要区分，`test` 可加 `--threads 1`，但那会让 tier 沾上资源语义（与 Q10 立场冲突） |
+| **Q11** | `draft` 与 `test` 要不要策略层区分？ | 不区分的话这两档就是同一策略的两个质量点，命名显冗余 | **已拍板（2026-10-16）：区分。** 依据用户提出的 `Accessory/preset_matrix.xlsx`，两档分到不同 preset（test=ultrafast/13/10/8/p1，draft=veryfast/11/8/6/p2）。该矩阵的完整评估与修正见 §13 |
 | **Q12** | **CR-1「默认档」条款**是否现在就与 Video_Enhancement 同步重议？ | 不同步 ⇒ 两仓默认命令不一致 | **已拍板（2026-10-15）：延后到本方案完整编码并经全流程实测之后再议如何迁移给 VE 侧。** 期间按「先提 tier 能力、默认仍 `balanced`」的提交切分执行，本仓不先翻默认档，避免 VE 侧拿到一个没有实测背书的变更 |
 | **Q13** | `lossless` / `near-lossless` / `draft` / `test` 这四档**阶段一要不要一起实现**？ | 它们只是常量表条目，实现成本极低；标定成本才是大头 | 倾向**一起实现**（表项而已），但明确它们**不进阶段三优先标定队列**，LOO 门禁单独放宽（§10） |
 
@@ -615,3 +616,297 @@ python3 vidcrop_hwaccel.py src.mp4 dst.mp4 --codec hevc_nvenc --quality-tier <qu
 4. **结构化输出对不上时，先打印 `sorted(d.keys())` 确认真实字段名**，不要断定对方没交数据。（本轮我先误判 agent「summary 是空的」，实际是 schema 字段名与 agent 实际返回的不一致。）
 
 **x265 archive 档复测（换 AVX2 机器）**：专用脚本已就位 —— `Accessory/probe/bench_preset_ab.py`，自动检测 AVX2/asm 级别、带负载守卫（`--max-load`，防外部争用污染）、以 CPU 时间为主判据，并与本机基线自动对比。用法见脚本 docstring。
+
+---
+
+## 13. `preset_matrix.xlsx` 评估与修正矩阵（2026-10-16，含 10-16 晚更正）
+
+> **本版含两处自我撤回**（2026-10-16 晚，用户指出后查证）：
+> 1. 原 §13.4「类别错误：librav1e / libaom-av1 不是 preset 轴」**作废** —— 矩阵的
+>    「控制参数」列明确写了 `speed` / `cpu-used`，是我只看了取值列造成的误读。
+> 2. 原 §13.3 表格中「libsvtav1 按核数自适应」**作废** —— `auto_effort()[1]`（svtav1 列）
+>    在全仓引用次数为 **0**，是死代码；svtav1 的 preset 是常量 `DEFAULT_PRESET_SVTAV1='8'`，
+>    仓库早在 V9 就把它冻结了（`vidcrop_hwaccel.py:1354-1357` 注释解释了原因）。
+>    **真正按核数自适应的只有 libaom-av1。**
+
+用户提出 `Accessory/preset_matrix.xlsx`：8 档 × 8 编码器的 preset 矩阵，用于回答 Q11
+（`draft` / `test` 是否要策略层区分）。逐行核对仓库现状与 ffmpeg 现实后，结论：
+**矩阵方向正确、直接回答了 Q11，但有 1 处致命冲突与 8 处需修正**。
+
+### 13.1 矩阵做对了什么
+
+1. **直接回答了 Q11**：`draft` 与 `test` 分到不同 preset（test=ultrafast/13/10/8/p1，
+   draft=veryfast/11/8/6/p2）⇒ **两档要有策略层区分**，本方案 §12.6 Q11 中
+   「倾向不区分」的建议作废。
+2. libx264 / libx265 / NVENC 的 `balanced` 列 = medium/medium/p4，与仓库今天的默认值一致。
+3. libsvtav1 的 13/11/9/7/5/3/1/0 是干净的等差梯。
+
+### 13.2 libx264：preset 跟随 tier（原「冻结 medium」已作废）
+
+**2026-10-16 用户指出并采纳**：当初把 libx264 锁在 medium 只是为了方便 `--crf-ref` /
+`--cq-ref` 的标定，**生产使用时仍应按 tier 选合适的 preset，不能脱离实际**。原评估的
+「硬冻结」与「有条件冻结」两种方案**都作废**。
+
+**修正后的设计**：
+
+| 项 | 做法 |
+|---|---|
+| libx264 preset | **跟随 tier**（test=ultrafast / draft=veryfast / preview=fast / balanced=medium / quality=slow / archive=slower / near-lossless=veryslow / lossless=veryslow） |
+| 标定 | 每档一套表：`calibrate_equal_quality.py --preset-override <该档 preset> --tag <tier>`，产物入 `_EQQUAL_TIER_OVERRIDE[tier]` |
+| 未标定的档 | 回退 `balanced` 的表 + 告警（本方案 §2.4 的指纹制已设计此行为） |
+| `--crf-ref` | 在该档已标定前**不可信**；概览/`--dry-run` 明确标注 |
+
+**为什么原来的顾虑仍然有效、但不构成禁止理由**：libx264 CRF 是 `QUALITY_MAP` 的单位基准轴
+（`convert_crf.py:20` `'libx264': (1.0, 0.0, 0, 51)`），`--crf-ref N` 字面含义就是
+「等价于 libx264 medium crf N」。若某档把 libx264 挪走而表没跟着重标，`--crf-ref 21
+--quality-tier test --codec libx264` 会按 medium 假设换算出 crf、实际却在 ultrafast 上编码，
+画质落到别处，**静默地**。
+
+⇒ 但这个风险的正确解法是**按档重标**（基础设施已具备），不是**禁止 preset 变化**。
+标定锁 medium 只是当初建表的便利条件，不该上升为生产约束。
+
+### 13.3 `balanced` 列与仓库现状的差异（逐行核对）
+
+| 编码器 | 矩阵 balanced | 仓库今天实际 | 性质 |
+|---|---|---|---|
+| libx264 | medium | medium（常量） | ✅ 一致 |
+| libx265 | medium | medium（常量） | ✅ 一致 |
+| h264/hevc/av1_nvenc | p4 | p4（常量） | ✅ 一致 |
+| libsvtav1 | 7 | **`DEFAULT_PRESET_SVTAV1 = '8'`（常量）** | ❌ 差 1 档 |
+| librav1e | 5 | `_RAV1E_SPEED = 0`（native，不下发 `-speed`） | ❌ 差 |
+| libaom-av1 | 4 | **`auto_effort()[0]`，按核数 4/5/6/8 可变** | ❌ 差，且值随机器变 |
+
+矩阵的 balanced 只等于**高核数分支**。在 4 核机器上按矩阵实现，`--quality-tier balanced`
+会改变今天的行为 ⇒ 本方案 §7「旧 baseline 显式加 `--quality-tier balanced` 转黄金文件」
+的策略失效，四道孪生门会红。
+
+⇒ **修正：这三个编码器的 `balanced` 一律取 `auto`（svtav1/aom）或 `native`（rav1e，不下发 `-speed`），即"不覆盖 = 今天"。**
+
+### 13.3.1 libsvtav1 balanced：7 还是 8（实测判定）
+
+用户原稿给 7，仓库用 8。为判定「哪个更接近官方默认」，实测 `-preset -2`（ffmpeg 的
+auto/默认值）与各显式档的产物：
+
+| 分辨率 | auto(-2) | preset 8 | preset 7 | auto 与 p8 同 md5 |
+|---|---|---|---|---|
+| 640x360 | 20,409 | **20,409** | 17,338 | 否 |
+| 1280x720 | 81,590 | **81,590** | 68,856 | 否 |
+| 1920x1080 | 361,818 | **361,818** | 315,902 | 否 |
+
+另外扫描 preset 0~13 全部 14 档，**无一与 auto 的 md5 相同**。
+
+**判读**：
+- auto 的产物**字节数在三个分辨率下与 preset 8 完全相等**，而 preset 7  consistently 小 ~15%
+  ⇒ auto 的率失真决策等价于 **8**，不是 7。md5 不同但字节数精确相等，说明码率/质量决策一致，
+  差异只可能在 bitstream 层面（auto 模式疑似按分辨率另选了 tile/线程配置）。
+- 仓库 `DEFAULT_PRESET_SVTAV1 = '8'` 既有实测依据（`SIZE_MAP` 在 preset 8 下标定），
+  又与 auto 的率失真行为一致 ⇒ **balanced 维持 8**。
+- 若仍要采用 7，需按 preset 7 重标 `SIZE_MAP`/`QUALITY_MAP` 的 svtav1 行，且要接受
+  「同一 CRF 下比默认档小 ~15%」这个不同的率失真点。
+
+### 13.4 唯一的真问题：libaom-av1 按核数自适应（用户指出，已赞成）
+
+**只有 libaom-av1 是自适应的。** 三处调用点都只用 `auto_effort()[0]`（aom 的 cpu-used）：
+`vidcrop_hwaccel.py:4476`、`vidcrop_cpu_v2.py:1862`、`convert_sdr_to_hdr.py:2469`。
+svtav1 那一列（`auto_effort()[1]`）**从未被引用**，是死代码。
+
+**实测影响**（同源、同 `-crf 30`，只改 cpu-used）：
+
+```
+cpu-used=4 → 508,975 字节
+cpu-used=8 → 607,995 字节      ← +19.5%
+```
+
+⇒ 同一份命令在 4 核机与 16 核机上产出差 19.5% 体积。这既是**复现性陷阱**，也是**标定失效**：
+`QUALITY_MAP['libaom-av1'] = (2.3219, -22.3927, 0, 63)` 的标定注释（`convert_crf.py:34`）
+**没记是在哪个 cpu-used 下标定的** —— 而 svtav1 的注释明确写了「preset 8 锁定」，
+两者对不齐，这是个文档缺口。
+
+**结论：aom 应改为恒等值**，与 svtav1 在 V9 已受的处理同构。仓库自己的注释
+（`vidcrop_hwaccel.py:1354-1357`）已经把理由说透了：
+
+> libsvtav1 的默认档**不再随核数漂移**（V9）：SIZE_MAP 里 svtav1 的等效关系是在
+> `-preset 8` 下标定的，若默认档随 `auto_effort()` 变（16 核会给 7），等效点就会漂。
+
+⚠ 这是**先于 tier 方案就存在**的问题，不是 tier 引入的；修它属独立的复现性修复。
+
+**libvpx-vp9 补齐**（用户指出漏掉，已采纳）：vp9 与 aom 同属「无 `-preset`、速度轴为
+`-cpu-used`」的一类，矩阵补上它、结构照搬 aom 行。实测两者量程**并不完全相同**：
+
+| 编码器 | `-cpu-used` 量程 | ffmpeg 默认 |
+|---|---|---|
+| libvpx-vp9 | **-8 ~ 8**（允许负值 = 比 0 更慢） | 1 |
+| libaom-av1 | **0 ~ 8** | 1 |
+
+默认值相同（1）、量程不同（vp9 多一段负值区）。矩阵里 vp9 行的取值与 aom 对齐，
+但实现时要注意 vp9 可用负值换取更高质量的档位（若将来要开 near-lossless/lossless 档）。
+
+**待办**：先确定并文档化 aom 当年的标定 cpu-used，再决定冻结到哪个常量。
+
+各编码器速度轴的 ffmpeg 实测量程（本机）：
+
+| 编码器 | 选项 | 实际量程 | ffmpeg 默认 | 仓库今天 |
+|---|---|---|---|---|
+| libsvtav1 | `-preset` | **-2 ~ 13** | -2 | 常量 8 |
+| librav1e | `-speed` | **-1 ~ 10** | -1 | native（不下发） |
+| libaom-av1 | `-cpu-used` | **0 ~ 8** | 1 | 按核数 4/5/6/8 |
+| libvpx-vp9 | `-cpu-used` | **-8 ~ 8** | 1 | 未涉及 |
+
+### 13.5 矩阵漏了 libvpx-vp9
+
+它是仓库支持的编码器（`CODEC_ALIASES`、`SIZE_MAP`、`QUALITY_MAP` 都有它），
+但矩阵 8 行里没有它。它同样没有 `-preset`，速度轴是 `-cpu-used`。
+
+### 13.6 `placebo` 是陷阱
+
+- 仓库**接受**它（`PRESET_VALUES` 含 placebo，`normalize_preset` 对 x264 风格档名原样透传，
+  ffmpeg 实测可正常编码 exit 0）⇒ 不是 unsupported，问题在语义层。
+- x264 的 placebo 比 veryslow 更慢而质量收益可忽略（ diminishing returns，定位就是跑分用）。
+- x265 的 placebo(9) 相对 veryslow(8) 仅 merange 57→92、subme 4→5、tu-intra/inter 3→4、
+  rc-lookahead 40→60 —— 收益边际、耗时大增。
+- **lossless 档上 preset 毫无意义**：libx264 `-crf 0` 本身逐位无损；libx265 `-crf 0` 被仓库
+  改写成 `lossless=1` 并入 `-x265-params`（`vidcrop_cpu_v2.py:3331-3336`）。两条路径下
+  质量轴被旁路，preset 只影响速度 ⇒ `lossless=placebo` 纯亏耗时。
+- 仓库自己也把 placebo 当作不优于 veryslow：`X264_TO_NVENC_PRESET` 把两者同等压到 p7。
+
+⇒ **修正：删掉 placebo，x264/x265 的 lossless 与 near-lossless 都用 `slower`。**
+
+### 13.7 NVENC 两处问题
+
+1. **near-lossless 与 lossless 都填 p7** ⇒ 两档在 NVENC 上策略完全相同。且 NVENC 的
+   lossless 本质靠 `-qp 0`（仓库已有守卫改写为 `-rc constqp -qp 0 -b:v 0`）而非 preset。
+2. **archive/near-lossless/lossless 用 p6/p7**，与 `_NVENC_PRESET_RETRY = {'p5':'p4','p6':'p4','p7':'p4'}`
+   暴露的已知初始化失败风险相冲（该风险本身尚未在本仓定量验证，见 §12.3.2 的更正）。
+
+### 13.8 NVENC 三行本机无法验证
+
+本机 ffmpeg 构建**没有 NVENC**（`ffmpeg -h encoder=hevc_nvenc` 直接返回
+「Codec 'hevc_nvenc' is not recognized」）。矩阵的 NVENC 三行需在有 GPU 的机器上核验
+量程与可用性。
+
+### 13.9 矩阵只覆盖 6 条轴里的 1 条
+
+`TIER_PROFILES` 还需要 per-tier 的 `lookahead` / `tune` / `multipass` / `aq` /
+`ref_crf` / `ref_window`。**后两者是本方案的核心**（质量数值进档 + 窗口钳制），
+矩阵完全没有涉及。preset 矩阵只是 D2 轴，不能直接当 `TIER_PROFILES` 用。
+
+### 13.10 修正矩阵（建议采纳）
+
+| 编码器 | 轴 | test | draft | preview | balanced | quality | archive | near-lossless | lossless |
+|---|---|---|---|---|---|---|---|---|---|
+| libx264 | preset | ultrafast | veryfast | fast | **medium** | slow | slower | veryslow | veryslow |
+| libx265 | preset | veryfast | veryfast | **faster** | **medium** | slow | slower | **slower** | **slower** |
+| libsvtav1 | preset | 13 | 11 | 9 | **8** | 5 | 3 | 1 | 0 |
+| libvpx-vp9 | cpu-used | 8 | 6 | 5 | **恒等值（待定，§13.4）** | 3 | 2 | 1 | 0 |
+| librav1e | speed | 10 | 8 | 6 | **native（暂留，§13.10.1）** | 4 | 2 | 1 | 0 |
+| libaom-av1 | cpu-used | 8 | 6 | 5 | **恒等值（待定，§13.4）** | 3 | 2 | 1 | 0 |
+| h264_nvenc | preset | p1 | p2 | p3 | **p4** | p5 | p6 | p7 | p7 |
+| hevc_nvenc | preset | p1 | p2 | p3 | **p4** | p5 | p6 | p7 | p7 |
+| av1_nvenc | preset | p1 | p2 | p3 | **p4** | p5 | p6 | p7 | p7 |
+
+相对原矩阵的改动与理由：
+
+- **libx264 跟随 tier**（§13.2）：用户指出 medium 锁只是标定便利，生产应按档选 preset。
+  test/draft/preview 用 ultrafast/veryfast/fast，quality/archive 用 slow/slower，
+  near-lossless/lossless 用 veryslow。
+- **libx265**：preview `fast`→`faster`（两者是 x265 的不同 preset）；near-lossless 与
+  lossless 由 veryslow/placebo 统一改为 **slower**（§13.6 placebo 无意义；且 lossless 路径
+  质量轴被旁路，preset 只影响速度，slower 已足够）。
+- **libsvtav1 balanced = 8**（用户原稿为 7）：实测证据支持 8，见 §13.3.1。
+- **libvpx-vp9 补齐**（§13.4）：结构照搬 aom，但注意 vp9 的 `-cpu-used` 允许负值。
+- **librav1e balanced 暂留 native**（§13.10.1）：不是原则性冻结，而是「已标定、零成本、
+  与今天逐字节相同」；其余档的 speed 需各自配 `_EQQUAL_TIER_OVERRIDE[tier]['librav1e']` 行。
+- **libaom-av1 / libvpx-vp9 的 balanced 由具体数字改为「恒等值（待定）」**：先冻结再定值（§13.4）。
+
+#### 13.10.1 rav1e 的 per-tier speed 需要各自一行表
+
+`balanced` 暂留 native 的理由：`QUALITY_MAP['librav1e'] = (7.9326, -102.2078, 0, 255)` 与
+`SIZE_MAP['librav1e'] = (7.0032, -80.993, 0, 255)` 都是按 **native 档**标定的
+（`convert_crf.py:191` 注释明写），所以 native = 「已标定、零成本、与今天逐字节相同」，
+不是原则性冻结。
+
+其他档的 speed 需要各自的表行，范式仓库里已经有了 —— `_EQQUAL_SPEED_OVERRIDE`
+（`convert_crf.py:224-226`，speed 10 档，LOO 5.99）就是「换个 speed 另存一行」的现成样板。
+推广到 tier：
+
+```python
+_EQQUAL_TIER_OVERRIDE = {
+    'balanced':   {},                                  # native ⇒ 直接读 QUALITY_MAP 本体
+    'quality':    {'librav1e': (a, b, 0, 255), ...},   # speed 4 档的标定值
+    'archive':    {'librav1e': (a, b, 0, 255), ...},   # speed 2 档的标定值
+    ...
+}
+```
+
+⚠ 换 speed 的代价有实测背书：仓库记录 `-speed 10` 快 4.6× 但体积 ×1.40、同码率掉 ~1.9 dB
+（`vidcrop_hwaccel.py:3385` 附近），所以这不是微调，必须重标。
+
+**未标定警示**：除 `balanced` 外，所有档的 preset 取值均**未标定**。上线前须按
+`Accessory/probe/calibrate_equal_quality.py --preset-override <值> --tag <tier>`
+（替换 `BASE_LOCK` L94-107 的 medium）逐档重标，并过 LOO 门禁。
+
+### 13.11 两台无 AVX2 主机的 x265 D2 复测（2026-10-16）
+
+用户提供他机实测：`Accessory/calib/eqq_evidence/q3_bench/preset_ab_libx265/`
+（`preset_ab_report.xlsx` + `.json` + `work/`）。
+
+| 指标 | 本机 E5-2620 v2（24 核） | 他机 i7-3770（4C/8T） | Δ |
+|---|---|---|---|
+| x265 asm | MMX2 SSE2Fast SSSE3 SSE4.2 **AVX** | 同左 | — |
+| **使用 AVX2** | **False** | **False** | — |
+| **CPU 时间比 几何平均** | **4.6686×** | **4.5502×** | **−2.5%** |
+| CPU 比 中位数 | 4.703 | 4.686 | −0.4% |
+| CPU 比 范围 | 3.637 ~ 5.530 | 3.241 ~ 5.269 | — |
+| 墙钟比 几何平均 | 3.8588× | 4.0752× | +5.6% |
+| B 侧多拿核（压低墙钟） | 13.6% | 10.3% | — |
+| 阈值 1.5× 判定 | over | over | — |
+| 并发 | 8 | **2** | — |
+
+**结论**：两台**独立**的无 AVX2 主机，CPU 时间比一致到 **2.5% 以内**（4.55× vs 4.67×）
+⇒ 「x265 `slower`/`slow` ≈ 4.6×」是**无 AVX2 下的稳健属性**，不是机器噪声或测量偶然。
+
+他机方法学上值得记录的两点：
+1. **并发按机器规模收缩**：他机 4C/8T，若沿用基线机的并发 8 会严重超订——他们先以并发 8
+   开跑 13 分钟后**主动中止废弃**，改并发 2 重跑。这是正确的（`bench_preset_ab.py` 的
+   `--max-load` 守卫此时也能拦，但它的判据是开测前负载，拦不住运行中超订）。
+   ⇒ **待办**：给 `bench_preset_ab.py` 加一个「并发数不得超过逻辑核数/2」的默认上限。
+2. **`Elapsed` 解析 bug 他机也修了一份**：说明这个坑（`/usr/bin/time -v` 标签含冒号）确实
+   容易复发。本仓 `bench_preset_ab.py` 的 `parse_time_file` 已带警告注释。
+
+**仍缺**：**支持 AVX2 的主机**数据。这是判 「4.6× 是 SIMD 惩罚还是 preset 固有代价」的
+唯一手段，也是定 `libx265` archive 档 preset 终值的前提。
+
+### 13.12 支持 AVX2 的主机 x265 D2 复测（2026-10-16）
+
+本机（Intel Xeon Platinum 8255，8核，支持 AVX2）实测数据：`Accessory/calib/eqq_evidence/q3_bench/preset_ab_report.xlsx`（含 sheet1~sheet6）。
+
+| 指标 | 机器（AVX2 启用） | 备注 |
+|---|---|---|
+| x265 实际 asm | MMX2 SSE2Fast LZCNT SSSE3 SSE4 | （未显示 AVX2，但 cpuinfo 标记 AVX2=1） |
+| **使用 AVX2** | **True** | — |
+| **CPU 时间比 几何平均** | **4.6804×** | sheet1 c1（并发 1） |
+| CPU 比 中位数 | 4.7543× | sheet1 c1 |
+| CPU 比 范围 | 3.658 ~ 5.353 | sheet1 c1 |
+| 墙钟比 几何平均 | 4.9138× | sheet1 c1 |
+| B 侧多拿核（压低墙钟） | 未直接给出，可从素材级数据推断 | 见 sheet2 |
+| 阈值 1.5× 判定 | over | —— |
+| 并发 | 1（主要取值） / 2（另行测得） | sheet1 有两行并发 |
+
+**另附**：同机器在 **去 AVX2**（即屏蔽 AVX2 指令）情况下的对比（sheet5、sheet6）：
+- 预设比值（slow→slower）在 AVX2 启用时：**4.8010×**
+- 预设比值（去 AVX2）:**4.8917×**
+- 相对自动 ΔCPU%（slow）：+20.33%，（slower）：+22.60%
+
+**结论**：在支持 AVX2 的主机上，x265 `slower`/`slow` 的 CPU 时间比约为 **4.8×**，略高于无 AVX2 机器的 4.55~4.67×。这表明 AVX2 对此 preset pair 的影响复杂（可能基线 auto 也有变化），但仍可视为稳健属性；仍需更多数据以定 archive 档 preset 终值。
+
+
+### 13.13 仍待输入
+
+1. **libaom-av1 / libvpx-vp9 的恒等 effort 值定到几** —— 先冻结（§13.4），再定值。
+   前置待办：查清 `QUALITY_MAP['libaom-av1']` 当年是在哪个 `-cpu-used` 下标定的
+   （`convert_crf.py:34` 的注释没记，而 svtav1 记了「preset 8 锁定」）。
+2. **NVENC 三行的量程与 p6/p7 可用性** —— 需在带 GPU 的机器上核（本机 ffmpeg 无 NVENC 构建）。
+3. **`bench_preset_ab.py` 加「并发 ≤ 逻辑核数/2」默认上限**（§13.12 他机教训）。
+4. **libx264/rav1e 的 per-tier 标定排期** —— §13.2 与 §13.10.1 的设计已定，但每档一套表
+   意味着 8 档 × 9 编码器的标定量，需排进阶段二~五。
+

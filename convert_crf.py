@@ -10,6 +10,13 @@
 #    · QUALITY_MAP —— **等质量**口径（同 VMAF；原名 QUALITY_MAP_QUALITY）
 #  QUALITY_MAP 未覆盖的编码器（如待上机的硬编）**回退到 SIZE_MAP**。
 #
+#  另有一维正交的**换算域**（由 set_quality_domain() 选择，**默认 'sdr'**）：
+#    · 'sdr' —— SDR 直编 + VMAF 标定（**跨仓契约**；vidcrop_cpu_v2 / vidcrop_hwaccel）
+#    · 'hdr' —— SDR→HDR 管线专用（2026-10-16）：quality 口径下把
+#      HDR_EQUAL_QUALITY_OVERRIDE 的三行 AV1 软编叠加到活动表（HDR 10bit PQ 域
+#      PSNR 等质量标定）。当前仅 convert_sdr_to_hdr.py 激活；SIZE_MAP / QUALITY_MAP
+#      **本体不受影响**（跨仓逐条相等的契约不破）。
+#
 #  本表是全局唯一来源：vidcrop_hwaccel.py / vidcrop_cpu_v2.py 均从这里 import，
 #  不再各自硬编码偏移量（此前 cq_to_crf() 里的 +1/+4 与本表方向相反，已废弃）。
 #
@@ -237,9 +244,9 @@ def set_quality_mode(mode):
     if m not in ('size', 'quality'):
         raise ValueError(f"quality mode 必须是 'size' 或 'quality'，收到 {mode!r}")
     _QUALITY_MODE = m
-    # QUALITY_MAP 未覆盖的编码器回退到 SIZE_MAP，避免局部表导致 None
-    _ACTIVE_MAP = ({**SIZE_MAP, **QUALITY_MAP}
-                   if m == 'quality' else SIZE_MAP)
+    # QUALITY_MAP 未覆盖的编码器回退到 SIZE_MAP，避免局部表导致 None。
+    # 换算域（_HDR_DOMAIN）与口径正交，由 _rebuild_active_map() 一并处理。
+    _rebuild_active_map()
     return _QUALITY_MODE
 
 
@@ -250,6 +257,67 @@ def get_quality_mode():
 def get_quality_map():
     """返回当前生效的 {codec: (a, b, lo, hi)}。"""
     return _ACTIVE_MAP
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  HDR 域覆盖表（2026-10-16）——**仅供 SDR→HDR 管线**，不参与跨仓契约。
+#
+#  口径与 QUALITY_MAP（SDR 直编 + VMAF 反查）**不同域**：锚 = HDR 母版（模型
+#  输出的无压缩帧 → libx265 `-qp 0` 无损），度量 = **HDR 10bit PQ 域 PSNR 直比**
+#  （不 tonemap）。10 素材 × 锚点 18/21/24/27/30 × 3 编码器实测重标 ⇒ 现表在该域
+#  系统性偏差（svtav1 连斜率都要改 2.3961→3.2689，差 36%，单次平移修不好）。
+#  完整标定与决策记录：memory/hdr_equal_quality_calibration_10mat_20261016.md
+#
+#  ⚠ 只覆盖这已标定的三行；其余编码器（含 libx265 —— 它是锚、两域同表）不动。
+#  ⚠ librav1e 为 **native 档**（不下发 -speed）标定，与 convert_sdr_to_hdr.py
+#    的 `_RAV1E_SPEED = 0` 配套；`-speed 10` 档（_EQQUAL_SPEED_OVERRIDE）未复标。
+#  ⚠ 激活方式：set_quality_domain('hdr')（默认 'sdr' ⇒ 所有既有路径零回归）。
+#    当前仅 convert_sdr_to_hdr.py 在 validate_args() 内激活；vidcrop_* 不激活。
+HDR_EQUAL_QUALITY_OVERRIDE = {
+    # 值 = _final_fit.py 全精度产出 4 位舍入（md 决策表按 2 位展示）：
+    #   (3.268871782367299, -45.932324961854135) 等 → 见标定 json 的 codecs.*.fit
+    'libsvtav1':   (3.2689, -45.9323, 0, 63),
+    'libaom-av1':  (2.4847, -20.7480, 0, 63),
+    'librav1e':    (8.1839, -100.8176, 0, 255),
+}
+
+_HDR_DOMAIN = 'sdr'          # 'sdr'（默认）| 'hdr'
+
+
+def _rebuild_active_map():
+    """按 (口径 _QUALITY_MODE, 域 _HDR_DOMAIN) 重建 _ACTIVE_MAP。
+
+    size 口径一律用 SIZE_MAP；quality 口径 = SIZE_MAP ∪ QUALITY_MAP（未覆盖回退），
+    且域为 'hdr' 时再叠加 HDR_EQUAL_QUALITY_OVERRIDE 的三行。每次都新建 dict，
+    不原地修改任何基础表。
+    """
+    global _ACTIVE_MAP
+    if _QUALITY_MODE == 'quality':
+        m = {**SIZE_MAP, **QUALITY_MAP}
+        if _HDR_DOMAIN == 'hdr':
+            m.update(HDR_EQUAL_QUALITY_OVERRIDE)
+        _ACTIVE_MAP = m
+    else:
+        _ACTIVE_MAP = SIZE_MAP
+
+
+def set_quality_domain(domain):
+    """选择换算域：'sdr'（默认；SDR 直编 + VMAF）或 'hdr'（SDR→HDR 管线）。
+
+    'hdr' 只影响 quality 口径下活动表里已标定的三行 AV1 软编；QUALITY_MAP /
+    SIZE_MAP 本体不动（跨仓契约不受影响），size 口径下无效果。
+    """
+    global _HDR_DOMAIN
+    d = str(domain).lower()
+    if d not in ('sdr', 'hdr'):
+        raise ValueError(f"quality domain 必须是 'sdr' 或 'hdr'，收到 {domain!r}")
+    _HDR_DOMAIN = d
+    _rebuild_active_map()
+    return _HDR_DOMAIN
+
+
+def get_quality_domain():
+    return _HDR_DOMAIN
 
 
 # convert_crf() 输出用的展示名（键为 FFmpeg 编码器名）

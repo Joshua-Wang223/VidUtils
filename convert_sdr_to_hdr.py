@@ -181,15 +181,18 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 # 质量轴换算表（等体积 SIZE_MAP / 等质量 QUALITY_MAP）来自同目录 convert_crf.py ——
 # 与 vidcrop_cpu_v2.py / vidcrop_hwaccel.py 共用同一份真源，避免各处硬编码偏移互相
 # 矛盾。--crf-ref / --cq-ref 在默认口径（quality）下即走 QUALITY_MAP 的等质量换算。
+# ⚠ 但本脚本产出是 HDR ⇒ 等质量换算走 **HDR 域覆盖表**（2026-10-16 重标定，覆盖
+#   libsvtav1 / libaom-av1 / librav1e 三行；见 convert_crf.HDR_EQUAL_QUALITY_OVERRIDE
+#   与 set_quality_domain）。SDR 直编的 vidcrop_* 与跨仓契约 QUALITY_MAP 不受影响。
 try:
     from convert_crf import (SIZE_MAP, QUALITY_MAP, convert_quality, from_x264_crf,
                              to_x264_crf, get_quality_mode, get_quality_map,
-                             set_quality_mode)
+                             set_quality_mode, set_quality_domain)
 except ImportError:                       # 从其他工作目录启动时 sys.path 未必含本脚本所在目录
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from convert_crf import (SIZE_MAP, QUALITY_MAP, convert_quality, from_x264_crf,
                              to_x264_crf, get_quality_mode, get_quality_map,
-                             set_quality_mode)
+                             set_quality_mode, set_quality_domain)
 
 VERSION = "1.0"
 
@@ -3738,6 +3741,9 @@ def validate_args(args: argparse.Namespace,
     """
     # 换算口径（等质量 / 等体积）必须在任何换算之前选定
     set_quality_mode(args.quality_mode)
+    # 本脚本产出 HDR ⇒ 启用 HDR 域覆盖表（2026-10-16 重标定；仅 quality 口径下
+    # 对 libsvtav1 / libaom-av1 / librav1e 三行生效，size 口径与其余编码器不受影响）
+    set_quality_domain('hdr')
 
     if not Path(args.input).exists():
         raise ValueError(f"输入路径不存在：{args.input}")

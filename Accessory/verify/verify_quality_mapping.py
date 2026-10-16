@@ -14,6 +14,9 @@
 #       ⚠ 本组钉的是**下发形状**，不是「是不是逐位无损」——0 档是否逐位无损取决于编码器：
 #         本机 libx265/libx264 `-crf 0` 实测是（framemd5 0/50），T4 实测 NVENC `-qp 0` 不是
 #         （43417/43448，只是最高质量档）。见 probe/probe_lossless_qp0.sh。
+#   D9  HDR 域覆盖表（2026-10-16，[12] 组）：set_quality_domain('hdr') 仅把
+#       libsvtav1/libaom-av1/librav1e 三行切到 HDR 10bit PQ 域等质量标定值；
+#       默认 'sdr' 零回归，QUALITY_MAP/SIZE_MAP 本体与跨仓契约不动。
 #
 # 本套件是**纯 CPU** 的：本机没有 GPU ⇒ `--codec *_nvenc` 会真的走降级链，
 # 正好是 D1 要验的那条路径（见 memory/project_dual_env.md）。
@@ -862,6 +865,56 @@ chk("[11] libsvtav1 默认 preset 固定为 8（不随核数漂移）", H.defaul
 
 print('  [V11] hevc_videotoolbox 量程')
 chk("[11] hevc_videotoolbox b == 100", VU_CRF.SIZE_MAP['hevc_videotoolbox'][1], 100.0)
+
+print('  [12] HDR 域覆盖表（SDR→HDR 管线专用；默认 sdr = 零回归）')
+# 2026-10-16：convert_sdr_to_hdr 的等质量换算改走 HDR 域（HDR 10bit PQ 域 PSNR
+# 等质量标定，覆盖 libsvtav1/libaom-av1/librav1e 三行）。QUALITY_MAP/SIZE_MAP
+# 本体与跨仓契约（[9] 组断言逐条相等）不动。期望值取自标定产物
+# memory/hdr_equal_quality_calibration_10mat_20261016.json（.codecs.*.fit），
+# 独立于 convert_crf.py 的落表值（防"表错、测试跟着错"）。
+_12_mode = VU_CRF.get_quality_mode()
+chk('[12] 默认域 = sdr', VU_CRF.get_quality_domain(), 'sdr')
+_fs3 = importlib.util.spec_from_file_location('vu_crf_fresh2', ROOT / 'convert_crf.py')
+_fm3 = importlib.util.module_from_spec(_fs3)
+_fs3.loader.exec_module(_fm3)
+chk('[12] 全新加载的默认域也是 sdr（零回归）', _fm3.get_quality_domain(), 'sdr')
+VU_CRF.set_quality_mode('quality')
+_sdr21 = [round(VU_CRF.from_x264_crf(c, 21), 2) for c in
+          ('libsvtav1', 'libaom-av1', 'librav1e')]
+_sdr_ctrl = [VU_CRF.from_x264_crf(c, 21) for c in ('libx265', 'libvpx-vp9', 'hevc_nvenc')]
+chk('[12] sdr 域 @21（QUALITY_MAP 旧值）', _sdr21, [28.96, 26.37, 64.38])
+VU_CRF.set_quality_domain('hdr')
+chk('[12] hdr 域 @21（HDR EQ 标定新值）',
+    [round(VU_CRF.from_x264_crf(c, 21), 2) for c in
+     ('libsvtav1', 'libaom-av1', 'librav1e')],
+    [22.71, 31.43, 71.04])
+chk('[12] hdr 域 @30（锚点斜率锁定）',
+    [round(VU_CRF.from_x264_crf(c, 30), 2) for c in
+     ('libsvtav1', 'libaom-av1', 'librav1e')],
+    [52.13, 53.79, 144.70])
+chk('[12] 覆盖只动三行（libx265 / libvpx-vp9 / hevc_nvenc 逐位不变）',
+    [VU_CRF.from_x264_crf(c, 21) for c in ('libx265', 'libvpx-vp9', 'hevc_nvenc')],
+    _sdr_ctrl)
+VU_CRF.set_quality_mode('size')
+_sz_hdr = [VU_CRF.from_x264_crf(c, 21) for c in ('libsvtav1', 'libaom-av1', 'librav1e')]
+VU_CRF.set_quality_domain('sdr')
+chk('[12] size 口径下 hdr 域不生效（SIZE_MAP 原样）',
+    _sz_hdr, [VU_CRF.from_x264_crf(c, 21) for c in ('libsvtav1', 'libaom-av1', 'librav1e')])
+VU_CRF.set_quality_domain('hdr')
+VU_CRF.set_quality_mode('quality')
+chk('[12] 先域后口径切换：覆盖仍生效（无顺序依赖）',
+    round(VU_CRF.from_x264_crf('libsvtav1', 21), 2), 22.71)
+chk('[12] QUALITY_MAP 本体未被修改（跨仓契约安全）',
+    (VU_CRF.QUALITY_MAP['libsvtav1'], VU_CRF.QUALITY_MAP['libaom-av1'],
+     VU_CRF.QUALITY_MAP['librav1e']),
+    ((2.3961, -21.3615, 0, 63), (2.3219, -22.3927, 0, 63), (7.9326, -102.2078, 0, 255)))
+try:
+    VU_CRF.set_quality_domain('hdr2')
+    chk('[12] 非法域名报错', '没报错', 'ValueError')
+except ValueError:
+    pass
+VU_CRF.set_quality_domain('sdr')
+VU_CRF.set_quality_mode(_12_mode)
 
 if knowns:
     _bad = [cid for cid, ok in knowns if not ok]

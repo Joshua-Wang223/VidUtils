@@ -387,6 +387,22 @@ rc, out, ec = enc_cmd(['--cq', '26'])
 chk_in('⑦ --cq 落到 CPU 编码器时换算为 -crf', '-crf 21', ec)
 chk('⑦ 换算后的值不得与输入相同（防"静默丢值"）', '-cq 26' in ec, False)
 
+# ②b HDR 域覆盖（2026-10-16 重标定）：本脚本产出 HDR ⇒ 三行 AV1 软编的等质量
+# 换算走 HDR 域表（convert_crf.HDR_EQUAL_QUALITY_OVERRIDE）；其余行与 size 口径
+# 不受影响。期望值取自标定产物 json（.codecs.*.fit），非本仓落表值。
+rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '21'])
+chk('⑦-HDR 域：libsvtav1 --crf-ref 21 → -crf 23（旧 sdr 值 29）', (rc, v), (0, 23))
+rc, v = enc_crf(['--codec', 'libaom-av1', '--crf-ref', '21'])
+chk('⑦-HDR 域：libaom-av1 --crf-ref 21 → -crf 31（旧 sdr 值 26）', (rc, v), (0, 31))
+rc, out, ec = enc_cmd(['--codec', 'librav1e', '--crf-ref', '21'])
+_m = re.search(r'-qp (\d+)', ec)
+chk('⑦-HDR 域：librav1e --crf-ref 21 → -qp 71（旧 sdr 值 64）',
+    (rc, int(_m.group(1)) if _m else None), (0, 71))
+rc, v = enc_crf(['--codec', 'libx265', '--crf-ref', '21'])
+chk('⑦-HDR 域：未覆盖行不受影响（libx265 → -crf 21）', (rc, v), (0, 21))
+rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '21', '--quality-mode', 'size'])
+chk('⑦-HDR 域：size 口径不受影响（svtav1 等体积 → -crf 24）', (rc, v), (0, 24))
+
 # ③ HDR10 能力守卫：8bit-only 编码器直接拒绝
 rc, out, ec = enc_cmd(['--codec', 'h264_nvenc'])
 chk('⑦ --codec h264_nvenc（只做 8bit）退出码', rc, 2)

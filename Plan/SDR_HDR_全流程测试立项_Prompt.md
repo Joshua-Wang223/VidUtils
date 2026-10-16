@@ -394,7 +394,7 @@ AV1 三家（libsvtav1/libaom-av1/librav1e）实测**均写不了**。
 > (libx265 1147s) 实为 **4 路并发**数据，争用把它拖慢 2.2 倍。**以 C7 为准。**
 > ⚠ C7 的 librav1e 是单样本（repeats 3 对它性价比过低，被 2h timeout 截断），非中位数。
 
-#### 4.4.1-补 HDR 域等质量重标定（2026-10-16，**结论待裁定**）
+#### 4.4.1-补 HDR 域等质量重标定（2026-10-16，**方案 C 已实施**）
 
 C8 揭示「tonemap 后 VMAF 无判据分辨率」后，按修正口径（**HDR 母版锚 + HDR 域 PSNR 直比**，
 不 tonemap）对三个 AV1 软编重跑了完整标定：**10 素材**（eqq_calib 6s 全集，6 类内容）×
@@ -414,9 +414,14 @@ C8 揭示「tonemap 后 VMAF 无判据分辨率」后，按修正口径（**HDR 
   ⇒ **三个编码器偏差方向不一致，且 svtav1 斜率也要改（2.40→3.27）**，单次平移修不好。
 - LOO（dB 当量，中位/P90/max）：svtav1 0.56/1.76/3.20 ｜ aom 0.66/1.51/1.90 ｜ rav1e 0.78/2.46/4.78。
 - 异常留档：SVT-AV1 **近无损档凹陷**（最低 crf 的 PSNR 反而低于次低点，码率更大）在 3/10 素材可复现，已单调化剔除。
-- **落表决策待定**（⚠ 与 SDR 直编 VMAF 口径**不同域不可互相替代**；QUALITY_MAP 是跨仓契约）：
-  A 不动 ｜ B 改共享表（需 VE 协同）｜ **C 新增 HDR 域覆盖表（仅 convert_sdr_to_hdr 生效，推荐）**。
-- 详见 `memory/hdr_equal_quality_calibration_10mat_20261016.md`（+ 同名 .json 原始数据）。
+- ✅ **落表已完成（2026-10-16，方案 C）**：`convert_crf.py` 新增
+  `HDR_EQUAL_QUALITY_OVERRIDE` + `set_quality_domain('sdr'|'hdr')`（默认 `sdr` 零回归），
+  仅 `convert_sdr_to_hdr.py` 在 `validate_args()` 内激活；`QUALITY_MAP`/`SIZE_MAP`
+  **本体不动** ⇒ 跨仓契约与 SDR 直编路径零回归（⚠ 两域**不同域不可互相替代**）。
+  ref21 实发值：svtav1 29→**23**、aom 26→**31**、rav1e 64→**71**；libx265 与其余行不变。
+  回归：`verify_quality_mapping.py`（新增 [12] 组）+ `verify_sdr_to_hdr.py`（新增
+  ⑦-HDR 块）全过；三编码器真实编码冒烟通过。落表值 = 标定 json 全精度 4 位舍入。
+- 详见 `memory/hdr_equal_quality_calibration_10mat_20261016.md` §8（+ 同名 .json 原始数据）。
 
 #### 4.4.2 T4 侧剩余（8 项，**执行顺序 = 下表顺序**）
 

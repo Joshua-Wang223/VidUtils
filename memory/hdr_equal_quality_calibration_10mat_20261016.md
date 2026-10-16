@@ -70,8 +70,8 @@
 
 - **方案 A（不动）**：QUALITY_MAP 保持现表。HDR 管线的等质量偏差维持现状（中位 −1.8~+1.8 dB）。
 - **方案 B（改共享表）**：按上表更新 QUALITY_MAP 三个 AV1 行。⚠ 破坏**跨仓契约**（两仓逐条相等，见 convert_crf.py 注释），且会改动已用 SDR-VMAF 验证的 SDR 直编路径 ⇒ 需 VE 侧同步复核。
-- **方案 C（推荐）**：不动共享表，新增 **HDR 域覆盖表**（仅 `convert_sdr_to_hdr.py` 走 quality 模式时生效），
-  仿 `_EQQUAL_SPEED_OVERRIDE` 先例。既保住 SDR 直编已验证行为，又修 HDR 管线。待确认后实施。
+- **方案 C（推荐 → ✅ 已采纳实施，2026-10-16）**：不动共享表，新增 **HDR 域覆盖表**（仅 `convert_sdr_to_hdr.py` 走 quality 模式时生效），
+  仿 `_EQQUAL_SPEED_OVERRIDE` 先例。既保住 SDR 直编已验证行为，又修 HDR 管线。实施记录见 §8。
 - 若采纳，另需决定：svtav1 表是否由仿射升级为分段（其跨锚点增量 11.8/9.0/8.7/8.7，轻微非线性）。
 
 ## 7. 其他口径备注
@@ -79,3 +79,21 @@
 - librav1e 为 **native 档**（不下发 `-speed`），与 QUALITY_MAP 该行口径一致；`_EQQUAL_SPEED_OVERRIDE`（speed10）**未复标**。
 - 目标档（libx265）不下发 `-preset`，为编码器默认档，与 bench/管线同源。
 - 复现入口：`python3 Accessory/probe/_final_fit.py --work Accessory/temp/hdr_eqq`（数据已在盘上，秒级重算）。
+
+## 8. 实施记录（2026-10-16，方案 C 已落表）
+
+- **落点**：`convert_crf.py` 新增 `HDR_EQUAL_QUALITY_OVERRIDE`（三行，值 = `_final_fit.py`
+  全精度 **4 位舍入**：svtav1 `(3.2689, −45.9323)` / aom `(2.4847, −20.7480)` /
+  rav1e `(8.1839, −100.8176)`，lo/hi 同现表；§2 表按 2 位展示）+ `set_quality_domain('sdr'|'hdr')` /
+  `get_quality_domain()`（默认 `'sdr'` ⇒ 所有既有路径零回归；`size` 口径下覆盖不生效）。
+- **激活**：仅 `convert_sdr_to_hdr.py` —— `validate_args()` 内 `set_quality_mode()` 之后
+  调 `set_quality_domain('hdr')`。`vidcrop_cpu_v2.py` / `vidcrop_hwaccel.py` 不激活；
+  `QUALITY_MAP` / `SIZE_MAP` **本体不动**（跨仓逐条相等契约不破，VE 侧无需同步）。
+- **ref=21 实发值变化**：svtav1 29→**23**、aom 26→**31**、rav1e 64→**71**；libx265 与
+  其余行不变。
+- **回归**：`verify_quality_mapping.py`（新增 [12] 组：机制 / 零回归 / 顺序无关 /
+  本体不可变 / 非法值）✅；`verify_sdr_to_hdr.py`（新增 ⑦-HDR 块：端到端 dry-run 值）✅；
+  三编码器真实编码冒烟（4 帧、产物 AV1 + smpte2084）✅。
+- **遗留**：（a）rav1e `-speed 10` 档未复标 —— 若未来管线启用 `-speed` 须按档重标；
+  （b）svtav1 是否由仿射升级为分段表待定（§6 末条）；（c）本表口径为 HDR PQ 域 PSNR，
+  非感知指标 —— 若未来有 HDR 域感知指标（vmaf_hdr）应复标。

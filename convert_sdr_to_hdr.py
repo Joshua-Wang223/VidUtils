@@ -3775,6 +3775,16 @@ def validate_args(args: argparse.Namespace,
         print(f"提示：--codec auto 已解析为 {DEFAULT_CODEC}。")
     _requested_codec = args.codec
 
+    # ── --nvenc-tune uhq 只对 hevc/av1 NVENC 存在 ──
+    # 判**请求的**编码器（降级在下面 resolve_codec 才发生），与 vidcrop_hwaccel.py /
+    # vidcrop_cpu_v2.py 的同一条检查对齐——此前本脚本缺这条，uhq + h264_nvenc 只在
+    # 策略内告警（apply_rc_control_args 的 _ignore）而不拒绝，三脚本行为不一致。
+    # ⚠ 报错文案与另两个脚本**逐字相同**（首行一致，verify_cli_parsing.py 会断言）。
+    if args.nvenc_tune == "uhq" and _requested_codec == "h264_nvenc":
+        raise ValueError(
+            "--nvenc-tune uhq 不受 h264_nvenc 支持（uhq 仅 hevc_nvenc / "
+            "av1_nvenc 有）；请改用 --nvenc-tune hq 或换编码器。")
+
     # ── HDR10 能力检查（对**请求的**编码器判定；8bit-only 直接拒绝）──
     _level, _msg = hdr10_capability(_requested_codec)
     if _level == "error":

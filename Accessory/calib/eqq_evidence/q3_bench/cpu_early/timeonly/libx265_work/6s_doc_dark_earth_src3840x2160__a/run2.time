@@ -1,0 +1,23 @@
+	Command being timed: "ffmpeg -nostdin -y -hide_banner -loglevel error -i /workspace/input_videos/eqq_calib/6s/doc_dark_earth_src3840x2160.mp4 -c:v libx265 -crf 24 -preset slow /workspace/VidUtils/Accessory/calib/eqq_evidence/q3_bench/cpu_early/timeonly/libx265_work/6s_doc_dark_earth_src3840x2160__a/out.mkv"
+	User time (seconds): 267.17
+	System time (seconds): 3.27
+	Percent of CPU this job got: 291%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:32.63
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 424700
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 104422
+	Voluntary context switches: 59832
+	Involuntary context switches: 107243
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 3536
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

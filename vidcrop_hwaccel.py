@@ -5028,35 +5028,47 @@ def process_file(
             crf_ref=crf_ref, cq_ref=cq_ref, qp=qp, rc_mode=rc_mode,
         )
         norm_preset = strategy_preset(preset, codec, str(strategy['codec']))
-        cmd = build_ffmpeg_cmd(
-            input_file=input_file,
-            output_file=output_file,
-            vf_filter=vf_filter,
-            codec=strategy['codec'],
-            crf=current_crf,
-            cq=current_cq,
-            preset=norm_preset,
-            overwrite=overwrite,
-            hwaccel=strategy.get('hwaccel'),
-            hwaccel_output_format=strategy.get('hwaccel_output_format'),
-            ffmpeg_bin=ffmpeg_bin,
-            audio_codec=audio_codec,
-            audio_bitrate=audio_bitrate,
-            extra_args=extra_args,
-            color_range=color_range,
-            pix_fmt=pix_fmt,
-            bit_depth=bit_depth,
-            hdr=hdr,
-            rc_mode=rc_mode,
-            qp=current_qp,
-            lookahead=lookahead,
-            bitrate=bitrate,
-            nvenc_aq=nvenc_aq,
-            nvenc_tune=nvenc_tune,
-            nvenc_multipass=nvenc_multipass,
-            threads=threads,
-            policy=policy,
-        )
+        try:
+            cmd = build_ffmpeg_cmd(
+                input_file=input_file,
+                output_file=output_file,
+                vf_filter=vf_filter,
+                codec=strategy['codec'],
+                crf=current_crf,
+                cq=current_cq,
+                preset=norm_preset,
+                overwrite=overwrite,
+                hwaccel=strategy.get('hwaccel'),
+                hwaccel_output_format=strategy.get('hwaccel_output_format'),
+                ffmpeg_bin=ffmpeg_bin,
+                audio_codec=audio_codec,
+                audio_bitrate=audio_bitrate,
+                extra_args=extra_args,
+                color_range=color_range,
+                pix_fmt=pix_fmt,
+                bit_depth=bit_depth,
+                hdr=hdr,
+                rc_mode=rc_mode,
+                qp=current_qp,
+                lookahead=lookahead,
+                bitrate=bitrate,
+                nvenc_aq=nvenc_aq,
+                nvenc_tune=nvenc_tune,
+                nvenc_multipass=nvenc_multipass,
+                threads=threads,
+                policy=policy,
+            )
+        except ValueError as exc:
+            # build_ffmpeg_cmd 用 ValueError 表达「这个组合不成立」：
+            # apply_rc_control_args 的 strict 分支（NVENC 专属选项落到非 NVENC 编码器）、
+            # build_hdr_args 的互斥组合等。它是**策略级**判定——换 preset / 换下载
+            # 格式重试都会复现，所以不重试，直接按失败返回。
+            # 此前这里是裸调，而 main() 只捕 KeyboardInterrupt ⇒ ValueError 会一路
+            # 逃出去变成 traceback（--fallback-policy strict + 降级策略时必现）。
+            # 与 convert_sdr_to_hdr.py _run_job_with_fallback 的处理同形（那里
+            # build_plan 已经是包住的）。
+            print(f'  ✘ 失败：命令构建 — {exc}', file=sys.stderr)
+            return _result('failed')
         print('  ' + _label('输出文件') + str(output_file))
         print('  ' + _label('策略') + f'[1/{len(all_strategies)}] {strategy["name"]}')
         print('  ' + _label('执行命令') + shlex.join(cmd))
@@ -5131,36 +5143,44 @@ def process_file(
                           '（将降级为 8bit，HDR 静态元数据与精细色阶会丢失）',
                           file=sys.stderr)
 
-                cmd = build_ffmpeg_cmd(
-                    input_file=input_file,
-                    output_file=output_file,
-                    vf_filter=vf_filter,
-                    codec=current_codec,
-                    crf=current_crf,
-                    cq=current_cq,
-                    preset=_preset_try,
-                    overwrite=overwrite,
-                    hwaccel=hwaccel,
-                    hwaccel_output_format=hwaccel_out_fmt,
-                    ffmpeg_bin=ffmpeg_bin,
-                    audio_codec=audio_codec,
-                    audio_bitrate=audio_bitrate,
-                    extra_args=extra_args,
-                    hw_download_fmt=_dl,
-                    color_range=color_range,
-                    pix_fmt=pix_fmt,
-                    bit_depth=bit_depth,
-                    hdr=hdr,
-                    rc_mode=rc_mode,
-                    qp=current_qp,
-                    lookahead=lookahead,
-                    bitrate=bitrate,
-                    nvenc_aq=nvenc_aq,
-                    nvenc_tune=nvenc_tune,
-                    nvenc_multipass=nvenc_multipass,
-                    threads=threads,
-                    policy=policy,
-                )
+                try:
+                    cmd = build_ffmpeg_cmd(
+                        input_file=input_file,
+                        output_file=output_file,
+                        vf_filter=vf_filter,
+                        codec=current_codec,
+                        crf=current_crf,
+                        cq=current_cq,
+                        preset=_preset_try,
+                        overwrite=overwrite,
+                        hwaccel=hwaccel,
+                        hwaccel_output_format=hwaccel_out_fmt,
+                        ffmpeg_bin=ffmpeg_bin,
+                        audio_codec=audio_codec,
+                        audio_bitrate=audio_bitrate,
+                        extra_args=extra_args,
+                        hw_download_fmt=_dl,
+                        color_range=color_range,
+                        pix_fmt=pix_fmt,
+                        bit_depth=bit_depth,
+                        hdr=hdr,
+                        rc_mode=rc_mode,
+                        qp=current_qp,
+                        lookahead=lookahead,
+                        bitrate=bitrate,
+                        nvenc_aq=nvenc_aq,
+                        nvenc_tune=nvenc_tune,
+                        nvenc_multipass=nvenc_multipass,
+                        threads=threads,
+                        policy=policy,
+                    )
+                except ValueError as exc:
+                    # 同上（dry-run 处的说明）：命令构建期的 ValueError 是**策略级**
+                    # 判定，换 preset / 换下载格式重试都会原样复现，故不重试、直接失败。
+                    # 典型触发：--fallback-policy strict + 降级到 CPU 编码器的策略 +
+                    # 显式给了 NVENC 专属选项 ⇒ apply_rc_control_args 抛 ValueError。
+                    print(f'  ✘ 失败：命令构建 — {exc}', file=sys.stderr)
+                    return _result('failed')
 
                 tag = '（降级）' if strategy.get('fallback', False) else ''
                 print('  ' + _label('策略')

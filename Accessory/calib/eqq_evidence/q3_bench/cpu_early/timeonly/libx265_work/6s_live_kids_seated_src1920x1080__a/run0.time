@@ -1,0 +1,23 @@
+	Command being timed: "ffmpeg -nostdin -y -hide_banner -loglevel error -i /workspace/input_videos/eqq_calib/6s/live_kids_seated_src1920x1080.mp4 -c:v libx265 -crf 24 -preset slow /workspace/VidUtils/Accessory/calib/eqq_evidence/q3_bench/cpu_early/timeonly/libx265_work/6s_live_kids_seated_src1920x1080__a/out.mkv"
+	User time (seconds): 250.58
+	System time (seconds): 2.33
+	Percent of CPU this job got: 288%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:27.56
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 401696
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 98418
+	Voluntary context switches: 34004
+	Involuntary context switches: 93759
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 4288
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

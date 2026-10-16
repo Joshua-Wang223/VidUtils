@@ -128,6 +128,14 @@ def main() -> int:
                if row["vals"].get((codec, ref)) is not None]
         a = fit_pooled_a(pts)
         b = fit_b(rows, a, codec, refs)
+        # 分段候选（2026-10-16 §9）：稳健增量累积（LOO 采纳）与逐锚点中位值连线（对照）
+        knots_med = [(ref, med[ref]) for ref in refs if ref in med]
+        knots_cum = [(knots_med[0][0], knots_med[0][1])]
+        for (r0, _), (r1, _) in zip(knots_med, knots_med[1:]):
+            deltas = [row["vals"][(codec, r1)] - row["vals"][(codec, r0)] for row in rows
+                      if row["vals"].get((codec, r0)) is not None
+                      and row["vals"].get((codec, r1)) is not None]
+            knots_cum.append((r1, knots_cum[-1][1] + st.median(deltas)))
         cur_a, cur_b, lo, hi = QUALITY_MAP[codec]
         f = lambda A, B, r: A * r + B  # noqa: E731
         print(f"  新仿射 a={a:.4f} b={b:.2f}   → " +
@@ -166,6 +174,7 @@ def main() -> int:
         loo_v.sort(); loo_db.sort()
         print(f"  LOO |ΔV|: 中位 {st.median(loo_v):.1f}  P90 {loo_v[int(len(loo_v) * 0.9) - 1]:.1f}  max {loo_v[-1]:.1f}   "
               f"| dB 当量: 中位 {st.median(loo_db):.2f}  P90 {loo_db[int(len(loo_db) * 0.9) - 1]:.2f}  max {loo_db[-1]:.2f} dB")
+        print("  分段节点（稳健累积）: " + " / ".join(f"ref{r} {y:.4f}" for r, y in knots_cum))
         result["codecs"][codec] = {
             "flag": DISPLAY[codec], "per_ref_median": {str(k): v for k, v in med.items()},
             "fit": {"a": a, "b": b, "lo": lo, "hi": hi},
@@ -178,6 +187,12 @@ def main() -> int:
                 str(ref): (round(row["vals"][(codec, ref)], 2)
                            if row["vals"].get((codec, ref)) is not None else None)
                 for ref in refs} for row in rows},
+            "piecewise": {
+                "knots_median": knots_med,
+                "knots_cuminc": knots_cum,
+                "note": "knots_cuminc = 逐段素材内增量中位数累积（稳健；LOO 采纳，见 md §9）；"
+                        "knots_median = 逐锚点中位值连线（对照，LOO 最坏点劣化，未采纳）",
+            },
         }
     result["dropped_points"] = {row["material"]: row["dropped"] for row in rows
                                 if any(row["dropped"].values())}

@@ -255,7 +255,12 @@ def get_quality_mode():
 
 
 def get_quality_map():
-    """返回当前生效的 {codec: (a, b, lo, hi)}。"""
+    """返回当前生效的 {codec: 表行}。
+
+    表行通常为 ``(a, b, lo, hi)``；HDR 域 quality 口径下 libsvtav1 为
+    :class:`PiecewiseLinear`（2026-10-16 分段升级）。取量程请用
+    :func:`row_limits`，不要直接按下标解包。
+    """
     return _ACTIVE_MAP
 
 
@@ -268,15 +273,91 @@ def get_quality_map():
 #  系统性偏差（svtav1 连斜率都要改 2.3961→3.2689，差 36%，单次平移修不好）。
 #  完整标定与决策记录：memory/hdr_equal_quality_calibration_10mat_20261016.md
 #
+#  libsvtav1 行已由仿射**升级为分段线性**（PiecewiseLinear，§9）：逐锚点中位曲线
+#  轻微非线性（差分 11.8/9.0/8.7/8.7 crf）。节点取「逐段素材内增量中位数」的稳健
+#  累积（每段 Theil–Sen 斜率），对全程水平离群素材不敏感；LOO 全网格中枢优于仿射
+#  （中位 2.31→2.05 qp）而最坏点持平（9.0 qp）；直接连逐锚点中位值的变体中位更优
+#  （1.84）但最坏点劣化（10.6），依「首先保质量不退」取前者。节点推导见 §9 与
+#  Accessory/probe/_piecewise_check.py；aom / rav1e 维持仿射（LOO 无一致增益）。
+#
 #  ⚠ 只覆盖这已标定的三行；其余编码器（含 libx265 —— 它是锚、两域同表）不动。
 #  ⚠ librav1e 为 **native 档**（不下发 -speed）标定，与 convert_sdr_to_hdr.py
 #    的 `_RAV1E_SPEED = 0` 配套；`-speed 10` 档（_EQQUAL_SPEED_OVERRIDE）未复标。
 #  ⚠ 激活方式：set_quality_domain('hdr')（默认 'sdr' ⇒ 所有既有路径零回归）。
 #    当前仅 convert_sdr_to_hdr.py 在 validate_args() 内激活；vidcrop_* 不激活。
+class PiecewiseLinear:
+    """分段线性换算模型（表行 ``(a, b, lo, hi)`` 的替代形态，接口互换）。
+
+    仅 HDR 域 libsvtav1 行使用（2026-10-16 分段升级，见上方注释与标定
+    memory §9）：段内线性插值；x 超出首/末节点时按端段斜率线性外推；
+    输出钳到 ``[lo, hi]``。``inverse()`` 为反解（y 严格递增故可逆），
+    语义与 :func:`to_x264_crf` 一致。
+    """
+
+    __slots__ = ('knots', 'lo', 'hi')
+
+    def __init__(self, knots, lo, hi):
+        self.knots = tuple((float(x), float(y)) for x, y in knots)
+        if len(self.knots) < 2:
+            raise ValueError('PiecewiseLinear 至少需要 2 个节点')
+        for (x0, y0), (x1, y1) in zip(self.knots, self.knots[1:]):
+            if x1 <= x0:
+                raise ValueError('PiecewiseLinear 节点 x 必须严格递增')
+            if y1 <= y0:
+                raise ValueError('PiecewiseLinear 节点 y 必须严格递增（保证可逆）')
+        self.lo, self.hi = float(lo), float(hi)
+
+    def _seg(self, x):
+        """x 所在段索引；两端外推复用首/末段。"""
+        pts = self.knots
+        if x <= pts[0][0]:
+            return 0
+        if x >= pts[-1][0]:
+            return len(pts) - 2
+        for i in range(len(pts) - 1):
+            if pts[i][0] <= x <= pts[i + 1][0]:
+                return i
+        raise AssertionError('unreachable')
+
+    def forward(self, x):
+        pts = self.knots
+        i = self._seg(float(x))
+        (x0, y0), (x1, y1) = pts[i], pts[i + 1]
+        v = y0 + (float(x) - x0) * (y1 - y0) / (x1 - x0)
+        return _clamp(v, self.lo, self.hi)
+
+    def inverse(self, value):
+        pts = self.knots
+        v = _clamp(float(value), self.lo, self.hi)
+        if v <= pts[0][1]:
+            i = 0
+        elif v >= pts[-1][1]:
+            i = len(pts) - 2
+        else:
+            i = None
+            for j in range(len(pts) - 1):
+                if pts[j][1] <= v <= pts[j + 1][1]:
+                    i = j
+                    break
+            if i is None:
+                raise AssertionError('unreachable')
+        (x0, y0), (x1, y1) = pts[i], pts[i + 1]
+        return x0 + (v - y0) * (x1 - x0) / (y1 - y0)
+
+    def __repr__(self):
+        return f'PiecewiseLinear(knots={self.knots!r}, lo={self.lo}, hi={self.hi})'
+
+
+# libsvtav1 分段节点（2026-10-16 升级）：从 ref18 的逐锚点中位值出发，逐段累加
+# 「素材内增量中位数 / 3 crf」的斜率（3.4208 / 3.3982 / 3.3578 / 2.5666），
+# 4 位小数落表（全精度 12.506531 / 22.769058 / 32.963741 / 43.037017 / 50.736857）；
+# 刻意**不等于** .per_ref_median 原值（24.2997…）——两者是同一中位曲线的不同估计量，
+# LOO 显示稳健累积更优（§9）。
+_HDR_SVTAV1_KNOTS = (
+    (18.0, 12.5065), (21.0, 22.7691), (24.0, 32.9637), (27.0, 43.0370), (30.0, 50.7369),
+)
 HDR_EQUAL_QUALITY_OVERRIDE = {
-    # 值 = _final_fit.py 全精度产出 4 位舍入（md 决策表按 2 位展示）：
-    #   (3.268871782367299, -45.932324961854135) 等 → 见标定 json 的 codecs.*.fit
-    'libsvtav1':   (3.2689, -45.9323, 0, 63),
+    'libsvtav1':   PiecewiseLinear(_HDR_SVTAV1_KNOTS, 0, 63),
     'libaom-av1':  (2.4847, -20.7480, 0, 63),
     'librav1e':    (8.1839, -100.8176, 0, 255),
 }
@@ -348,6 +429,13 @@ def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
+def row_limits(m):
+    """换算表行的 ``(lo, hi)`` 量程；兼容 ``(a, b, lo, hi)`` 元组与 PiecewiseLinear。"""
+    if isinstance(m, PiecewiseLinear):
+        return int(m.lo), int(m.hi)
+    return int(m[2]), int(m[3])
+
+
 def from_x264_crf(codec, x264_crf, table=None):
     """libx264 CRF → 指定编码器的等效质量值；未知编码器返回 None。
 
@@ -357,6 +445,8 @@ def from_x264_crf(codec, x264_crf, table=None):
     m = (table if table is not None else get_quality_map()).get(str(codec).lower())
     if m is None:
         return None
+    if isinstance(m, PiecewiseLinear):
+        return m.forward(x264_crf)
     a, b, lo, hi = m
     return _clamp(a * float(x264_crf) + b, lo, hi)
 
@@ -369,6 +459,8 @@ def to_x264_crf(codec, value, table=None):
     m = (table if table is not None else get_quality_map()).get(str(codec).lower())
     if m is None:
         return None
+    if isinstance(m, PiecewiseLinear):
+        return _clamp(m.inverse(value), 0.0, 51.0)
     a, b, lo, hi = m
     if abs(a) < 1e-9:
         return None
@@ -412,9 +504,13 @@ def convert_crf(x264_crf):
         raise ValueError("x264 CRF 必须在 0 到 51 之间")
 
     result = []
-    for codec, (a, b, lo, hi) in get_quality_map().items():
-        value = a * x264_crf + b
-        clamped = _clamp(value, lo, hi)
+    for codec, m in get_quality_map().items():
+        if isinstance(m, PiecewiseLinear):
+            lo, hi = m.lo, m.hi
+            clamped = m.forward(x264_crf)
+        else:
+            a, b, lo, hi = m
+            clamped = _clamp(a * x264_crf + b, lo, hi)
         result.append((_DISPLAY_NAMES.get(codec, codec),
                        int(round(clamped)), (lo, hi)))
 

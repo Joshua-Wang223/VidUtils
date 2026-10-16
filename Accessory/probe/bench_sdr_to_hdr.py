@@ -31,7 +31,7 @@ bench_sdr_to_hdr.py — convert_sdr_to_hdr.py 的生产基准（2026-10-08）
 
 3. **「同质量」必须用 `--crf-ref` 锚定，且要断言目标编码器在换算表里。**
    ref=21 处**没有任何编码器是恒等映射**（实测 `from_x264_crf`）：libx265→20.74、
-   hevc_nvenc→25.50、libaom-av1→31.43、libsvtav1→22.71、librav1e→71.04。只有
+   hevc_nvenc→25.50、libaom-av1→31.43、libsvtav1→22.77、librav1e→71.04。只有
    libx264 恰好 21.00，而那是**回退到 SIZE_MAP 的副产品**、非显式声明。
    ⚠ 三行 AV1 软编为 **HDR 域**值（2026-10-16 起 convert_sdr_to_hdr 启用 HDR
    覆盖表；SDR 域旧值为 26.37 / 28.96 / 64.38）；libx265 与 NVENC 两域同值。
@@ -954,7 +954,7 @@ def resolve_native_quality(args: List[str],
     71 那个质量更差 —— 实际它只是刻度不同。
 
     为什么必须实抓：ref=21 处没有编码器是恒等映射（libx265→20.74、
-    libsvtav1→22.71…）。报告里若写「crf 21」就是把等质量说成了字面值 ——
+    libsvtav1→22.77…）。报告里若写「crf 21」就是把等质量说成了字面值 ——
     而「看起来在测其实没生效」的假绿正是本仓反复吃过的亏。
 
     ⚠ **输出路径必须是一个从未存在过的文件名**（并先 unlink）。实测踩过的坑：

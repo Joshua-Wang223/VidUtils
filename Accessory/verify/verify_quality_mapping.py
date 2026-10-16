@@ -17,6 +17,7 @@
 #   D9  HDR 域覆盖表（2026-10-16，[12] 组）：set_quality_domain('hdr') 仅把
 #       libsvtav1/libaom-av1/librav1e 三行切到 HDR 10bit PQ 域等质量标定值；
 #       默认 'sdr' 零回归，QUALITY_MAP/SIZE_MAP 本体与跨仓契约不动。
+#       libsvtav1 行为分段模型（PiecewiseLinear，2026-10-16 升级，§9）。
 #
 # 本套件是**纯 CPU** 的：本机没有 GPU ⇒ `--codec *_nvenc` 会真的走降级链，
 # 正好是 D1 要验的那条路径（见 memory/project_dual_env.md）。
@@ -869,9 +870,11 @@ chk("[11] hevc_videotoolbox b == 100", VU_CRF.SIZE_MAP['hevc_videotoolbox'][1], 
 print('  [12] HDR 域覆盖表（SDR→HDR 管线专用；默认 sdr = 零回归）')
 # 2026-10-16：convert_sdr_to_hdr 的等质量换算改走 HDR 域（HDR 10bit PQ 域 PSNR
 # 等质量标定，覆盖 libsvtav1/libaom-av1/librav1e 三行）。QUALITY_MAP/SIZE_MAP
-# 本体与跨仓契约（[9] 组断言逐条相等）不动。期望值取自标定产物
-# memory/hdr_equal_quality_calibration_10mat_20261016.json（.codecs.*.fit），
-# 独立于 convert_crf.py 的落表值（防"表错、测试跟着错"）。
+# 本体与跨仓契约（[9] 组断言逐条相等）不动。libsvtav1 行为分段模型
+# （PiecewiseLinear，2026-10-16 升级）；期望值取自标定产物
+# memory/hdr_equal_quality_calibration_10mat_20261016.json（.codecs.*.fit /
+# .codecs.libsvtav1.piecewise.knots_cuminc），独立于 convert_crf.py 的落表值
+# （防"表错、测试跟着错"）。
 _12_mode = VU_CRF.get_quality_mode()
 chk('[12] 默认域 = sdr', VU_CRF.get_quality_domain(), 'sdr')
 _fs3 = importlib.util.spec_from_file_location('vu_crf_fresh2', ROOT / 'convert_crf.py')
@@ -887,11 +890,46 @@ VU_CRF.set_quality_domain('hdr')
 chk('[12] hdr 域 @21（HDR EQ 标定新值）',
     [round(VU_CRF.from_x264_crf(c, 21), 2) for c in
      ('libsvtav1', 'libaom-av1', 'librav1e')],
-    [22.71, 31.43, 71.04])
+    [22.77, 31.43, 71.04])
 chk('[12] hdr 域 @30（锚点斜率锁定）',
     [round(VU_CRF.from_x264_crf(c, 30), 2) for c in
      ('libsvtav1', 'libaom-av1', 'librav1e')],
-    [52.13, 53.79, 144.70])
+    [50.74, 53.79, 144.70])
+# [12]-P：libsvtav1 分段模型专项（2026-10-16 升级；节点 = 稳健增量累积）
+_pw = VU_CRF.HDR_EQUAL_QUALITY_OVERRIDE['libsvtav1']
+chk('[12] libsvtav1 行为 PiecewiseLinear（分段升级）',
+    isinstance(_pw, VU_CRF.PiecewiseLinear), True)
+chk('[12] aom / rav1e 保持仿射元组（升级范围受控）',
+    [type(VU_CRF.HDR_EQUAL_QUALITY_OVERRIDE[c]) is tuple
+     for c in ('libaom-av1', 'librav1e')], [True, True])
+chk('[12] 分段节点（x=锚点，y=稳健增量累积；对照标定 json .piecewise.knots_cuminc）',
+    ([x for x, _ in _pw.knots], [round(y, 4) for _, y in _pw.knots]),
+    ([18.0, 21.0, 24.0, 27.0, 30.0], [12.5065, 22.7691, 32.9637, 43.037, 50.7369]))
+_kx = [x for x, _ in _pw.knots]
+_ky = [y for _, y in _pw.knots]
+chk('[12] 段间线性插值（18/21 中点 = 两端点均值）',
+    round(VU_CRF.from_x264_crf('libsvtav1', 19.5), 6), round((_ky[0] + _ky[1]) / 2, 6))
+chk('[12] 低端端段斜率外推（ref15；<18 未实测，见标定 §10）',
+    round(VU_CRF.from_x264_crf('libsvtav1', 15), 6),
+    round(_ky[0] + (_ky[1] - _ky[0]) * (15 - _kx[0]) / (_kx[1] - _kx[0]), 6))
+chk('[12] 高端端段斜率外推后钳位（ref63 = hi）',
+    VU_CRF.from_x264_crf('libsvtav1', 63), 63.0)
+chk('[12] 反解往返（y@18 → 18）',
+    round(VU_CRF.to_x264_crf('libsvtav1', _ky[0]), 6), 18.0)
+chk('[12] row_limits 双形态兼容',
+    (VU_CRF.row_limits(_pw), VU_CRF.row_limits(VU_CRF.HDR_EQUAL_QUALITY_OVERRIDE['libaom-av1'])),
+    ((0, 63), (0, 63)))
+chk('[12] 生产下发整数（round）：@21→23（与方案 C 相同）、@30→51（旧仿射 52）',
+    [int(round(VU_CRF.from_x264_crf('libsvtav1', r))) for r in (21, 30)], [23, 51])
+chk('[12] 分段模型单调不减（ref 12→33 下发整数）',
+    all(int(round(VU_CRF.from_x264_crf('libsvtav1', r)))
+        <= int(round(VU_CRF.from_x264_crf('libsvtav1', r + 1)))
+        for r in range(12, 33)), True)
+try:
+    VU_CRF.PiecewiseLinear(((18, 10), (18, 12)), 0, 63)
+    chk('[12] 非法节点（x 不递增）应报 ValueError', '没报错', 'ValueError')
+except ValueError:
+    pass
 chk('[12] 覆盖只动三行（libx265 / libvpx-vp9 / hevc_nvenc 逐位不变）',
     [VU_CRF.from_x264_crf(c, 21) for c in ('libx265', 'libvpx-vp9', 'hevc_nvenc')],
     _sdr_ctrl)
@@ -903,7 +941,7 @@ chk('[12] size 口径下 hdr 域不生效（SIZE_MAP 原样）',
 VU_CRF.set_quality_domain('hdr')
 VU_CRF.set_quality_mode('quality')
 chk('[12] 先域后口径切换：覆盖仍生效（无顺序依赖）',
-    round(VU_CRF.from_x264_crf('libsvtav1', 21), 2), 22.71)
+    round(VU_CRF.from_x264_crf('libsvtav1', 21), 2), 22.77)
 chk('[12] QUALITY_MAP 本体未被修改（跨仓契约安全）',
     (VU_CRF.QUALITY_MAP['libsvtav1'], VU_CRF.QUALITY_MAP['libaom-av1'],
      VU_CRF.QUALITY_MAP['librav1e']),

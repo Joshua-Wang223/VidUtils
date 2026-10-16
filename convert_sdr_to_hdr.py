@@ -187,12 +187,12 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 try:
     from convert_crf import (SIZE_MAP, QUALITY_MAP, convert_quality, from_x264_crf,
                              to_x264_crf, get_quality_mode, get_quality_map,
-                             set_quality_mode, set_quality_domain)
+                             set_quality_mode, set_quality_domain, row_limits)
 except ImportError:                       # 从其他工作目录启动时 sys.path 未必含本脚本所在目录
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from convert_crf import (SIZE_MAP, QUALITY_MAP, convert_quality, from_x264_crf,
                              to_x264_crf, get_quality_mode, get_quality_map,
-                             set_quality_mode, set_quality_domain)
+                             set_quality_mode, set_quality_domain, row_limits)
 
 VERSION = "1.0"
 
@@ -1259,7 +1259,7 @@ def literal_range(codec: str, kind: str = "crf") -> Tuple[int, int]:
 
     _qm = get_quality_map()
     m = _qm.get(key) or _qm["h264_nvenc" if kind == "cq" else "libx264"]
-    return int(m[2]), int(m[3])
+    return row_limits(m)
 
 
 def qp_scale(codec: str) -> int:

@@ -110,6 +110,9 @@ def encode(master: Path, W: int, H: int, out: Path, codec: str,
            "-f", "rawvideo", "-pixel_format", "gbrp16le",
            "-video_size", f"{W}x{H}", "-framerate", "30", "-i", str(master),
            "-vf", SETPARAMS, "-c:v", codec]
+    _t = os.environ.get("EQQ_ENC_THREADS")
+    if _t:
+        cmd += ["-threads", str(_t)]
     if flag:
         cmd += [flag, str(val)]
     cmd += ["-pix_fmt", "yuv420p10le", str(out)]

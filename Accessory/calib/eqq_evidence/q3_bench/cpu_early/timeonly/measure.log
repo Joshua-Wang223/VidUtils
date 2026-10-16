@@ -1,0 +1,22 @@
+[measure] libsvtav1 6 vs 4
+[measure] libsvtav1 done, 34 cells
+[measure] libx265 slow vs slower
+[measure] libx265 done, 34 cells
+Traceback (most recent call last):
+  File "/workspace/VidUtils/Accessory/calib/eqq_evidence/q3_bench/cpu_early/timeonly/measure_d2_time.py", line 189, in <module>
+  File "/workspace/VidUtils/Accessory/calib/eqq_evidence/q3_bench/cpu_early/timeonly/measure_d2_time.py", line 184, in main
+    print('[measure] wrote', path, flush=True)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/json/__init__.py", line 179, in dump
+    for chunk in iterable:
+  File "/usr/lib/python3.12/json/encoder.py", line 432, in _iterencode
+    yield from _iterencode_dict(o, _current_indent_level)
+  File "/usr/lib/python3.12/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/usr/lib/python3.12/json/encoder.py", line 326, in _iterencode_list
+    yield from chunks
+  File "/usr/lib/python3.12/json/encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "/usr/lib/python3.12/json/encoder.py", line 377, in _iterencode_dict
+    raise TypeError(f'keys must be str, int, float, bool or None, '
+TypeError: keys must be str, int, float, bool or None, not tuple

@@ -1,0 +1,29 @@
+libvpx-vp9 quick effort calibration — 5s clips, -crf 30, -deadline good, -b:v 0
+Source clips: anim2d_forest_src1280x720.mp4, screen_ui_code_src1280x720.mp4 (10s clips trimmed to 5s)
+CPU times = user+sys from /usr/bin/time -f CPU:%U+%S
+
+Results (file size bytes):
+  cpu-used -4  (quoted as '-4'): anim2d 2449542  / screen 415656
+  cpu-used 0:  anim2d 2054971  / screen 317747
+  cpu-used 2:  anim2d 2357692  / screen 401624
+  cpu-used 4:  anim2d 2449542  / screen 415656
+  cpu-used 6:  anim2d 2476099  / screen 422841
+
+Notes:
+- cpu-used -4 is valid for vp9 (negative allowed) and produces output; file sizes match cpu-used 4 exactly on both clips, suggesting the rate-distortion decision for -crf 30 at 5s is equivalent between -4 and 4.
+- cpu-used 0 is fastest but produces smallest files (lowest quality at same CRF).
+- cpu-used 2 is the current BASE_LOCK value (balanced tier). File sizes are between 0 and 4/6.
+- cpu-used 4 and 6 are slower; file sizes slightly larger than 2, indicating diminishing returns for higher cpu-used at this CRF/duration.
+- CPU time (anim2d): 0 ~ 226s user, 2 ~ 74s, 4 ~ 53s, 6 ~ 51s, -4 ~ 64s. So 6 is slightly faster than 4 in this quick run (noise/variance) but generally slower.
+
+Approximate quality observation (file size proxy):
+  Higher file size ≈ lower compression efficiency ≈ closer to target CRF quality. At -crf 30, larger file = more bits = closer to lossless behavior.
+  6 > 4 ≈ -4 > 2 > 0 for file size.
+
+Recommendation for balanced tier constant value (per §13.4 / preset_matrix):
+  Keep balanced at current BASE_LOCK value cpu-used 2. The jump from 2→4 yields ~4% larger file (anim2d) / ~3.5% larger file (screen) with ~40% more CPU (4 vs 2). For archive tier, 4 could be considered; for balanced, 2 is the sweet spot given diminishing size gain and CPU cost. -4 is interesting (same size as 4, faster than 0) but does not improve quality over 4; it can be reserved for preview/draft tiers if needed.
+
+Limitations:
+- Only 2 clips, 5s duration; no VMAF computed (libvmaf not invoked here).
+- Size differences are small; recommendation is preliminary pending full 3-material × 10s calibration.
+- Negative cpu-used (-4) works but is outside aom scale; vp9 allows it (scale -8~8).

@@ -797,8 +797,8 @@ cpu-used=8 → 607,995 字节      ← +19.5%
 | libx264 | preset | ultrafast | veryfast | fast | **medium** | slow | slower | veryslow | veryslow |
 | libx265 | preset | veryfast | veryfast | **faster** | **medium** | slow | slower | **slower** | **slower** |
 | libsvtav1 | preset | 13 | 11 | 9 | **8** | 5 | 3 | 1 | 0 |
-| libvpx-vp9 | cpu-used | 8 | 6 | 5 | **恒等值（待定，§13.4）** | 3 | 2 | 1 | 0 |
-| librav1e | speed | 10 | 8 | 6 | **native（暂留，§13.10.1）** | 4 | 2 | 1 | 0 |
+| libvpx-vp9 | cpu-used | 8 | 6 | 5 | **恒等值（待定，§13.4，已拍板=2）** | 3 | 2 | 1 | 0 |
+| librav1e | speed | 10 | 8 | 7 | **6（显式 -speed 6，与 native 逐字节相同，零回归）** | 4 | 2 | 1 | 0 |
 | libaom-av1 | cpu-used | 8 | 6 | 5 | **恒等值（待定，§13.4）** | 3 | 2 | 1 | 0 |
 | h264_nvenc | preset | p1 | p2 | p3 | **p4** | p5 | p6 | p7 | p7 |
 | hevc_nvenc | preset | p1 | p2 | p3 | **p4** | p5 | p6 | p7 | p7 |
@@ -814,16 +814,21 @@ cpu-used=8 → 607,995 字节      ← +19.5%
   质量轴被旁路，preset 只影响速度，slower 已足够）。
 - **libsvtav1 balanced = 8**（用户原稿为 7）：实测证据支持 8，见 §13.3.1。
 - **libvpx-vp9 补齐**（§13.4）：结构照搬 aom，但注意 vp9 的 `-cpu-used` 允许负值。
-- **librav1e balanced 暂留 native**（§13.10.1）：不是原则性冻结，而是「已标定、零成本、
-  与今天逐字节相同」；其余档的 speed 需各自配 `_EQQUAL_TIER_OVERRIDE[tier]['librav1e']` 行。
-- **libaom-av1 / libvpx-vp9 的 balanced 由具体数字改为「恒等值（待定）」**：先冻结再定值（§13.4）。
+- **librav1e preview 6→7、balanced 改显式 `-speed 6`**（§13.10.1，2026-10-16 用户修正）：
+  native（不下发）与显式 `-speed 6` 输出逐字节相同，故 balanced 保持「已标定、零成本、
+  零回归」；原 preview=6 与 native 重合、两档无差异，故 preview 上移为 7。
+  其余档的 speed 需各自配 `_EQQUAL_TIER_OVERRIDE[tier]['librav1e']` 行。
+- **libaom-av1 / libvpx-vp9 的 balanced 由具体数字改为「恒等值（待定）」**：先冻结再定值（§13.4）；vp9 已拍板 `2`（§13.14 探针），aom 待定。
 
 #### 13.10.1 rav1e 的 per-tier speed 需要各自一行表
 
-`balanced` 暂留 native 的理由：`QUALITY_MAP['librav1e'] = (7.9326, -102.2078, 0, 255)` 与
+`balanced` = **显式 `-speed 6`**（2026-10-16 用户修正，取代早先「暂留 native」的写法）：
+`QUALITY_MAP['librav1e'] = (7.9326, -102.2078, 0, 255)` 与
 `SIZE_MAP['librav1e'] = (7.0032, -80.993, 0, 255)` 都是按 **native 档**标定的
-（`convert_crf.py:191` 注释明写），所以 native = 「已标定、零成本、与今天逐字节相同」，
-不是原则性冻结。
+（`convert_crf.py:191` 注释明写），而 native（不下发 `-speed`）与显式 `-speed 6` 输出
+逐字节相同（本轮回补文档时复核实测，md5 一致）⇒ 显式下发 6 是「已标定、零成本、零回归」，
+同时消除「native 到底等于几」的歧义。`preview` 档从 6 上移为 **7**：原取值下
+preview 与 balanced（native=6）同为 6、两档无差异。
 
 其他档的 speed 需要各自的表行，范式仓库里已经有了 —— `_EQQUAL_SPEED_OVERRIDE`
 （`convert_crf.py:224-226`，speed 10 档，LOO 5.99）就是「换个 speed 另存一行」的现成样板。
@@ -831,7 +836,7 @@ cpu-used=8 → 607,995 字节      ← +19.5%
 
 ```python
 _EQQUAL_TIER_OVERRIDE = {
-    'balanced':   {},                                  # native ⇒ 直接读 QUALITY_MAP 本体
+    'balanced':   {},                                  # 直接读 QUALITY_MAP 本体（librav1e 显式 -speed 6，与 native 逐字节相同）
     'quality':    {'librav1e': (a, b, 0, 255), ...},   # speed 4 档的标定值
     'archive':    {'librav1e': (a, b, 0, 255), ...},   # speed 2 档的标定值
     ...
@@ -1002,7 +1007,7 @@ _EQQUAL_TIER_OVERRIDE = {
 - `lossless` / `near-lossless` / `draft` / `test` 四档的标定优先级最低，其 LOO 门禁应单独放宽（超低画质区 VMAF 反查条件数本来就差，§13.10 风险表）；若 LOO 超门禁，则该档保持未标定，不强制落表（§B7「LOO 超门禁禁止落表」）。
 - `archive` 档的 `libx265` `preset` 取 `slower`（§13.6 修正：`placebo` 无意义，`slower` 已足够）；若后续 D2 bench 判定 `slower` 对 `archive` 档的画质收益不划算，则回退到只靠 D1（锚点 16）的分化方案（§12.3 已拍板：回退路径留在常量层，不动代码）。
 - `_EQQUAL_TIER_OVERRIDE` 的缺键机制：非 `balanced` 档的缺值 ⇒ 自动回退 `balanced` 的 `QUALITY_MAP` 并打告警（§2.4 指纹制）；这允许逐步落地，不必一次性标定全部 8 档 × 9 编码器（§10 风险「标定工作量爆炸」的缓解方案）。
-- `librav1e` 的 `balanced` 暂留 `native`（§13.10.1 注记已同步到 `_EQQUAL_TIER_OVERRIDE` L247 注释与 `memory`）；其余档的 `speed` 需各自配表行（§13.10.1 已同步到状态文档与 `Plan/` 矩阵 §13.10 修正矩阵）。
+- `librav1e` 的 `balanced` 为显式 `-speed 6`（与 native 逐字节相同、零回归；§13.10.1 注记已同步到 `_EQQUAL_TIER_OVERRIDE` L247 注释）；其余档的 `speed` 需各自配表行（§13.10.1 已同步到状态文档与 `Plan/` 矩阵 §13.10 修正矩阵）。
 - `libaom-av1` / `libvpx-vp9` 的 `balanced` 恒等值已在状态文档与矩阵 §13.4 中登记（`cpu-used 2` / `恒等值（待定，已拍板=2）`）；完整标定值（含各档的 `(a,b,lo,hi)`）需 §B4 三环主测后填入 `_EQQUAL_TIER_OVERRIDE`（§13.4 已拍板：先冻结再定值）。
 - `_NVENC_PRESET_RETRY` 的触发率应在阶段二/三的 NVENC 测试中直接记录（§13.7、§13.8、§12.3.2 已更正：该常量为从 VE 借来的防御性兜底，不是本仓实测过的失败率）；阶段二报告应包含该触发率统计（而非假设为零）。
 - `preset_ab_report.xlsx` 与 `bench_preset_ab.py` 已在状态文档中登记（§6.15 阶段零点五 D2 预跑）；阶段三的 CPU 环应复用相同素材池与锚点（§B2），并在报告中注明「本机无 AVX2」或「本机 AVX2 启用」的环境指纹（§13.12 三机对比已同步到 `memory/project_gate_running_gotchas.md` 与状态文档 §13.7 / §13.12）。

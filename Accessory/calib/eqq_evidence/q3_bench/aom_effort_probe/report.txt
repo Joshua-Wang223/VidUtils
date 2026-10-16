@@ -1,0 +1,39 @@
+=== libaom-av1 cpu-used effort probe (quick calibration) ===
+Date: 2026-10-16
+Task: §13.14 / §13.4 — determine constant -cpu-used effort value per tier for libaom-av1
+Materials: screen_ui_code_src1280x720.mp4, anim2d_subs_tobot_src1280x720.mp4 (10s clips, -t 5)
+Command template:
+  ffmpeg -nostdin -y -hide_banner -loglevel error -i <src> -t 5 -an -c:v libaom-av1 -crf 30 -b:v 0 -cpu-used <N> -pix_fmt yuv420p <out>
+
+Results (file sizes in bytes):
+--- screen_ui_code ---
+  cpu-used=4  -> bytes=141249  (VMAF mean=99.3888)
+  cpu-used=5  -> bytes=136196  (VMAF mean=99.3819)
+  cpu-used=6  -> bytes=219763  (VMAF mean=99.2264)
+  cpu-used=8  -> bytes=219763  (VMAF mean=99.2264)
+--- anim2d_subs_tobot ---
+  cpu-used=4  -> bytes=463047
+  cpu-used=5  -> bytes=488817
+  cpu-used=6  -> bytes=515439
+  cpu-used=8  -> bytes=515439
+
+Timing (screen_ui_code, user+sys CPU time):
+  cpu-used=4  -> USER=181.1s SYS=5.7s  ELAPSED=118.9s
+  cpu-used=6  -> USER=71.2s  SYS=6.4s  ELAPSED=24.5s
+  cpu-used=8  -> USER=76.7s  SYS=6.6s  ELAPSED=27.4s
+
+Observations:
+- 6 and 8 produce identical byte sizes and identical VMAF scores for screen_ui_code, confirming the same encoding result; only speed differs (6 slightly faster than 8).
+- 4 produces much smaller files (better compression at same CRF) but uses ~2.5x CPU time vs 6, confirming lower cpu-used = slower/higher-quality preset for libaom-av1.
+- VMAF differences are small (<0.2) but 4/5 score slightly higher; 6/8 identical. Given the measurement noise on 5s clips, no significant quality divergence.
+- Current BASE_LOCK in calibrate_equal_quality.py uses -cpu-used 6 for libaom-av1.
+
+Recommendation:
+- Keep constant value 6 (per preset_matrix design: balanced uses fixed value; 6 and 8 equivalent; 4 too slow for balanced tier).
+- If archive tier requires maximum compression, 4 could be considered, but calibration should confirm per-tier tradeoffs (not done here).
+- Only libaom-av1 needs this adaptive treatment; other codecs use fixed preset/speed values.
+
+Evidence files:
+- /workspace/VidUtils/Accessory/calib/eqq_evidence/q3_bench/aom_effort_probe/outputs/
+- VMAF logs: screen_ui_code_vmaf_cpu{4,5,6,8}.json
+- Byte outputs: screen_ui_code_cpu{4,5,6,8}.mp4, anim2d_subs_tobot_cpu{4,5,6,8}.mp4

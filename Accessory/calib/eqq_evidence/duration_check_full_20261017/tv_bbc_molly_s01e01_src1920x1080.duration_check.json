@@ -1,0 +1,33 @@
+{
+  "material": "tv_bbc_molly_s01e01_src1920x1080",
+  "frames_full": 180,
+  "wh": "1280x720",
+  "v21_20f": 27.56,
+  "crf_sent_x265": 20.744,
+  "target_20f": 47.796837,
+  "target_full": 47.400214,
+  "points": [
+    {
+      "crf": 24,
+      "psnr_20f": 48.405,
+      "psnr_full": 46.406008,
+      "target_20f": 47.796837,
+      "target_full": 47.400214,
+      "delta_20f": 0.608,
+      "delta_full": -0.994,
+      "diff": -1.602
+    },
+    {
+      "crf": 28,
+      "psnr_20f": 47.721,
+      "psnr_full": 45.878663,
+      "target_20f": 47.796837,
+      "target_full": 47.400214,
+      "delta_20f": -0.076,
+      "delta_full": -1.522,
+      "diff": -1.446
+    }
+  ],
+  "max_abs_diff": 1.602,
+  "verdict": "FAIL >0.3 dB"
+}

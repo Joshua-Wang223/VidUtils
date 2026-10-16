@@ -1,0 +1,33 @@
+{
+  "material": "live_kids_seated_src1920x1080",
+  "frames_full": 180,
+  "wh": "1280x720",
+  "v21_20f": 23.41,
+  "crf_sent_x265": 20.744,
+  "target_20f": 44.809458,
+  "target_full": 44.703528,
+  "points": [
+    {
+      "crf": 20,
+      "psnr_20f": 45.144,
+      "psnr_full": 44.345717,
+      "target_20f": 44.809458,
+      "target_full": 44.703528,
+      "delta_20f": 0.335,
+      "delta_full": -0.358,
+      "diff": -0.692
+    },
+    {
+      "crf": 24,
+      "psnr_20f": 44.752,
+      "psnr_full": 43.886103,
+      "target_20f": 44.809458,
+      "target_full": 44.703528,
+      "delta_20f": -0.057,
+      "delta_full": -0.817,
+      "diff": -0.76
+    }
+  ],
+  "max_abs_diff": 0.76,
+  "verdict": "FAIL >0.3 dB"
+}

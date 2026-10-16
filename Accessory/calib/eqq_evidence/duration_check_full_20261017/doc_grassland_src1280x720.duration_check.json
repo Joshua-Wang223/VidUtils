@@ -1,0 +1,33 @@
+{
+  "material": "doc_grassland_src1280x720",
+  "frames_full": 148,
+  "wh": "1280x720",
+  "v21_20f": 24.84,
+  "crf_sent_x265": 20.744,
+  "target_20f": 51.393016,
+  "target_full": 45.933067,
+  "points": [
+    {
+      "crf": 24,
+      "psnr_20f": 51.57,
+      "psnr_full": 46.772676,
+      "target_20f": 51.393016,
+      "target_full": 45.933067,
+      "delta_20f": 0.177,
+      "delta_full": 0.84,
+      "diff": 0.663
+    },
+    {
+      "crf": 28,
+      "psnr_20f": 50.732,
+      "psnr_full": 45.776941,
+      "target_20f": 51.393016,
+      "target_full": 45.933067,
+      "delta_20f": -0.661,
+      "delta_full": -0.156,
+      "diff": 0.505
+    }
+  ],
+  "max_abs_diff": 0.663,
+  "verdict": "FAIL >0.3 dB"
+}

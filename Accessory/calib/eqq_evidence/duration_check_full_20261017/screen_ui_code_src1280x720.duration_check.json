@@ -1,0 +1,33 @@
+{
+  "material": "screen_ui_code_src1280x720",
+  "frames_full": 180,
+  "wh": "1280x720",
+  "v21_20f": 25.77,
+  "crf_sent_x265": 20.744,
+  "target_20f": 54.155213,
+  "target_full": 53.528791,
+  "points": [
+    {
+      "crf": 24,
+      "psnr_20f": 54.722,
+      "psnr_full": 52.434321,
+      "target_20f": 54.155213,
+      "target_full": 53.528791,
+      "delta_20f": 0.567,
+      "delta_full": -1.094,
+      "diff": -1.661
+    },
+    {
+      "crf": 28,
+      "psnr_20f": 53.439,
+      "psnr_full": 51.32352,
+      "target_20f": 54.155213,
+      "target_full": 53.528791,
+      "delta_20f": -0.716,
+      "delta_full": -2.205,
+      "diff": -1.489
+    }
+  ],
+  "max_abs_diff": 1.661,
+  "verdict": "FAIL >0.3 dB"
+}

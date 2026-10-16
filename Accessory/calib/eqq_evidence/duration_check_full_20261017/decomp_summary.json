@@ -1,0 +1,402 @@
+{
+ "cganim_edu_wordworld_src720x576": {
+  "material": "cganim_edu_wordworld_src720x576",
+  "frames": 150,
+  "x265": {
+   "target_20f": 49.562161,
+   "fullctx_f20": 49.834,
+   "fullctx_all": 49.527,
+   "json_target_full": 49.527
+  },
+  "points": [
+   {
+    "crf": 20,
+    "delta_full": 0.242,
+    "json_delta_full": 0.242,
+    "delta_f20_fullctx": -0.326,
+    "delta_20f_json": 0.084,
+    "context": -0.41,
+    "frame_set": 0.568,
+    "total": 0.158,
+    "svt_ctx_shift": -0.138,
+    "x265_ctx_shift": 0.271,
+    "segments_20": [
+     -0.33,
+     0.52,
+     -0.06,
+     1.09,
+     0.03,
+     -0.58,
+     1.12,
+     1.64
+    ]
+   },
+   {
+    "crf": 24,
+    "delta_full": -0.268,
+    "json_delta_full": -0.269,
+    "delta_f20_fullctx": -0.893,
+    "delta_20f_json": -0.374,
+    "context": -0.519,
+    "frame_set": 0.624,
+    "total": 0.106,
+    "svt_ctx_shift": -0.247,
+    "x265_ctx_shift": 0.271,
+    "segments_20": [
+     -0.89,
+     0.25,
+     -0.54,
+     0.35,
+     -0.55,
+     -1.06,
+     0.68,
+     1.06
+    ]
+   }
+  ]
+ },
+ "cganim_subs_src1920x1080": {
+  "material": "cganim_subs_src1920x1080",
+  "frames": 144,
+  "x265": {
+   "target_20f": 45.613885,
+   "fullctx_f20": 46.115,
+   "fullctx_all": 47.875,
+   "json_target_full": 47.875
+  },
+  "points": [
+   {
+    "crf": 24,
+    "delta_full": 0.131,
+    "json_delta_full": 0.131,
+    "delta_f20_fullctx": -0.036,
+    "delta_20f_json": 0.252,
+    "context": -0.288,
+    "frame_set": 0.167,
+    "total": -0.121,
+    "svt_ctx_shift": 0.213,
+    "x265_ctx_shift": 0.501,
+    "segments_20": [
+     -0.04,
+     0.1,
+     0.31,
+     -0.36,
+     0.46,
+     0.13,
+     0.48,
+     0.14
+    ]
+   },
+   {
+    "crf": 28,
+    "delta_full": -0.662,
+    "json_delta_full": -0.662,
+    "delta_f20_fullctx": -0.824,
+    "delta_20f_json": -0.51,
+    "context": -0.314,
+    "frame_set": 0.162,
+    "total": -0.152,
+    "svt_ctx_shift": 0.187,
+    "x265_ctx_shift": 0.501,
+    "segments_20": [
+     -0.82,
+     -0.41,
+     -0.65,
+     -1.17,
+     -0.31,
+     -0.63,
+     -0.42,
+     -0.89
+    ]
+   }
+  ]
+ },
+ "live_kids_seated_src1920x1080": {
+  "material": "live_kids_seated_src1920x1080",
+  "frames": 180,
+  "x265": {
+   "target_20f": 44.809458,
+   "fullctx_f20": 45.452,
+   "fullctx_all": 44.704,
+   "json_target_full": 44.704
+  },
+  "points": [
+   {
+    "crf": 20,
+    "delta_full": -0.358,
+    "json_delta_full": -0.358,
+    "delta_f20_fullctx": -0.663,
+    "delta_20f_json": 0.335,
+    "context": -0.998,
+    "frame_set": 0.305,
+    "total": -0.693,
+    "svt_ctx_shift": -0.355,
+    "x265_ctx_shift": 0.643,
+    "segments_20": [
+     -0.66,
+     -0.42,
+     -0.66,
+     -0.38,
+     -0.19,
+     -0.7,
+     -0.35,
+     -0.27,
+     0.42
+    ]
+   },
+   {
+    "crf": 24,
+    "delta_full": -0.817,
+    "json_delta_full": -0.817,
+    "delta_f20_fullctx": -1.055,
+    "delta_20f_json": -0.057,
+    "context": -0.998,
+    "frame_set": 0.237,
+    "total": -0.76,
+    "svt_ctx_shift": -0.354,
+    "x265_ctx_shift": 0.643,
+    "segments_20": [
+     -1.05,
+     -0.73,
+     -1.14,
+     -0.83,
+     -0.69,
+     -1.14,
+     -0.83,
+     -0.82,
+     -0.11
+    ]
+   }
+  ]
+ },
+ "live_kids_play_src1280x720": {
+  "material": "live_kids_play_src1280x720",
+  "frames": 180,
+  "x265": {
+   "target_20f": 46.39928,
+   "fullctx_f20": 46.639,
+   "fullctx_all": 46.551,
+   "json_target_full": 46.551
+  },
+  "points": [
+   {
+    "crf": 12,
+    "delta_full": 0.58,
+    "json_delta_full": 0.58,
+    "delta_f20_fullctx": -0.18,
+    "delta_20f_json": 0.672,
+    "context": -0.852,
+    "frame_set": 0.761,
+    "total": -0.092,
+    "svt_ctx_shift": -0.613,
+    "x265_ctx_shift": 0.239,
+    "segments_20": [
+     -0.18,
+     0.63,
+     0.69,
+     0.36,
+     0.23,
+     0.56,
+     0.92,
+     0.5,
+     1.52
+    ]
+   },
+   {
+    "crf": 16,
+    "delta_full": -0.423,
+    "json_delta_full": -0.423,
+    "delta_f20_fullctx": -1.164,
+    "delta_20f_json": -0.395,
+    "context": -0.769,
+    "frame_set": 0.741,
+    "total": -0.028,
+    "svt_ctx_shift": -0.53,
+    "x265_ctx_shift": 0.239,
+    "segments_20": [
+     -1.16,
+     -0.35,
+     -0.23,
+     -0.54,
+     -0.66,
+     -0.43,
+     -0.22,
+     -0.68,
+     0.54
+    ]
+   }
+  ]
+ },
+ "doc_grassland_src1280x720": {
+  "material": "doc_grassland_src1280x720",
+  "frames": 148,
+  "x265": {
+   "target_20f": 51.393016,
+   "fullctx_f20": 51.86,
+   "fullctx_all": 45.933,
+   "json_target_full": 45.933
+  },
+  "points": [
+   {
+    "crf": 24,
+    "delta_full": 0.84,
+    "json_delta_full": 0.84,
+    "delta_f20_fullctx": -0.036,
+    "delta_20f_json": 0.177,
+    "context": -0.213,
+    "frame_set": 0.875,
+    "total": 0.663,
+    "svt_ctx_shift": 0.254,
+    "x265_ctx_shift": 0.467,
+    "segments_20": [
+     -0.04,
+     0.04,
+     -0.28,
+     0.27,
+     1.02,
+     0.59,
+     1.49,
+     2.01
+    ]
+   },
+   {
+    "crf": 28,
+    "delta_full": -0.156,
+    "json_delta_full": -0.156,
+    "delta_f20_fullctx": -0.863,
+    "delta_20f_json": -0.661,
+    "context": -0.202,
+    "frame_set": 0.707,
+    "total": 0.505,
+    "svt_ctx_shift": 0.265,
+    "x265_ctx_shift": 0.467,
+    "segments_20": [
+     -0.86,
+     -0.78,
+     -1.31,
+     -0.73,
+     0.17,
+     -0.42,
+     0.47,
+     0.77
+    ]
+   }
+  ]
+ },
+ "screen_ui_code_src1280x720": {
+  "material": "screen_ui_code_src1280x720",
+  "frames": 180,
+  "x265": {
+   "target_20f": 54.155213,
+   "fullctx_f20": 54.435,
+   "fullctx_all": 53.529,
+   "json_target_full": 53.529
+  },
+  "points": [
+   {
+    "crf": 24,
+    "delta_full": -1.094,
+    "json_delta_full": -1.094,
+    "delta_f20_fullctx": 0.313,
+    "delta_20f_json": 0.567,
+    "context": -0.254,
+    "frame_set": -1.407,
+    "total": -1.661,
+    "svt_ctx_shift": 0.026,
+    "x265_ctx_shift": 0.28,
+    "segments_20": [
+     0.31,
+     -0.79,
+     -0.95,
+     -0.46,
+     -1.05,
+     -1.96,
+     -2.1,
+     -1.84,
+     -0.16
+    ]
+   },
+   {
+    "crf": 28,
+    "delta_full": -2.205,
+    "json_delta_full": -2.205,
+    "delta_f20_fullctx": -1.026,
+    "delta_20f_json": -0.716,
+    "context": -0.31,
+    "frame_set": -1.179,
+    "total": -1.489,
+    "svt_ctx_shift": -0.03,
+    "x265_ctx_shift": 0.28,
+    "segments_20": [
+     -1.03,
+     -1.88,
+     -2.45,
+     -1.72,
+     -2.17,
+     -2.75,
+     -2.96,
+     -2.86,
+     -1.41
+    ]
+   }
+  ]
+ },
+ "tv_bbc_molly_s01e01_src1920x1080": {
+  "material": "tv_bbc_molly_s01e01_src1920x1080",
+  "frames": 180,
+  "x265": {
+   "target_20f": 47.796837,
+   "fullctx_f20": 48.536,
+   "fullctx_all": 47.4,
+   "json_target_full": 47.4
+  },
+  "points": [
+   {
+    "crf": 24,
+    "delta_full": -0.994,
+    "json_delta_full": -0.994,
+    "delta_f20_fullctx": -1.02,
+    "delta_20f_json": 0.608,
+    "context": -1.628,
+    "frame_set": 0.026,
+    "total": -1.602,
+    "svt_ctx_shift": -0.889,
+    "x265_ctx_shift": 0.739,
+    "segments_20": [
+     -1.02,
+     -0.81,
+     -1.79,
+     -1.03,
+     -1.0,
+     -1.6,
+     -0.72,
+     -1.39,
+     -0.18
+    ]
+   },
+   {
+    "crf": 28,
+    "delta_full": -1.521,
+    "json_delta_full": -1.522,
+    "delta_f20_fullctx": -1.513,
+    "delta_20f_json": -0.076,
+    "context": -1.437,
+    "frame_set": -0.009,
+    "total": -1.445,
+    "svt_ctx_shift": -0.697,
+    "x265_ctx_shift": 0.739,
+    "segments_20": [
+     -1.51,
+     -1.36,
+     -2.21,
+     -1.51,
+     -1.44,
+     -2.03,
+     -1.24,
+     -1.94,
+     -0.9
+    ]
+   }
+  ]
+ }
+}

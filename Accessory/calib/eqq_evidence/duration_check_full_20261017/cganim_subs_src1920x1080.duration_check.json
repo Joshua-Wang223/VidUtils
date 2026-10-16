@@ -1,0 +1,33 @@
+{
+  "material": "cganim_subs_src1920x1080",
+  "frames_full": 144,
+  "wh": "1280x720",
+  "v21_20f": 25.32,
+  "crf_sent_x265": 20.744,
+  "target_20f": 45.613885,
+  "target_full": 47.875273,
+  "points": [
+    {
+      "crf": 24,
+      "psnr_20f": 45.866,
+      "psnr_full": 48.006585,
+      "target_20f": 45.613885,
+      "target_full": 47.875273,
+      "delta_20f": 0.252,
+      "delta_full": 0.131,
+      "diff": -0.121
+    },
+    {
+      "crf": 28,
+      "psnr_20f": 45.104,
+      "psnr_full": 47.213188,
+      "target_20f": 45.613885,
+      "target_full": 47.875273,
+      "delta_20f": -0.51,
+      "delta_full": -0.662,
+      "diff": -0.152
+    }
+  ],
+  "max_abs_diff": 0.152,
+  "verdict": "PASS ≤0.3 dB"
+}

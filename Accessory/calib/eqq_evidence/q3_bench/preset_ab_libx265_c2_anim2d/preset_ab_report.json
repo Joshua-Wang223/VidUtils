@@ -1,0 +1,58 @@
+{
+ "environment": {
+  "cpu_model": "Intel(R) Xeon(R) Platinum 8255C CPU @ 2.50GHz",
+  "cores": 8,
+  "cpuinfo_avx2": true,
+  "cpuinfo_avx512f": true,
+  "x265_asm": "MMX2 SSE2Fast LZCNT SSSE3 SSE4.2 AVX FMA3 BMI2 AVX2",
+  "x265_uses_avx2": true,
+  "ffmpeg": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+  "load_at_start": [
+   9.66,
+   27.85,
+   21.61
+  ],
+  "concurrency": 2,
+  "runs_per_cell": 2,
+  "warmup": 1,
+  "anchor_crf": 24,
+  "load_at_end": [
+   8.53,
+   13.95,
+   17.33
+  ]
+ },
+ "params": {
+  "codec": "libx265",
+  "preset_a": "slow",
+  "preset_b": "slower",
+  "anchor": 24,
+  "runs": 2,
+  "warmup": 1
+ },
+ "n_materials": 1,
+ "per_material": [
+  {
+   "material": "m/anim2d_forest_src1280x720.mp4",
+   "wall_a_s": 42.945,
+   "wall_b_s": 110.875,
+   "cpu_a_s": 135.725,
+   "cpu_b_s": 611.83,
+   "cores_a": 3.16,
+   "cores_b": 5.51,
+   "wall_ratio": 2.581790662475259,
+   "cpu_ratio": 4.507865168539326,
+   "wall_spread": 2.6500000000000057
+  }
+ ],
+ "summary": {
+  "wall_ratio_geomean": 2.581790662475259,
+  "cpu_ratio_geomean": 4.507865168539326,
+  "cpu_ratio_median": 4.507865168539326,
+  "cpu_ratio_min": 4.507865168539326,
+  "cpu_ratio_max": 4.507865168539326,
+  "cores_a_median": 3.16,
+  "cores_b_median": 5.51,
+  "verdict_vs_1_5x": "over"
+ }
+}

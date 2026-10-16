@@ -1,0 +1,67 @@
+{
+ "clip": "/workspace/input_videos/eqq_calib/10s/anim2d_forest_src1280x720.mp4",
+ "crf": 24,
+ "arms": {
+  "auto": null,
+  "noavx2": 1023
+ },
+ "capabilities": {
+  "auto": "MMX2 SSE2Fast LZCNT SSSE3 SSE4.2 AVX FMA3 BMI2 AVX2",
+  "noavx2": "MMX2 SSE2 LZCNT SSSE3 SSE4.2 AVX"
+ },
+ "runs": 3,
+ "results": {
+  "auto|slow": {
+   "cpu_median": 127.11,
+   "wall_median": 21.49,
+   "loads": [
+    5.38,
+    6.53,
+    7.66
+   ],
+   "n": 3
+  },
+  "auto|slower": {
+   "cpu_median": 610.25,
+   "wall_median": 110.43,
+   "loads": [
+    7.58,
+    7.94,
+    6.44
+   ],
+   "n": 3
+  },
+  "noavx2|slow": {
+   "cpu_median": 152.95000000000002,
+   "wall_median": 24.85,
+   "loads": [
+    7.36,
+    7.12,
+    7.05
+   ],
+   "n": 3
+  },
+  "noavx2|slower": {
+   "cpu_median": 748.1800000000001,
+   "wall_median": 130.39,
+   "loads": [
+    6.94,
+    7.44,
+    7.32
+   ],
+   "n": 3
+  }
+ },
+ "load_at_end": [
+  7.32,
+  7.18,
+  5.78
+ ],
+ "delta_cpu_pct": {
+  "slow": 20.32884902840062,
+  "slower": 22.60221220811145
+ },
+ "ratio_auto": 4.800959798599638,
+ "ratio_noavx2": 4.891663942464858,
+ "ratio_drift_pct": 1.8892918847534856
+}

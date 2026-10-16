@@ -2455,6 +2455,18 @@ SELFTEST=1 bash Accessory/test/check_readme_refs.sh   # 自检判据本身（五
   （Hunk 段落建太早 / 两线增行相邻时 git 只给一个变更组、无关键词的续行要沿用上一行 /
   无关键词的替换组必须标 `?` / `@@` 头重算丢换行与计数少算 —— 后两个被 `git apply --recount`
   掩盖，只有与 `git diff` 逐字节对比才暴露）
+- [preset A/B 耗时基准的事实（并发与 AVX2 的影响）](memory/project_preset_ab_timing.md)
+  —— `bench_preset_ab.py` 实测：耗时/比值基准**必须串行 c=1**（并发把 slow→slower 的 CPU 比
+  压低 ~7%、墙钟放大数倍；且生产是单文件编码）；本机 8255C 串行 CPU 比 **4.68** ≈ 无 AVX2 基线
+  4.67；AVX2 反证（`asm=1023` vs auto）显示 AVX2 只影响**绝对耗时 +21%**、比值仅 **+1.9%**；
+  另记 x265 `asm` 掩码的坑（强开 AMD 专属 XOP/FMA4 在 Intel 上 **SIGILL=132**，只有 slow/slower
+  的 RD 路径会触发，`ultrafast` 探针漏判）。证据：`Accessory/calib/eqq_evidence/q3_bench/`
+- [容器超时打断 git pull 会留下 0 字节工作区文件（含恢复法）](memory/project_timeout_interrupted_pull.md)
+  —— 2026-10-16 实测：一批已跟踪文件变 0 字节但 HEAD/索引完好（`git status` 显示 ` M`），
+  根因是 `git pull` fast-forward 被容器超时打断；判据 = **0 字节文件集合 == `diff ORIG_HEAD..HEAD`**
+  且与 `.git/ORIG_HEAD`/`FETCH_HEAD` 的 **mtime 同刻**；用 `git checkout HEAD -- <文件>` 恢复
+  （**zsh 下不会按换行分词，要逐文件**；恢复后跑 `compile()`/`json.load()` 校验）。当时中招 18 个，
+  含 `vidcrop_hwaccel.py` 主脚本 —— 别只看用户提到的目录
 
 写法沿用本机 codebuddy 自动记忆的约定：frontmatter 带 `name` / `description` / `type`，
 正文对 project / feedback 类用「事实 → **Why:** → **How to apply:**」的结构，

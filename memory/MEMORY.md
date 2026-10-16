@@ -237,3 +237,5 @@
 - [写测试/清理代码的两个自身踩坑](feedback_test_and_cleanup_selftraps.md) — 作用域变量缺失把清理 bug 变成主流程失败；`--frames N` 超素材帧数产生假失败
 - [用户要求「中间编码提质」时的实测反证](feedback_verify_user_technical_premise.md) — burn 实测**不存在中间编码**（libass 直吃 gbrp16le）、烧字幕只增 1% 码率 ⇒ 前提不成立时摆证据让用户选 A/B
 - [子 agent 的结论必须自己复核](feedback_subagent_verification.md) — 它也会编造事实（报「文件不存在」/引用不存在的字段）；长跑 workflow 返回 null 不等于「没问题」
+- [preset A/B 耗时基准的事实（并发与 AVX2 的影响）](project_preset_ab_timing.md) — 耗时/比值基准必须串行 c=1（并发把 CPU 比压低 ~7%、墙钟放大数倍）；8255C 串行 slow→slower CPU 比 4.68≈无AVX2基线 4.67；AVX2 只影响绝对耗时(+21%)、比值仅 +1.9%；x265 asm 掩码强开 XOP/FMA4 会 SIGILL(132)，探针必须用真实 preset
+- [容器超时打断 git pull 会留下 0 字节工作区文件](project_timeout_interrupted_pull.md) — 一批已跟踪文件变 0B 但 HEAD 完好（`git status` 显示 M）；判据=0字节集合==diff ORIG_HEAD..HEAD 且 mtime 同刻；`git checkout HEAD -- <文件>` 恢复（zsh 不会按换行分词，要逐文件）

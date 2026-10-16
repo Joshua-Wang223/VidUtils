@@ -183,12 +183,27 @@ def main():
     ap.add_argument('--anchor', type=int, default=24)
     ap.add_argument('--runs', type=int, default=3)
     ap.add_argument('--warmup', type=int, default=1)
-    ap.add_argument('--concurrency', type=int, default=8)
+    ap.add_argument('--concurrency', type=int, default=None,
+                    help='最大并发工作数（默认 ≤ 逻辑核数/2，防超订污染；可手动覆盖）')
     ap.add_argument('--pool', default='/workspace/input_videos/eqq_calib')
     ap.add_argument('--max-load', type=float, default=8.0,
                     help='开测时 1 分钟负载超过此值即拒绝跑（防外部争用污染）')
     ap.add_argument('--outdir', default=None)
     args = ap.parse_args()
+
+    # ── 并发守卫：默认 ≤ 逻辑核数/2，防超订污染（§13.12 教训）─────────
+    logical_cores = os.cpu_count() or 8
+    default_max = max(1, logical_cores // 2)
+    if args.concurrency is None:
+        args.concurrency = default_max
+    actual = min(args.concurrency, default_max)
+    if actual < args.concurrency:
+        print('[守卫] 用户指定并发 %d > 默认上限 %d（逻辑核/2），已收缩至 %d。'
+              % (args.concurrency, default_max, actual))
+        args.concurrency = actual
+    else:
+        args.concurrency = args.concurrency
+    print('[守卫] 采用并发 %d（逻辑核 %d / 上限 %d）' % (args.concurrency, logical_cores, default_max))
 
     outdir = args.outdir or os.path.join(
         '/workspace/VidUtils/Accessory/calib/eqq_evidence/q3_bench',

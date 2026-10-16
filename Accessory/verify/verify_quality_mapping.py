@@ -887,14 +887,14 @@ _sdr21 = [round(VU_CRF.from_x264_crf(c, 21), 2) for c in
 _sdr_ctrl = [VU_CRF.from_x264_crf(c, 21) for c in ('libx265', 'libvpx-vp9', 'hevc_nvenc')]
 chk('[12] sdr 域 @21（QUALITY_MAP 旧值）', _sdr21, [28.96, 26.37, 64.38])
 VU_CRF.set_quality_domain('hdr')
-chk('[12] hdr 域 @21（HDR EQ 标定新值；§10 后 svtav1/aom 分段、rav1e 新仿射）',
+chk('[12] hdr 域 @21（HDR EQ 标定；§10 后 svtav1 候选 B 不变、aom 分段、rav1e 新仿射）',
     [round(VU_CRF.from_x264_crf(c, 21), 2) for c in
      ('libsvtav1', 'libaom-av1', 'librav1e')],
-    [22.64, 31.11, 73.66])
-chk('[12] hdr 域 @30（锚点斜率锁定）',
+    [22.77, 31.11, 73.66])
+chk('[12] hdr 域 @30（锚点斜率锁定；svtav1 候选 B 不变 50.74）',
     [round(VU_CRF.from_x264_crf(c, 30), 2) for c in
      ('libsvtav1', 'libaom-av1', 'librav1e')],
-    [50.61, 52.77, 142.77])
+    [50.74, 52.77, 142.77])
 # [12]-P：svtav1 / aom 分段模型专项（svtav1 §9 升级、§10 前置 ref15；aom §10 升级）
 _pw = VU_CRF.HDR_EQUAL_QUALITY_OVERRIDE['libsvtav1']
 _pw_aom = VU_CRF.HDR_EQUAL_QUALITY_OVERRIDE['libaom-av1']
@@ -954,7 +954,7 @@ chk('[12] size 口径下 hdr 域不生效（SIZE_MAP 原样）',
 VU_CRF.set_quality_domain('hdr')
 VU_CRF.set_quality_mode('quality')
 chk('[12] 先域后口径切换：覆盖仍生效（无顺序依赖）',
-    round(VU_CRF.from_x264_crf('libsvtav1', 21), 2), 22.64)
+    round(VU_CRF.from_x264_crf('libsvtav1', 21), 2), 22.77)
 chk('[12] QUALITY_MAP 本体未被修改（跨仓契约安全）',
     (VU_CRF.QUALITY_MAP['libsvtav1'], VU_CRF.QUALITY_MAP['libaom-av1'],
      VU_CRF.QUALITY_MAP['librav1e']),

@@ -1,0 +1,64 @@
+{
+  "topic": "SDR→HDR 管线等质量重标定（母版锚 + HDR 域 PSNR）—— crf-ref 21 锚点结果",
+  "date": "2026-10-16",
+  "method": {
+    "anchor": "HDR 母版（模型输出的无压缩 gbrp16le 帧 → libx265 -qp 0 无损编码）",
+    "metric": "PSNR，HDR 10bit PQ 域直比，**不经 tonemap**",
+    "target": "libx265 @ crf-ref 21（现表基准档）的 HDR 域 PSNR",
+    "solve": "在「原生质量值 → PSNR」曲线上线性插值出等于目标 PSNR 的点",
+    "why": "三步收敛实验证明 tonemap 后 VMAF/PSNR 都无判据分辨率（斜率 +0.005~−0.020），HDR 域 PSNR 为 +0.190"
+  },
+
+  "materials_5": [
+    "cganim_edu_wordworld_src720x576 (三维动画)",
+    "doc_grassland_src1280x720 (实拍纪录片)",
+    "live_kids_play_src1280x720 (实拍+播控图形)",
+    "screen_ui_code_src1280x720 (屏幕录制 UI)",
+    "tv_bbc_molly_s01e01_src1920x1080 (实拍剧集)"
+  ],
+  "frames_per_material": 20,
+
+  "results": {
+    "per_material": {
+      "cganim_wordworld": {"target_psnr": 49.562, "libsvtav1": 20.7, "libaom-av1": 29.1, "librav1e": 77.3},
+      "doc_grassland":    {"target_psnr": 51.393, "libsvtav1": 24.8, "libaom-av1": 31.4, "librav1e": 56.6},
+      "live_kids_play":   {"target_psnr": 46.399, "libsvtav1": 14.5, "libaom-av1": 31.4, "librav1e": 76.0},
+      "screen_ui_code":   {"target_psnr": 54.155, "libsvtav1": 25.8, "libaom-av1": 33.4, "librav1e": 50.4},
+      "tv_bbc_molly":     {"target_psnr": 47.797, "libsvtav1": 27.6, "libaom-av1": 33.9, "librav1e": 64.8}
+    },
+    "median": {"libsvtav1": {"flag": "-crf", "value": 24.8, "spread": [14.5, 27.6]},
+               "libaom-av1": {"flag": "-crf", "value": 31.4, "spread": [29.1, 33.9]},
+               "librav1e":  {"flag": "-qp",  "value": 64.8, "spread": [50.4, 77.3]}}
+  },
+
+  "comparison_to_current_table": {
+    "libsvtav1": {"current_crf21": 28.96, "new": 24.8, "delta": "-14%", "meaning": "现表**过于宽松**（画质不足），需下调 crf 提高质量"},
+    "libaom-av1": {"current_crf21": 26.37, "new": 31.4, "delta": "+19%", "meaning": "现表**过于保守**（画质过剩），可上调 crf 省码率"},
+    "librav1e": {"current_crf21": 64.38, "new": 64.8, "delta": "+1%", "meaning": "现表基本正确，无需改"}
+  },
+
+  "critical_caveats": [
+    "**只测了 crf-ref 21 这一个锚点**。libsvtav1/libaom-av1 的表是**严格仿射**（拟合残差 0.000），单点修正只校准了截距 b，**斜率 a 未验证**；要改整条线需 ≥2 个锚点（如 18 与 21）",
+    "librav1e 的表**不是仿射**（残差 3.76，离散粗表：crf18~21 只对应 qp 41/49/56/64），单点修正意义有限",
+    "**素材间离散度大**：libsvtav1 跨 5 素材 14.5~27.6（13 个单位）、librav1e 50.4~77.3（27 个单位）。5 个素材不足以钉死取值；VE 那侧用的是 17 素材 + LOO 验证",
+    "本口径与 `eqq_calib` 那套 **SDR 直编 VMAF** 不是同一件事，结果**不可互相替代**"
+  ],
+
+  "next_steps": [
+    "跑第二锚点（crf-ref 18）求斜率 a，确认是「只平移截距」还是「斜率也错」",
+    "扩素材数到 10+ 收敛离散度，或改用 LOO 交叉验证给出置信区间",
+    "librav1e 表本身离散，宜先重建该表再谈修正"
+  ],
+
+  "artifacts": [
+    "Accessory/probe/calibrate_hdr_equal_quality.py（标定器，支持 EQQ_TARGET_CRF / EQQ_GRID）",
+    "Accessory/probe/_extend_hdr_eqq.py（增量补扫）",
+    "Accessory/temp/hdr_eqq/{per-material}.json 与 aggregate.json"
+  ],
+
+  "bugs_hit": [
+    "-qp 0 经 --extra-args 下发未生效（model 模式下 libx265 的 -crf 与 -qp 冲突）⇒ 改为主动绕开编码取模型输出",
+    "母版把 planar gbrp16le 当逐像素交错解析 ⇒ 三通道错位，产物仅 1~3KB；必须用被测脚本的 raw_to_frame()",
+    "aggregate 把自己的 aggregate.json 也读进去了"
+  ]
+}

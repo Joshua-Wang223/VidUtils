@@ -301,8 +301,8 @@ def get_quality_mode():
 def get_quality_map():
     """返回当前生效的 {codec: 表行}。
 
-    表行通常为 ``(a, b, lo, hi)``；HDR 域 quality 口径下 libsvtav1 为
-    :class:`PiecewiseLinear`（2026-10-16 分段升级）。取量程请用
+    表行通常为 ``(a, b, lo, hi)``；HDR 域 quality 口径下 libsvtav1 与
+    libaom-av1 为 :class:`PiecewiseLinear`（2026-10-16 分段升级）。取量程请用
     :func:`row_limits`，不要直接按下标解包。
     """
     return _ACTIVE_MAP
@@ -313,7 +313,7 @@ def get_quality_map():
 #
 #  口径与 QUALITY_MAP（SDR 直编 + VMAF 反查）**不同域**：锚 = HDR 母版（模型
 #  输出的无压缩帧 → libx265 `-qp 0` 无损），度量 = **HDR 10bit PQ 域 PSNR 直比**
-#  （不 tonemap）。10 素材 × 锚点 18/21/24/27/30 × 3 编码器实测重标 ⇒ 现表在该域
+#  （不 tonemap）。10 素材 × 锚点 15/18/21/24/27/30 × 3 编码器实测重标 ⇒ 现表在该域
 #  系统性偏差（svtav1 连斜率都要改 2.3961→3.2689，差 36%，单次平移修不好）。
 #  完整标定与决策记录：memory/hdr_equal_quality_calibration_10mat_20261016.md
 #
@@ -322,7 +322,14 @@ def get_quality_map():
 #  累积（每段 Theil–Sen 斜率），对全程水平离群素材不敏感；LOO 全网格中枢优于仿射
 #  （中位 2.31→2.05 qp）而最坏点持平（9.0 qp）；直接连逐锚点中位值的变体中位更优
 #  （1.84）但最坏点劣化（10.6），依「首先保质量不退」取前者。节点推导见 §9 与
-#  Accessory/probe/_piecewise_check.py；aom / rav1e 维持仿射（LOO 无一致增益）。
+#  Accessory/probe/_piecewise_check.py。
+#  ref15 补测后（§10）的两处更新：
+#  · svtav1 前置 ref15 节点 = 5.9812（实测中位）；18~30 节点**保持不变**（候选 B：
+#    LOO 新域 15≤ref<18 中枢/最坏 1.90/6.39 优于重锚版 2.01/6.83，旧域 18~30 持平，
+#    且已发布整数表 18~33 零改动）；
+#  · libaom-av1 同因升级为分段（候选 A 稳健累积 6 节点）：LOO qp 中枢 2.30→2.00、
+#    最坏 7.06→5.86（两区皆优）；dB 最坏 1.89→2.17（单素材 screen_ui 陡斜率处，
+#    见 §10 备注）。rav1e 维持仿射（最坏点 29.4→31.5 不降，§9 判据不满足）。
 #
 #  ⚠ 只覆盖这已标定的三行；其余编码器（含 libx265 —— 它是锚、两域同表）不动。
 #  ⚠ librav1e 为 **native 档**（不下发 -speed）标定，与 convert_sdr_to_hdr.py
@@ -332,8 +339,8 @@ def get_quality_map():
 class PiecewiseLinear:
     """分段线性换算模型（表行 ``(a, b, lo, hi)`` 的替代形态，接口互换）。
 
-    仅 HDR 域 libsvtav1 行使用（2026-10-16 分段升级，见上方注释与标定
-    memory §9）：段内线性插值；x 超出首/末节点时按端段斜率线性外推；
+    仅 HDR 域 libsvtav1 / libaom-av1 行使用（2026-10-16 分段升级，见上方注释与
+    标定 memory §9/§10）：段内线性插值；x 超出首/末节点时按端段斜率线性外推；
     输出钳到 ``[lo, hi]``。``inverse()`` 为反解（y 严格递增故可逆），
     语义与 :func:`to_x264_crf` 一致。
     """
@@ -392,18 +399,26 @@ class PiecewiseLinear:
         return f'PiecewiseLinear(knots={self.knots!r}, lo={self.lo}, hi={self.hi})'
 
 
-# libsvtav1 分段节点（2026-10-16 升级）：从 ref18 的逐锚点中位值出发，逐段累加
-# 「素材内增量中位数 / 3 crf」的斜率（3.4208 / 3.3982 / 3.3578 / 2.5666），
-# 4 位小数落表（全精度 12.506531 / 22.769058 / 32.963741 / 43.037017 / 50.736857）；
-# 刻意**不等于** .per_ref_median 原值（24.2997…）——两者是同一中位曲线的不同估计量，
-# LOO 显示稳健累积更优（§9）。
+# libsvtav1 分段节点（2026-10-16 升级，§10 后为 6 节点）：18~30 沿用 §9 的「稳健
+# 增量累积」节点（自 ref18 中位值起逐段累加素材内增量中位数）；ref15 节点 = 该锚
+# 实测中位值 5.9812（候选 B：LOO 见 §10 与 _piecewise_check.py，重锚版未采纳）。
+# 全精度（json .codecs.libsvtav1.piecewise）：5.981214 / 12.506531 / 22.769058 /
+# 32.963741 / 43.037017 / 50.736857；4 位小数落表。
+# 段斜率 2.1751 / 3.4208 / 3.3982 / 3.3578 / 2.5666 crf；端段斜率外推、钳 [0,63]。
 _HDR_SVTAV1_KNOTS = (
-    (18.0, 12.5065), (21.0, 22.7691), (24.0, 32.9637), (27.0, 43.0370), (30.0, 50.7369),
+    (15.0, 5.9812), (18.0, 12.5065), (21.0, 22.7691),
+    (24.0, 32.9637), (27.0, 43.0370), (30.0, 50.7369),
+)
+# libaom-av1 分段节点（2026-10-16 §10 升级为分段）：候选 A 稳健增量累积 6 节点
+# （自 ref15 中位值起逐段累加；全精度见 json .codecs.libaom-av1.piecewise.knots_cuminc）。
+_HDR_AOM_KNOTS = (
+    (15.0, 14.4219), (18.0, 23.1510), (21.0, 31.1133),
+    (24.0, 38.5473), (27.0, 46.0841), (30.0, 52.7733),
 )
 HDR_EQUAL_QUALITY_OVERRIDE = {
     'libsvtav1':   PiecewiseLinear(_HDR_SVTAV1_KNOTS, 0, 63),
-    'libaom-av1':  (2.4847, -20.7480, 0, 63),
-    'librav1e':    (8.1839, -100.8176, 0, 255),
+    'libaom-av1':  PiecewiseLinear(_HDR_AOM_KNOTS, 0, 63),
+    'librav1e':    (7.6785, -87.5894, 0, 255),
 }
 
 _HDR_DOMAIN = 'sdr'          # 'sdr'（默认）| 'hdr'

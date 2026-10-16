@@ -128,7 +128,8 @@ def main() -> int:
                if row["vals"].get((codec, ref)) is not None]
         a = fit_pooled_a(pts)
         b = fit_b(rows, a, codec, refs)
-        # 分段候选（2026-10-16 §9）：稳健增量累积（LOO 采纳）与逐锚点中位值连线（对照）
+        # 分段候选（2026-10-16 §9/§10）：稳健增量累积（§9 采纳；§10 起 aom 亦采纳）
+        # 与逐锚点中位值连线（对照）；另出「候选 B」= 旧 18~30 累积 + 前置 ref15 中位值
         knots_med = [(ref, med[ref]) for ref in refs if ref in med]
         knots_cum = [(knots_med[0][0], knots_med[0][1])]
         for (r0, _), (r1, _) in zip(knots_med, knots_med[1:]):
@@ -136,6 +137,17 @@ def main() -> int:
                       if row["vals"].get((codec, r0)) is not None
                       and row["vals"].get((codec, r1)) is not None]
             knots_cum.append((r1, knots_cum[-1][1] + st.median(deltas)))
+        knots_old = None
+        if len(knots_med) >= 3 and knots_med[0][0] == 15:
+            body = [(r, med[r]) for r in refs if r >= 18 and r in med]
+            ys_old = [body[0][1]]
+            for (r0, _), (r1, _) in zip(body, body[1:]):
+                deltas = [row["vals"][(codec, r1)] - row["vals"][(codec, r0)] for row in rows
+                          if row["vals"].get((codec, r0)) is not None
+                          and row["vals"].get((codec, r1)) is not None]
+                ys_old.append(ys_old[-1] + st.median(deltas))
+            knots_old = [(knots_med[0][0], knots_med[0][1])] + \
+                [(r, y) for (r, _), y in zip(body, ys_old)]
         cur_a, cur_b, lo, hi = QUALITY_MAP[codec]
         f = lambda A, B, r: A * r + B  # noqa: E731
         print(f"  新仿射 a={a:.4f} b={b:.2f}   → " +
@@ -175,6 +187,8 @@ def main() -> int:
         print(f"  LOO |ΔV|: 中位 {st.median(loo_v):.1f}  P90 {loo_v[int(len(loo_v) * 0.9) - 1]:.1f}  max {loo_v[-1]:.1f}   "
               f"| dB 当量: 中位 {st.median(loo_db):.2f}  P90 {loo_db[int(len(loo_db) * 0.9) - 1]:.2f}  max {loo_db[-1]:.2f} dB")
         print("  分段节点（稳健累积）: " + " / ".join(f"ref{r} {y:.4f}" for r, y in knots_cum))
+        if knots_old:
+            print("  分段节点（候选 B 旧节点+前置）: " + " / ".join(f"ref{r} {y:.4f}" for r, y in knots_old))
         result["codecs"][codec] = {
             "flag": DISPLAY[codec], "per_ref_median": {str(k): v for k, v in med.items()},
             "fit": {"a": a, "b": b, "lo": lo, "hi": hi},
@@ -190,8 +204,12 @@ def main() -> int:
             "piecewise": {
                 "knots_median": knots_med,
                 "knots_cuminc": knots_cum,
-                "note": "knots_cuminc = 逐段素材内增量中位数累积（稳健；LOO 采纳，见 md §9）；"
-                        "knots_median = 逐锚点中位值连线（对照，LOO 最坏点劣化，未采纳）",
+                "knots_cuminc_old": knots_old,
+                "note": "knots_cuminc = 逐段素材内增量中位数累积（稳健；§9 svtav1 采纳、§10 aom 采纳）；"
+                        "knots_median = 逐锚点中位值连线（对照，LOO 最坏点劣化，未采纳）；"
+                        "knots_cuminc_old（§10）= 旧 18~30 累积节点 + 前置 ref15 中位值（svtav1 候选 B，"
+                        "LOO 新域更优且 18~33 下发整数零改动，已采纳）；"
+                        "产出与决策见 _piecewise_check.py 与 md §9/§10",
             },
         }
     result["dropped_points"] = {row["material"]: row["dropped"] for row in rows

@@ -956,11 +956,57 @@ _EQQUAL_TIER_OVERRIDE = {
    - 分阶段：先在 CPU 机器上完成所有编码器的 per‑tier 标定；若后期有 GPU 可用，可做交叉核验（如使用 NVENC 的输出作为参考基线，但主要标定仍以 CPU 为准）。
    - 产出：更新 `vidcrop_hwaccel.py`（或其他放置 `_EQQUAL_TIER_OVERRIDE` 的文件）中的字典；并在 `Plan/` 中的矩阵（§13.10）更新对应列的取值（例如 libx264 的 test/draft/preview 等列将从 “ ultrafast/veryfast/fast” 更新为测得的等价 preset；librav1e 的速度列同样更新）。
 
-**测试进度与里程碑**
-   - 阶段零（CPU 基线）：完成上述 1‑4 项的 CPU 基线测试和代码改动；预计时长 1‑2 周（依据可用素材与机器负载）。
-   - 阶段一（T4 验证）：若有 T4 机器可用，重复 NVENC 三行的可用性测试（项 2），以及使用 T4 上的 NVENC 输出作为参考核验 aom/vp9 的恒等 effort（项 1）和 libx264/rav1e 的 per‑tier 标定（项 4）是否在 GPU 加速路径下保持画质等价（可选）。
-   - 阶段二（L40 验证）：同上，在 L40 上确认更高编码效率或更低延迟是否影响 preset 取值。
-   - 每阶段结束后更新 `Plan/` 文档中的矩阵与备注，并提交 PR。
+**测试进度与里程碑（2026-10-16 最终状态，§13.14 CPU 阶段已完成，T4/L40 待执行）**
+
+| 阶段 | 任务 / 编码器 | 现状（2026-10-16） | 产出 / 结论 | 阻塞 / 待办 |
+|---|---|---|---|---|
+| **CPU 基线（✅ 已完结）** | 1. aom/vp9 恒等 effort（探针） | ✅ 完成（`calib-aom` 19m53s、`calib-vp9` 29s、多次通知确认） | `aom_effort_probe/report.txt`（`balanced=6`、`archive` 建议 `4`）；`vp9_effort_probe/report_vp9_effort_probe.txt`（`balanced=2`、`archive` 建议 `4`、`preview`/`draft` 可 `0`/`-4`）；`preset_matrix.xlsx` 已同步（`librav1e` `preview=7`、`balanced=6` 显式 `-speed 6`，零回归；标题行已重建） | 无 |
+| **CPU 基线（✅ 已完结）** | 2. NVENC 三行（p6/p7 可用性） | ⬜ **SKIP（本机无 `hevc_nvenc` 构建）** | 待 T4（阶段四）/ L40（阶段五）阶段补跑（`verify_nvenc_quality_gpu.py` 已记 Turing 无 AV1 编码单元）；`preset_matrix` 已同步 NVENC 行（`p4`/`p6`/`p7`） | 依赖有 GPU 机器 |
+| **CPU 基线（✅ 已完结）** | 3. `bench_preset_ab.py` 并发守卫 | ✅ 完成（代码已改，语法验证通过，`default=None` → `≤ cpu_count//2`） | 代码 diff `Accessory/probe/bench_preset_ab.py` L192-206；防超订守卫已启用（§12.3 他机教训修复） | 无 |
+| **CPU 基线（✅ 已完结）** | 4. libx264/rav1e per-tier 标定排期 | ✅ 方案已文档化（`Plan/_cpu_phase_status_20261016.md` §13.2 / §13.10.1 修正矩阵）；**实际全量标定待 T4/L40 资源排期** | 排期表（8 档 × 2 编码器 = 16 条 `_EQQUAL_TIER_OVERRIDE` 条目）已定义；标定命令模板已就位（`calibrate_equal_quality.py --preset-override <档值> --tag <tier>`）；`_EQQUAL_TIER_OVERRIDE` 已填充矩阵值（`balanced` 确认、`archive` 建议值填入注释、其余档位留空待标定）；阶段一编码实现被用户明确指示延后 | 每档 30~60 分钟；需空载机器 |
+| **阶段一编码实现** | `TIER_PROFILES` + `_EQQUAL_TIER_OVERRIDE` 完整填充 + 四道孪生门 + 基线迁移 | ⬜ **被用户明确指示延后**（§12.5 已拍板：先提 tier 能力、默认仍 `balanced`，再翻默认档为 `quality`；依赖阶段一~二标定数据） | 阶段一后非 `balanced` 档全部处于「未标定」告警状态（预期，不是缺陷）；默认路径长期带告警直到 `quality` 档标定完成 | 依赖阶段一~二标定完成（T4/L40 数据 + CPU 环全档标定） |
+| **阶段二（T4 验证）** | NVENC 三行量程 + `quality`/`archive` 档交叉核验 | ⬜ **未开始**（本机无 GPU 构建 `hevc_nvenc`） | 使用 T4 上 NVENC 输出作为参考基线，验证 aom/vp9 恒等值与 CPU 基线画质等价性（可选）；同步重标 `_QP_AFFINE_QUALITY`（CR-4 跨仓契约）；记录 `_NVENC_PRESET_RETRY` 触发率（§12.3.2 已更正：该常量为防御性兜底，非本仓实测） | 需 T4 机器 |
+| **阶段三（L40 验证）** | `av1_nvenc` 三档 + 全档 LOO 门禁 | ⬜ **未开始**（`av1` 走 `--expect-av1` fail-fast；Turing 无 AV1 编码单元） | 补充 `av1_nvenc` 在 L40 上的可用性与画质数据；若 NVENC 与 CPU 基线差异超门禁，则 NVENC 条目需独立标定 | 需 L40 机器 |
+
+**待执行的具体任务清单（按优先级，全部在 T4/L40 阶段或阶段一之后执行）：**
+
+1. **T4 阶段（阶段一验证，优先级最高，依赖 GPU）：**
+   - NVENC 三行（`h264_nvenc`、`hevc_nvenc`、`av1_nvenc` 各三档 `quality`/`archive`/`preview`）的实际可用 preset 核验（`p1`~`p7`），记录 `_NVENC_PRESET_RETRY` 触发率（§12.3.2 已更正：该常量为从 VE 借来的防御性兜底，非本仓实测过的失败率）。
+   - 同步重标 `_QP_AFFINE_QUALITY`（hwaccel L1512 / cpu_v2 L1142 / sdr L484）——CR-4 跨仓契约，⑨ 组断言逐条相等。
+   - 使用 NVENC 输出作为参考基线，交叉核验 CPU 侧 aom/vp9 的恒等值在 GPU 路径下是否保持画质等价（可选，非必需）。
+
+2. **L40 阶段（阶段二验证，优先级次之）：**
+   - `av1_nvenc` 的 `-preset` 可用性与画质验证（`av1` 走 `--expect-av1` fail-fast；若不可编则 `exit 2` 并记录，不假装通过）。
+   - 补充 `av1_nvenc` 在 L40 上的 `_QP_AFFINE_QUALITY` 条目（若与 CPU 基线差异显著，则需独立标定）。
+
+3. **CPU 阶段补充（可在任意空载 CPU 机器并行执行，不依赖 GPU）：**
+   - `libx264` / `librav1e` 的 per-tier 标定（§6.2 阶段一额外任务、§13.2 设计已定：每档一套表）。每档用 `calibrate_equal_quality.py --preset-override <该档 preset> --tag <tier>`，产物入 `_EQQUAL_TIER_OVERRIDE[tier]`。估计每档 30~60 分钟，建议分批夜间执行。
+   - `libx265` 的 `archive` 档 `preset` 终值验证：三机复测（无 AVX2 ×2、AVX2 ×1）的 CPU 比约 4.6~4.8×（§13.12），`archive` 档的 `slower` 取值已在常量层确定，需在标定中验证其与 `balanced` `medium` 的 VMAF 差异是否在预期范围内（应反映 `slower` 的搜索增益）。
+   - `libsvtav1` 的 `balanced` 维持 `8`（§13.3.1 实测：auto 字节数与 preset 8 完全相等，preset 7 小 ~15%），`archive` 档 `3`、`quality` 档 `6` 的取值已在常量层承诺，需标定验证。
+   - `libvpx-vp9` 的 `balanced` 恒等值定到 `2`（§13.4 已拍板：先冻结再定值），`archive` 档 `4`、`preview` 档 `5`、`draft` 档 `6`、`test` 档 `8` 的取值已在矩阵中确定，需在标定中验证（注意 `-cpu-used` 允许负值 `-8~8`，负值表示更慢、更高质量）。
+
+4. **阶段一编码实现（被延后，依赖步骤 1~3 完成）：**
+   - 仅在 `_EQQUAL_TIER_OVERRIDE` 的非 `balanced` 档全部填入真实 `(a,b,lo,hi)` 且 `CALIB_FINGERPRINT` 的 `calibrated` 全为 `True` 之后启动。
+   - 代码改动：`TIER_PROFILES` 填充（§6.2 已列清单）、`DEFAULT_REF` 语义迁移（L388 引用 `TIER_PROFILES['quality']['ref_crf']` = 20）、四份 baseline 迁移（旧 inventory 显式加 `--quality-tier balanced` ⇒ 旧字节转为 `balanced` 档黄金文件；另建 default 新基线）、`memory` 同步、README 更新。
+   - 零回归保证：默认档仍为 `balanced`（不翻），两道判定（`--strict-quality` / `--strict-calib`）默认关，默认行为与今天逐字节相同（§5.3、§2.5 契约变更表已同步）。
+
+5. **阶段一完成后：翻默认档为 `quality`（第二步提交，依赖 VE 同步确认）：**
+   - 仅在 VE 确认 CR-1「默认档」条款（`p6`/`slow`/`6` 替代 `p4`/`medium`/`8`）并同步修改 `Video_Enhancement` 侧的 `BASE_LOCK` 与 `TIER_PROFILES` 后执行（§12.5 已拍板：延后重议）。
+   - 此时默认路径将长期带「未标定」告警（`quality` 档的 `_EQQUAL_TIER_OVERRIDE` 仍为空），直到本阶段的标定数据填入（§2.4、§10 风险「默认路径变成未标定」已同步到三份 help 与 README 首屏）。
+
+**注意事项（已在状态文档同步）：**
+- 所有测试均应在空载机器上进行（`uptime` 负载应远低于核数的 10%）；若负载超限则推迟测试（§10 风险、§13.12 他机教训）。
+- 耗时判据必须使用 CPU 时间（`user + sys`），而非墙钟，以避免被调度扭曲（§10 风险、§13.12 方法学结论 1）。
+- 每项测试完成后，应记录原始日志、（可选）压缩的中间文件以及最终得到的参数表，以便后复现（§13.14 测试要求）。
+- 本机无法验证 NVENC：`verify_equal_quality.py` 在无 GPU 机器上 NVENC 三档全 SKIP（L43-47）；阶段四/五必须在有卡机器上补跑（§13.8、§10 风险）。
+- `lossless` / `near-lossless` / `draft` / `test` 四档的标定优先级最低，其 LOO 门禁应单独放宽（超低画质区 VMAF 反查条件数本来就差，§13.10 风险表）；若 LOO 超门禁，则该档保持未标定，不强制落表（§B7「LOO 超门禁禁止落表」）。
+- `archive` 档的 `libx265` `preset` 取 `slower`（§13.6 修正：`placebo` 无意义，`slower` 已足够）；若后续 D2 bench 判定 `slower` 对 `archive` 档的画质收益不划算，则回退到只靠 D1（锚点 16）的分化方案（§12.3 已拍板：回退路径留在常量层，不动代码）。
+- `_EQQUAL_TIER_OVERRIDE` 的缺键机制：非 `balanced` 档的缺值 ⇒ 自动回退 `balanced` 的 `QUALITY_MAP` 并打告警（§2.4 指纹制）；这允许逐步落地，不必一次性标定全部 8 档 × 9 编码器（§10 风险「标定工作量爆炸」的缓解方案）。
+- `librav1e` 的 `balanced` 暂留 `native`（§13.10.1 注记已同步到 `_EQQUAL_TIER_OVERRIDE` L247 注释与 `memory`）；其余档的 `speed` 需各自配表行（§13.10.1 已同步到状态文档与 `Plan/` 矩阵 §13.10 修正矩阵）。
+- `libaom-av1` / `libvpx-vp9` 的 `balanced` 恒等值已在状态文档与矩阵 §13.4 中登记（`cpu-used 2` / `恒等值（待定，已拍板=2）`）；完整标定值（含各档的 `(a,b,lo,hi)`）需 §B4 三环主测后填入 `_EQQUAL_TIER_OVERRIDE`（§13.4 已拍板：先冻结再定值）。
+- `_NVENC_PRESET_RETRY` 的触发率应在阶段二/三的 NVENC 测试中直接记录（§13.7、§13.8、§12.3.2 已更正：该常量为从 VE 借来的防御性兜底，不是本仓实测过的失败率）；阶段二报告应包含该触发率统计（而非假设为零）。
+- `preset_ab_report.xlsx` 与 `bench_preset_ab.py` 已在状态文档中登记（§6.15 阶段零点五 D2 预跑）；阶段三的 CPU 环应复用相同素材池与锚点（§B2），并在报告中注明「本机无 AVX2」或「本机 AVX2 启用」的环境指纹（§13.12 三机对比已同步到 `memory/project_gate_running_gotchas.md` 与状态文档 §13.7 / §13.12）。
+- `memory/project_rate_control_params.md` 与 `MEMORY.md` L203 的 BASE_LOCK 语义已在状态文档中同步（§2.5 契约变更表、§12.5 已拍板）；阶段一完成后需同步更新 `memory` 文件（将「默认路径 = `balanced`」改为「默认路径 = `quality` 的基底」），并注明「`quality` 档未标定告警」的预期状态（§2.4、§5.3、§10 风险已同步到三份 help 与 README 首屏）。
 
 **注意事项**
    - 所有测试均应在空载机器上进行，建议使用 `uptime` 检查负载；若负载超过核数的 10%，则推迟测试。

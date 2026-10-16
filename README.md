@@ -1826,13 +1826,14 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
 > 素材池 12→17（庚补 6s 侧 5 条 + 己补 10s 侧 5 类，各 325 点）；微升的三档源于
 > 新增素材的覆盖变化，**不是精度退化**。
 
-> ✅ **SDR→HDR 管线另走 HDR 域覆盖表**（2026-10-16）：`convert_sdr_to_hdr.py` 产出 HDR ⇒
+> ✅ **SDR→HDR 管线另走 HDR 域覆盖表**（2026-10-16；§10 ref15 补锚后更新）：`convert_sdr_to_hdr.py` 产出 HDR ⇒
 > 其等质量换算启用 `convert_crf.HDR_EQUAL_QUALITY_OVERRIDE`（仅 libsvtav1 / libaom-av1 /
 > librav1e 三行，按 **HDR 10bit PQ 域 PSNR** 等质量重标定；ref21 实发 29→23 / 26→31 /
-> 64→71；libsvtav1 行为分段模型 `PiecewiseLinear`，@30 实发 52→51）。
+> 64→74；libsvtav1 与 libaom-av1 行为分段模型 `PiecewiseLinear`，svtav1 @30 实发 52→51、
+> @15~17 外推修正为 6/8/10）。
 > `QUALITY_MAP` / `SIZE_MAP` **本体不动** ⇒ 跨仓契约与 SDR 直编路径零回归；
 > 开关 `set_quality_domain('sdr'|'hdr')`（默认 `sdr`；`size` 口径下覆盖不生效）。
-> 标定与决策：`memory/hdr_equal_quality_calibration_10mat_20261016.md`（§9 分段升级）。
+> 标定与决策：`memory/hdr_equal_quality_calibration_10mat_20261016.md`（§9 svtav1 分段、§10 ref15 补锚 6 锚点裁定）。
 
 > ⚠ 第五版修正了第四版的「同素材双倍权重」缺陷（`new5_raw`/`new4_raw` 的6s+10s 各被计一次），
 > vp9 因此从 6.71 降到 4.59 —— **「vp9 需重标」是误判，根因在池化代码而非 vp9 本身**。

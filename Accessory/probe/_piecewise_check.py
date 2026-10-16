@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""_piecewise_check.py —— HDR 域等质量表「仿射 vs 分段」候选的 LOO 对比（2026-10-16 §9）。
+"""_piecewise_check.py —— HDR 域等质量表「仿射 vs 分段」候选的 LOO 对比（2026-10-16 §9/§10）。
 
 对比模型（全部按逐素材留一 LOO 重拟合）：
-  affine   现表口径（池化最小二乘 a + 各素材截距中位数 b）
-  piece    分段·逐锚点中位值连线
-  cuminc   分段·稳健增量累积（从 ref18 中位值起，逐段累加素材内增量中位数）★ 采纳
-  twoseg   两段最小二乘（断点 21 / 22.5）
-  quad     二次回归
+  affine     现表口径（池化最小二乘 a + 各素材截距中位数 b）
+  piece      分段·逐锚点中位值连线
+  cuminc     分段·稳健增量累积（自 ref15 中位值起，逐段累加素材内增量中位数）★ 候选 A
+  cuminc_old 分段·旧 18~30 节点（自 ref18 中位值起累积）+ 前置 ref15 中位值 ☆ 候选 B
+  twoseg     两段最小二乘（断点 21 / 22.5）
+  quad       二次回归
 
-评价网格：锚点 5 点 / 整数 18..30 / 0.5 步密集 25 点。
+评价网格：锚点 6 点 / 整数 15..33 / 0.5 步密集 37 点。
 真值：target_psnr(ref) 由锚点 (ref, psnr) 线性插值；truth_qp = 该编码器曲线上取等 PSNR 值。
 误差给出 qp 与 dB 当量（|Δqp| × 曲线在真值处局部斜率）。
 
 用法：
   python3 Accessory/probe/_piecewise_check.py [codec]     # 默认 libsvtav1
 数据：Accessory/temp/hdr_eqq/*.json（10 素材；与 _final_fit.py 同源）
-结论落档：memory/hdr_equal_quality_calibration_10mat_20261016.md §9
+结论落档：memory/hdr_equal_quality_calibration_10mat_20261016.md §9/§10
 """
 import json
 import pathlib
@@ -24,7 +25,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 WORK = ROOT / 'Accessory/temp/hdr_eqq'
-REFS = [18, 21, 24, 27, 30]
+REFS = [15, 18, 21, 24, 27, 30]
 CODEC = sys.argv[1] if len(sys.argv) > 1 else 'libsvtav1'
 
 
@@ -89,10 +90,7 @@ def m_affine(rows):
     return lambda x: a * x + b
 
 
-def m_piece_knots(rows):
-    xs = REFS
-    ys = [st.median([row['vals'][r] for row in rows if row['vals'].get(r) is not None]) for r in REFS]
-
+def _pwl(xs, ys):
     def f(x):
         if x <= xs[0]:
             s = (ys[1] - ys[0]) / (xs[1] - xs[0]); return ys[0] + s * (x - xs[0])
@@ -103,6 +101,11 @@ def m_piece_knots(rows):
                 s = (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i])
                 return ys[i] + s * (x - xs[i])
     return f
+
+
+def m_piece_knots(rows):
+    ys = [st.median([row['vals'][r] for row in rows if row['vals'].get(r) is not None]) for r in REFS]
+    return _pwl(REFS, ys)
 
 
 def _lsq_line(pts):
@@ -125,7 +128,6 @@ def m_quad(rows):
     s = [sum(x ** k for x, _ in pts) for k in range(5)]
     t = [sum(y * x ** k for x, y in pts) for k in range(3)]
     # [s0 s1 s2; s1 s2 s3; s2 s3 s4] [c0 c1 c2]^T = [t0 t1 t2]
-    import itertools
     A = [[s[0], s[1], s[2]], [s[1], s[2], s[3]], [s[2], s[3], s[4]]]
     B = t[:]
     for i in range(3):  # 高斯消元
@@ -142,35 +144,39 @@ def m_quad(rows):
     return lambda x: c0 + c1 * x + c2 * x * x
 
 
+def _cuminc_ys(rows, xs):
+    """稳健增量累积：首节点取中位值，逐段累加素材内增量中位数。"""
+    ys = [st.median([row['vals'][xs[0]] for row in rows if row['vals'].get(xs[0]) is not None])]
+    for i in range(1, len(xs)):
+        deltas = [row['vals'][xs[i]] - row['vals'][xs[i - 1]] for row in rows
+                  if row['vals'].get(xs[i]) is not None and row['vals'].get(xs[i - 1]) is not None]
+        ys.append(ys[-1] + st.median(deltas))
+    return ys
 
 
 def m_cuminc(rows):
-    y18 = st.median([row['vals'][18] for row in rows if row['vals'].get(18) is not None])
-    ys = [y18]
-    for i in range(1, len(REFS)):
-        deltas = [row['vals'][REFS[i]] - row['vals'][REFS[i - 1]] for row in rows
-                  if row['vals'].get(REFS[i]) is not None and row['vals'].get(REFS[i - 1]) is not None]
-        ys.append(ys[-1] + st.median(deltas))
-    xs = REFS
-    def f(x):
-        if x <= xs[0]:
-            s = (ys[1] - ys[0]) / (xs[1] - xs[0]); return ys[0] + s * (x - xs[0])
-        if x >= xs[-1]:
-            s = (ys[-1] - ys[-2]) / (xs[-1] - xs[-2]); return ys[-1] + s * (x - xs[-1])
-        for i in range(len(xs) - 1):
-            if xs[i] <= x <= xs[i + 1]:
-                s = (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i])
-                return ys[i] + s * (x - xs[i])
-    return f
+    """候选 A：自 ref15 中位值起，6 节点稳健增量累积（重锚版）。"""
+    return _pwl(REFS, _cuminc_ys(rows, REFS))
+
+
+def m_cuminc_old(rows):
+    """候选 B：旧 18~30 累积节点（自 ref18 中位值起）+ 前置 ref15 中位值节点。"""
+    y15 = st.median([row['vals'][15] for row in rows if row['vals'].get(15) is not None])
+    ys18 = _cuminc_ys(rows, REFS[1:])
+    return _pwl(REFS, [y15] + ys18)
+
 
 MODELS = [('affine', m_affine), ('piece', m_piece_knots), ('cuminc', m_cuminc),
+          ('cuminc_old', m_cuminc_old),
           ('twoseg21', lambda rows: m_twoseg(rows, 21.0)),
           ('twoseg22.5', lambda rows: m_twoseg(rows, 22.5)),
           ('quad', m_quad)]
 
 # ---------- 评估 ----------
-ANCHOR_GRID = [18, 21, 24, 27, 30]
-DENSE_GRID = [18 + 0.5 * i for i in range(25)]  # 18.0..30.0
+ANCHOR_GRID = list(REFS)
+INT_GRID = list(range(15, 34))
+DENSE_GRID = [15 + 0.5 * i for i in range(37)]  # 15.0..33.0
+
 
 def truth_dense(row, r):
     xs = sorted(row['target'])
@@ -226,30 +232,32 @@ def run(grid, tag):
     return stats
 
 
-s_anchor = run(ANCHOR_GRID, '锚点 5 点')
-s_int = run(list(range(18, 31)), '整数 18..30')
+s_anchor = run(ANCHOR_GRID, '锚点 6 点')
+s_int = run(INT_GRID, '整数 15..33')
 print()
-s_dense = run(DENSE_GRID, '密集 18..30 step0.5')
+s_dense = run(DENSE_GRID, '密集 15..33 step0.5')
 
 # ---------- 复算校验（affine LOO 对 JSON） ----------
 errs = s_anchor['affine'][0]
-print(f'\n[校验] affine 锚点 LOO: 中位 {st.median(errs):.4f} max {max(errs):.4f} '
-      f'(JSON: 2.3079 / 8.9774)')
+jf = ROOT / 'memory/hdr_equal_quality_calibration_10mat_20261016.json'
+jd = json.loads(jf.read_text())['codecs'][CODEC]
+print(f'\n[校验] {CODEC} affine 锚点 LOO: 中位 {st.median(errs):.4f} max {max(errs):.4f} '
+      f'(JSON: {jd["loo_abs_median"]:.4f} / {jd["loo_abs_max"]:.4f})')
 
-# ---------- 预测差（生产影响） ----------
-print('\n===== piece vs affine 预测差（全数据拟合，非 LOO） =====')
-fa_rows = mats
-f_aff = m_affine(fa_rows); f_pie = m_piece_knots(fa_rows)
-rows_out = []
-for r in DENSE_GRID:
-    d = f_pie(r) - f_aff(r)
-    rows_out.append((r, f_aff(r), f_pie(r), d))
-print('ref  affine    piece     diff')
-for r, a_, p_, d in rows_out:
-    mark = '  <<' if abs(d) >= 0.5 else ''
-    print(f'{r:5.1f} {a_:8.2f} {p_:9.2f} {d:+7.2f}{mark}')
-
-# 整数下发落点
-print('\n整数 ref 落点（round）：')
-for r in ANCHOR_GRID:
-    print(f'  ref{r}: affine {round(f_aff(r))} | piece {round(f_pie(r))}')
+# ---------- 生产影响：全数据拟合（非 LOO），整数下发口径 int(round()) ----------
+print('\n===== 6 锚点全数据拟合：整数落点（int(round())） =====')
+f_aff = m_affine(mats)
+f_cum = m_cuminc(mats)
+f_old = m_cuminc_old(mats)
+f_pie = m_piece_knots(mats)
+print(f'  候选 A cuminc 节点: ' + ' / '.join(f'ref{r} {y:.4f}' for r, y in zip(REFS, _cuminc_ys(mats, REFS))))
+y15 = st.median([row['vals'][15] for row in mats if row['vals'].get(15) is not None])
+print('  候选 B cuminc_old 节点: ' + ' / '.join(f'ref{r} {y:.4f}' for r, y in zip(REFS, [y15] + _cuminc_ys(mats, REFS[1:]))))
+print(f'  {"ref":>3} {"affine":>8} {"cuminc":>8} {"old":>8} {"piece":>8} | {"round":>5} {"roundA":>6} {"roundB":>6}')
+for r in INT_GRID:
+    print(f'  {r:>3} {f_aff(r):8.2f} {f_cum(r):8.2f} {f_old(r):8.2f} {f_pie(r):8.2f} | '
+          f'{round(f_aff(r)):>5} {round(f_cum(r)):>6} {round(f_old(r)):>6}')
+print('\n注：roundA = 候选 A（重锚）下发整数，roundB = 候选 B（旧节点+前置）下发整数。')
+print(f'候选 A 整数表: ' + ', '.join(f'{r}:{round(f_cum(r))}' for r in INT_GRID))
+print(f'候选 B 整数表: ' + ', '.join(f'{r}:{round(f_old(r))}' for r in INT_GRID))
+print(f'仿射（旧发布）: ' + ', '.join(f'{r}:{round(f_aff(r))}' for r in INT_GRID))

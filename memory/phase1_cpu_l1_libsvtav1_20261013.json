@@ -1,0 +1,106 @@
+{
+  "bench_version": "1.0",
+  "argv": [
+    "-i",
+    "../input_videos/test1.mp4",
+    "--layers",
+    "l1",
+    "--codecs",
+    "libsvtav1",
+    "--model",
+    "agcm",
+    "--crf-ref",
+    "21",
+    "--frames",
+    "30",
+    "--repeats",
+    "1",
+    "--warmup",
+    "0",
+    "--device",
+    "cpu",
+    "--keep",
+    "--json",
+    "memory/phase1_cpu_l1_libsvtav1_20261013.json",
+    "--md",
+    "memory/phase1_cpu_l1_libsvtav1_20261013.md"
+  ],
+  "source": {
+    "path": "../input_videos/test1.mp4",
+    "width": 1280,
+    "height": 720,
+    "fps": 30.0,
+    "duration": 19.133333,
+    "nb_frames": 574,
+    "pix_fmt": "yuv420p",
+    "vcodec": "h264",
+    "has_audio": true,
+    "color_transfer": "bt709",
+    "size": 3355915
+  },
+  "env": {
+    "ffmpeg": "/usr/bin/ffmpeg",
+    "ffprobe": "/usr/bin/ffprobe",
+    "torch": true,
+    "torch_version": "2.9.1+debian",
+    "cuda": false,
+    "model_repo": "/mnt/d/Workspace_Python/HDRTVNet-plus",
+    "model_codes": true,
+    "model_weights": true,
+    "model_ready": true,
+    "filters": {
+      "libvmaf": true,
+      "tonemap": true,
+      "zscale": false
+    },
+    "hw_codecs": [],
+    "hw_decode": false,
+    "has_nvidia_dev": false,
+    "cpu": 8,
+    "cpu_src": "sched_getaffinity",
+    "mem_total_gb": 11.683929443359375,
+    "mem_avail_gb": 9.482139587402344,
+    "mem_src": "/proc/meminfo"
+  },
+  "anchor": {
+    "mode": "quality",
+    "crf_ref": 21,
+    "note": "crf_sent 是真正下发的原生值；ref 处无编码器恒等"
+  },
+  "repeats": 1,
+  "results": [
+    {
+      "cid": "l1.libsvtav1",
+      "layer": "l1",
+      "desc": "libsvtav1 等质量(crf-ref=21)",
+      "group": "l1.codec",
+      "status": "OK",
+      "skip_reason": "",
+      "fail_reason": "",
+      "wall_min": 342.3544132130046,
+      "wall_median": 342.3544132130046,
+      "wall_all": [
+        342.3544132130046
+      ],
+      "script_reported_elapsed": [
+        338.0
+      ],
+      "frames": 30,
+      "frames_from": "产物容器自报",
+      "out_bytes": 288811,
+      "crf_sent": 29,
+      "quality_axis": "crf",
+      "actual_path": "off",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [
+        "提示：--crf-ref 21（libx264 CRF 基准） → libsvtav1 的 -crf 29。",
+        "警告：编码器 libsvtav1 无法写入 mastering display / MaxCLL，仅保留色彩三参数与位深"
+      ],
+      "out_path": "/mnt/d/Workspace_Python/VidUtils/Accessory/temp/bench_sdr_to_hdr/run_81831/l1.libsvtav1.mp4",
+      "cmd": "/usr/bin/python3 /mnt/d/Workspace_Python/VidUtils/convert_sdr_to_hdr.py -i ../input_videos/test1.mp4 -o /mnt/d/Workspace_Python/VidUtils/Accessory/temp/bench_sdr_to_hdr/run_81831/l1.libsvtav1.mp4 --codec libsvtav1 --crf-ref 21 --device cpu"
+    }
+  ],
+  "quality_gate": [],
+  "note": "墙钟含 Python 启动与模型加载；script_reported_elapsed 不含模型加载且三条执行路径口径不一致，仅供交叉核对。SKIP 不等于通过。"
+}

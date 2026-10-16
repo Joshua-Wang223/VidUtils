@@ -1,0 +1,155 @@
+{
+  "bench_version": "1.0",
+  "argv": [
+    "-i",
+    "Accessory/temp/bench_sdr_to_hdr/run_81483/fixture_4k.mp4",
+    "--layers",
+    "g",
+    "--model",
+    "agcm",
+    "--frames",
+    "2",
+    "--repeats",
+    "1",
+    "--warmup",
+    "0",
+    "--device",
+    "cpu",
+    "--keep",
+    "--json",
+    "memory/phase1_cpu_g_20261013.json",
+    "--md",
+    "memory/phase1_cpu_g_20261013.md"
+  ],
+  "source": {
+    "path": "Accessory/temp/bench_sdr_to_hdr/run_81483/fixture_4k.mp4",
+    "width": 3840,
+    "height": 2160,
+    "fps": 47.952047952047955,
+    "duration": 9.989146,
+    "nb_frames": 479,
+    "pix_fmt": "yuv420p",
+    "vcodec": "h264",
+    "has_audio": false,
+    "color_transfer": "",
+    "size": 6943390
+  },
+  "env": {
+    "ffmpeg": "/usr/bin/ffmpeg",
+    "ffprobe": "/usr/bin/ffprobe",
+    "torch": true,
+    "torch_version": "2.9.1+debian",
+    "cuda": false,
+    "model_repo": "/mnt/d/Workspace_Python/HDRTVNet-plus",
+    "model_codes": true,
+    "model_weights": true,
+    "model_ready": true,
+    "filters": {
+      "libvmaf": true,
+      "tonemap": true,
+      "zscale": false
+    },
+    "hw_codecs": [],
+    "hw_decode": false,
+    "has_nvidia_dev": false,
+    "cpu": 8,
+    "cpu_src": "sched_getaffinity",
+    "mem_total_gb": 11.683929443359375,
+    "mem_avail_gb": 9.610736846923828,
+    "mem_src": "/proc/meminfo"
+  },
+  "anchor": {
+    "mode": "quality",
+    "crf_ref": 21,
+    "note": "crf_sent 是真正下发的原生值；ref 处无编码器恒等"
+  },
+  "repeats": 1,
+  "results": [
+    {
+      "cid": "g.4k.tile0",
+      "layer": "g",
+      "desc": "4K 整帧推理（tile=0，已知 OOM）",
+      "group": "g.tile",
+      "status": "OK",
+      "skip_reason": "",
+      "fail_reason": "",
+      "wall_min": 336.593680320002,
+      "wall_median": 336.593680320002,
+      "wall_all": [
+        336.593680320002
+      ],
+      "script_reported_elapsed": [
+        327.0
+      ],
+      "frames": 2,
+      "frames_from": "产物容器自报",
+      "out_bytes": 55240,
+      "crf_sent": 21,
+      "quality_axis": "crf",
+      "actual_path": "off",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [],
+      "out_path": "/mnt/d/Workspace_Python/VidUtils/Accessory/temp/bench_sdr_to_hdr/run_85203/g.4k.tile0.mp4",
+      "cmd": "/usr/bin/python3 /mnt/d/Workspace_Python/VidUtils/convert_sdr_to_hdr.py -i Accessory/temp/bench_sdr_to_hdr/run_81483/fixture_4k.mp4 -o /mnt/d/Workspace_Python/VidUtils/Accessory/temp/bench_sdr_to_hdr/run_85203/g.4k.tile0.mp4 --device cpu --split-mode off --tile 0"
+    },
+    {
+      "cid": "g.4k.tile1024",
+      "layer": "g",
+      "desc": "4K 分块推理 tile=1024 overlap=128",
+      "group": "g.tile",
+      "status": "OK",
+      "skip_reason": "",
+      "fail_reason": "",
+      "wall_min": 196.31547453599342,
+      "wall_median": 196.31547453599342,
+      "wall_all": [
+        196.31547453599342
+      ],
+      "script_reported_elapsed": [
+        191.0
+      ],
+      "frames": 2,
+      "frames_from": "产物容器自报",
+      "out_bytes": 55032,
+      "crf_sent": 21,
+      "quality_axis": "crf",
+      "actual_path": "off",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [],
+      "out_path": "/mnt/d/Workspace_Python/VidUtils/Accessory/temp/bench_sdr_to_hdr/run_85203/g.4k.tile1024.mp4",
+      "cmd": "/usr/bin/python3 /mnt/d/Workspace_Python/VidUtils/convert_sdr_to_hdr.py -i Accessory/temp/bench_sdr_to_hdr/run_81483/fixture_4k.mp4 -o /mnt/d/Workspace_Python/VidUtils/Accessory/temp/bench_sdr_to_hdr/run_85203/g.4k.tile1024.mp4 --device cpu --split-mode off --tile 1024 --tile-overlap 128"
+    },
+    {
+      "cid": "g.4k.tile2048",
+      "layer": "g",
+      "desc": "4K 分块推理 tile=2048 overlap=256",
+      "group": "g.tile",
+      "status": "OK",
+      "skip_reason": "",
+      "fail_reason": "",
+      "wall_min": 200.87989610199293,
+      "wall_median": 200.87989610199293,
+      "wall_all": [
+        200.87989610199293
+      ],
+      "script_reported_elapsed": [
+        197.0
+      ],
+      "frames": 2,
+      "frames_from": "产物容器自报",
+      "out_bytes": 54680,
+      "crf_sent": 21,
+      "quality_axis": "crf",
+      "actual_path": "off",
+      "expect_path": "off",
+      "path_ok": true,
+      "warnings": [],
+      "out_path": "/mnt/d/Workspace_Python/VidUtils/Accessory/temp/bench_sdr_to_hdr/run_85203/g.4k.tile2048.mp4",
+      "cmd": "/usr/bin/python3 /mnt/d/Workspace_Python/VidUtils/convert_sdr_to_hdr.py -i Accessory/temp/bench_sdr_to_hdr/run_81483/fixture_4k.mp4 -o /mnt/d/Workspace_Python/VidUtils/Accessory/temp/bench_sdr_to_hdr/run_85203/g.4k.tile2048.mp4 --device cpu --split-mode off --tile 2048 --tile-overlap 256"
+    }
+  ],
+  "quality_gate": [],
+  "note": "墙钟含 Python 启动与模型加载；script_reported_elapsed 不含模型加载且三条执行路径口径不一致，仅供交叉核对。SKIP 不等于通过。"
+}

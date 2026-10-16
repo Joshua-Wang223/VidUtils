@@ -1,0 +1,23 @@
+	Command being timed: "ffmpeg -nostdin -y -hide_banner -loglevel error -i /mnt/d/Workspace_Python/input_videos/eqq_calib/6s/tv_bbc_molly_s05e01_src1920x1080.mp4 -c:v libx265 -crf 24 -preset slow /mnt/d/Workspace_Python/VidUtils/Accessory/calib/eqq_evidence/q3_bench/preset_ab_libx265/work/tv_bbc_molly_s05e01_src1920x1080__a/out.mkv"
+	User time (seconds): 100.05
+	System time (seconds): 2.27
+	Percent of CPU this job got: 345%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:29.60
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 401336
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 98511
+	Voluntary context switches: 21553
+	Involuntary context switches: 23158
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

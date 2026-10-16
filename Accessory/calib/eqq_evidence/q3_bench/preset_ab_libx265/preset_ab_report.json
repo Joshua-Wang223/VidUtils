@@ -1,0 +1,250 @@
+{
+ "environment": {
+  "cpu_model": "Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz",
+  "cores": 8,
+  "cpuinfo_avx2": false,
+  "cpuinfo_avx512f": false,
+  "x265_asm": "MMX2 SSE2Fast SSSE3 SSE4.2 AVX",
+  "x265_uses_avx2": false,
+  "ffmpeg": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+  "load_at_start": [
+   3.98,
+   26.6,
+   24.07
+  ],
+  "concurrency": 2,
+  "runs_per_cell": 3,
+  "warmup": 1,
+  "anchor_crf": 24,
+  "load_at_end": [
+   6.53,
+   8.96,
+   11.0
+  ]
+ },
+ "params": {
+  "codec": "libx265",
+  "preset_a": "slow",
+  "preset_b": "slower",
+  "anchor": 24,
+  "runs": 3,
+  "warmup": 1
+ },
+ "n_materials": 17,
+ "per_material": [
+  {
+   "material": "10s/anim2d_forest_src1280x720.mp4",
+   "wall_a_s": 64.83,
+   "wall_b_s": 301.67,
+   "cpu_a_s": 234.55,
+   "cpu_b_s": 1197.6,
+   "cores_a": 3.64,
+   "cores_b": 3.86,
+   "wall_ratio": 4.6532469535708785,
+   "cpu_ratio": 5.10594755915583,
+   "wall_spread": 48.52000000000004
+  },
+  {
+   "material": "10s/anim2d_subs_tobot_src1280x720.mp4",
+   "wall_a_s": 48.08,
+   "wall_b_s": 207.07999999999998,
+   "cpu_a_s": 164.4,
+   "cpu_b_s": 748.74,
+   "cores_a": 3.38,
+   "cores_b": 3.68,
+   "wall_ratio": 4.3069883527454245,
+   "cpu_ratio": 4.5543795620437955,
+   "wall_spread": 28.379999999999995
+  },
+  {
+   "material": "10s/live_night_wolf_src1280x720.mp4",
+   "wall_a_s": 53.75,
+   "wall_b_s": 213.45,
+   "cpu_a_s": 194.25,
+   "cpu_b_s": 790.73,
+   "cores_a": 3.5,
+   "cores_b": 3.68,
+   "wall_ratio": 3.971162790697674,
+   "cpu_ratio": 4.070682110682111,
+   "wall_spread": 8.939999999999998
+  },
+  {
+   "material": "10s/live_texture_frog_src1280x720.mp4",
+   "wall_a_s": 39.88,
+   "wall_b_s": 174.1,
+   "cpu_a_s": 149.92999999999998,
+   "cpu_b_s": 702.62,
+   "cores_a": 3.75,
+   "cores_b": 4.03,
+   "wall_ratio": 4.365596790371113,
+   "cpu_ratio": 4.68632028279864,
+   "wall_spread": 5.710000000000008
+  },
+  {
+   "material": "10s/screen_ui_code_src1280x720.mp4",
+   "wall_a_s": 21.34,
+   "wall_b_s": 87.03999999999999,
+   "cpu_a_s": 73.42999999999999,
+   "cpu_b_s": 331.33000000000004,
+   "cores_a": 3.35,
+   "cores_b": 3.8,
+   "wall_ratio": 4.0787253983130265,
+   "cpu_ratio": 4.51218847882337,
+   "wall_spread": 7.269999999999996
+  },
+  {
+   "material": "6s/cganim_edu_wordworld_src720x576.mp4",
+   "wall_a_s": 29.11,
+   "wall_b_s": 119.39,
+   "cpu_a_s": 105.19999999999999,
+   "cpu_b_s": 432.41999999999996,
+   "cores_a": 3.66,
+   "cores_b": 3.67,
+   "wall_ratio": 4.101339745791824,
+   "cpu_ratio": 4.1104562737642585,
+   "wall_spread": 9.25
+  },
+  {
+   "material": "6s/cganim_subs_src1920x1080.mp4",
+   "wall_a_s": 30.97,
+   "wall_b_s": 130.32,
+   "cpu_a_s": 123.32,
+   "cpu_b_s": 549.41,
+   "cores_a": 3.98,
+   "cores_b": 4.11,
+   "wall_ratio": 4.207943170810462,
+   "cpu_ratio": 4.455157314304249,
+   "wall_spread": 30.319999999999993
+  },
+  {
+   "material": "6s/cganim_talking_tom_src1920x1080.mp4",
+   "wall_a_s": 57.98,
+   "wall_b_s": 167.53,
+   "cpu_a_s": 202.82000000000002,
+   "cpu_b_s": 657.2800000000001,
+   "cores_a": 3.48,
+   "cores_b": 4.04,
+   "wall_ratio": 2.8894446360814077,
+   "cpu_ratio": 3.2407060447687606,
+   "wall_spread": 20.920000000000016
+  },
+  {
+   "material": "6s/doc_dark_earth_src3840x2160.mp4",
+   "wall_a_s": 53.81,
+   "wall_b_s": 218.89,
+   "cpu_a_s": 185.51,
+   "cpu_b_s": 825.77,
+   "cores_a": 3.44,
+   "cores_b": 3.77,
+   "wall_ratio": 4.067831258130458,
+   "cpu_ratio": 4.451350331518516,
+   "wall_spread": 3.740000000000009
+  },
+  {
+   "material": "6s/doc_grassland_src1280x720.mp4",
+   "wall_a_s": 27.4,
+   "wall_b_s": 128.34,
+   "cpu_a_s": 105.42,
+   "cpu_b_s": 513.06,
+   "cores_a": 3.84,
+   "cores_b": 3.99,
+   "wall_ratio": 4.683941605839417,
+   "cpu_ratio": 4.866818440523619,
+   "wall_spread": 8.090000000000003
+  },
+  {
+   "material": "6s/live_kids_play_src1280x720.mp4",
+   "wall_a_s": 33.71,
+   "wall_b_s": 159.8,
+   "cpu_a_s": 125.97999999999999,
+   "cpu_b_s": 646.11,
+   "cores_a": 3.73,
+   "cores_b": 4.0,
+   "wall_ratio": 4.740433105903293,
+   "cpu_ratio": 5.128671217653596,
+   "wall_spread": 5.400000000000006
+  },
+  {
+   "material": "6s/live_kids_seated_src1920x1080.mp4",
+   "wall_a_s": 48.63,
+   "wall_b_s": 236.15,
+   "cpu_a_s": 172.01,
+   "cpu_b_s": 906.25,
+   "cores_a": 3.54,
+   "cores_b": 3.84,
+   "wall_ratio": 4.856055932551922,
+   "cpu_ratio": 5.268589035521191,
+   "wall_spread": 7.449999999999989
+  },
+  {
+   "material": "6s/live_kids_table_src1920x1080.mp4",
+   "wall_a_s": 46.47,
+   "wall_b_s": 216.04,
+   "cpu_a_s": 174.59,
+   "cpu_b_s": 909.43,
+   "cores_a": 3.77,
+   "cores_b": 4.39,
+   "wall_ratio": 4.649020873681946,
+   "cpu_ratio": 5.2089466750673,
+   "wall_spread": 19.309999999999974
+  },
+  {
+   "material": "6s/screen_ui_code_src1280x720.mp4",
+   "wall_a_s": 12.37,
+   "wall_b_s": 58.12,
+   "cpu_a_s": 41.42,
+   "cpu_b_s": 195.33,
+   "cores_a": 3.34,
+   "cores_b": 3.37,
+   "wall_ratio": 4.698464025869038,
+   "cpu_ratio": 4.715837759536456,
+   "wall_spread": 3.6799999999999997
+  },
+  {
+   "material": "6s/tv_bbc_molly_s01e01_src1920x1080.mp4",
+   "wall_a_s": 39.8,
+   "wall_b_s": 149.56,
+   "cpu_a_s": 119.88000000000001,
+   "cpu_b_s": 587.11,
+   "cores_a": 3.04,
+   "cores_b": 3.86,
+   "wall_ratio": 3.7577889447236186,
+   "cpu_ratio": 4.897480814147481,
+   "wall_spread": 8.369999999999997
+  },
+  {
+   "material": "6s/tv_bbc_molly_s03e01_src1920x1080.mp4",
+   "wall_a_s": 37.07,
+   "wall_b_s": 154.22,
+   "cpu_a_s": 127.45,
+   "cpu_b_s": 598.32,
+   "cores_a": 3.43,
+   "cores_b": 3.92,
+   "wall_ratio": 4.160237388724036,
+   "cpu_ratio": 4.694546881129855,
+   "wall_spread": 32.120000000000005
+  },
+  {
+   "material": "6s/tv_bbc_molly_s05e01_src1920x1080.mp4",
+   "wall_a_s": 29.6,
+   "wall_b_s": 65.93,
+   "cpu_a_s": 102.32,
+   "cpu_b_s": 400.34999999999997,
+   "cores_a": 3.45,
+   "cores_b": 6.07,
+   "wall_ratio": 2.227364864864865,
+   "cpu_ratio": 3.912724784988272,
+   "wall_spread": 11.370000000000001
+  }
+ ],
+ "summary": {
+  "wall_ratio_geomean": 4.0751609025172995,
+  "cpu_ratio_geomean": 4.550235133751154,
+  "cpu_ratio_median": 4.68632028279864,
+  "cpu_ratio_min": 3.2407060447687606,
+  "cpu_ratio_max": 5.268589035521191,
+  "cores_a_median": 3.5,
+  "cores_b_median": 3.86,
+  "verdict_vs_1_5x": "over"
+ }
+}

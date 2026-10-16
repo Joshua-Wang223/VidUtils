@@ -262,7 +262,11 @@ def main():
 
     def work(job):
         m, side, preset = job
-        tag = '%s__%s' % (os.path.basename(m).replace('.mp4', ''), side)
+        # ⚠ tag 必须含父目录：素材池曾有一条 basename 在 10s/ 与 6s/ 下同名
+        # （screen_ui_code_src1280x720.mp4），basename 当 tag 会让两条素材的单元目录
+        # 互相覆盖（并发下还会 races）。用相对路径保证 (目录, 文件名, 侧别) 唯一。
+        tag = '%s__%s' % (os.path.relpath(m, args.pool).replace('.mp4', '')
+                          .replace(os.sep, '__'), side)
         return m, side, measure_cell(args.codec, preset, args.anchor, m,
                                      workdir, tag, args.runs, args.warmup)
 

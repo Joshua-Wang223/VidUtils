@@ -1,0 +1,70 @@
+{
+ "environment": {
+  "cpu_model": "Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz",
+  "cores": 8,
+  "cpuinfo_avx2": false,
+  "cpuinfo_avx512f": false,
+  "x265_asm": "MMX2 SSE2Fast SSSE3 SSE4.2 AVX",
+  "x265_uses_avx2": false,
+  "ffmpeg": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+  "load_at_start": [
+   0.05,
+   2.39,
+   7.14
+  ],
+  "concurrency": 2,
+  "runs_per_cell": 3,
+  "warmup": 1,
+  "anchor_crf": 24,
+  "load_at_end": [
+   12.74,
+   9.78,
+   9.04
+  ]
+ },
+ "params": {
+  "codec": "libx265",
+  "preset_a": "slow",
+  "preset_b": "slower",
+  "anchor": 24,
+  "runs": 3,
+  "warmup": 1
+ },
+ "n_materials": 2,
+ "per_material": [
+  {
+   "material": "10s/screen_ui_code_src1280x720.mp4",
+   "wall_a_s": 21.77,
+   "wall_b_s": 90.39,
+   "cpu_a_s": 78.23,
+   "cpu_b_s": 332.84999999999997,
+   "cores_a": 3.66,
+   "cores_b": 3.68,
+   "wall_ratio": 4.152044097381718,
+   "cpu_ratio": 4.25476160040905,
+   "wall_spread": 16.190000000000012
+  },
+  {
+   "material": "6s/screen_ui_code_src1280x720.mp4",
+   "wall_a_s": 13.8,
+   "wall_b_s": 52.87,
+   "cpu_a_s": 48.8,
+   "cpu_b_s": 198.67000000000002,
+   "cores_a": 3.53,
+   "cores_b": 3.74,
+   "wall_ratio": 3.831159420289855,
+   "cpu_ratio": 4.07110655737705,
+   "wall_spread": 2.59
+  }
+ ],
+ "summary": {
+  "wall_ratio_geomean": 3.988375967376052,
+  "cpu_ratio_geomean": 4.161921173148448,
+  "cpu_ratio_median": 4.16293407889305,
+  "cpu_ratio_min": 4.07110655737705,
+  "cpu_ratio_max": 4.25476160040905,
+  "cores_a_median": 3.5949999999999998,
+  "cores_b_median": 3.71,
+  "verdict_vs_1_5x": "over"
+ }
+}

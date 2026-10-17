@@ -28,7 +28,10 @@ _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_HERE/../_paths.sh"
 cd "$VU_ROOT" || exit 1
 
+# `python` 不一定在 PATH 里（Linux 常见只有 python3 / 版本化名字；Windows 常见只有 python）——
+# 自适应兜底，PY 环境变量可显式覆盖（t4_acceptance C1 就是在 Linux 上直接调本脚本）。
 PY=${PY:-python}
+command -v "$PY" >/dev/null 2>&1 || PY=python3
 SRC=${SRC:-}
 WORK=${WORK:-$VU_TEMP/probe_lossless}
 LOCALCPU=${LOCALCPU:-0}
@@ -105,14 +108,22 @@ esac
 encode() {   # encode <输出名> <编码器> <0|18>
   local name=$1 codec=$2 q=$3
   local opts=() qa=(--"$QKNOB" "$q")
+  # R1（2026-10-17）：钉 `--quality-tier quality`（窗口 [19,22]）。负向对照 18 会被
+  # 钳到 19 —— 仍属"明显有损"档、判词（必须不同）不受影响；`--qp/--crf 0` 是哨兵、
+  # 完全不参与窗口钳制。钉档只防阶段三翻默认档后本探针的档位语义漂移。
+  local tier=(--quality-tier quality)
   if [ "$LOCALCPU" = "1" ]; then
-    opts=(--decode cpu --scale-algo libswscale-lanczos)
+    # 本机替身模式给线程设上限：x265 在 `--threads >16` 时会因 frame-threads 超上限
+    # 拒绝初始化（2026-10-17 在 24 逻辑核开发机实测：自动 24 线程 → 编码必败；
+    # ≤16 正常）。本探针测的是"像素是否无损"，与线程数无关 —— 固定 8、可用
+    # PROBE_THREADS 覆盖。（GPU 路径不给 --threads：硬件编码器不吃这个选项。）
+    opts=(--decode cpu --scale-algo libswscale-lanczos --threads "${PROBE_THREADS:-8}")
   else
     qa=(--rc-mode constqp --"$QKNOB" "$q")
   fi
   "$PY" vidcrop_hwaccel.py --input "$SRC" --output "$WORK/$name" --overwrite \
     "${opts[@]}" --mode crop --output-width "$SW" --output-height "$SH" \
-    --no-skip-same-size --no-chroma-check --codec "$codec" "${qa[@]}" \
+    --no-skip-same-size --no-chroma-check --codec "$codec" "${tier[@]}" "${qa[@]}" \
     > "$WORK/$name.log" 2>&1
 }
 echo "── 转码（恒等裁剪：目标 = 源尺寸 + --no-skip-same-size）──"

@@ -10,6 +10,11 @@ set -uo pipefail
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_HERE/../_paths.sh"
 cd "$VU_ROOT" || exit 1
+
+# python 命令名不统一（Linux 常见 python3、Windows 常见 python）——自适应兜底。
+PY="${PYTHON:-python}"
+command -v "$PY" >/dev/null 2>&1 || PY=python3
+
 F=$VU_TEMP/lockstep
 mkdir -p "$F"
 [ -f "$F/land.mp4" ] || ffmpeg -nostdin -y -hide_banner -loglevel error \
@@ -22,8 +27,8 @@ pick() {
   sed -n "s/.*-filter:v:0 \('[^']*'\|[^ ][^ ]*\).*/\1/p;s/.*-vf \('[^']*'\|[^ ][^ ]*\).*/\1/p" <<< "$1" \
     | sed "s/^'//; s/'\$//" | sed 's/,setparams=.*//'
 }
-hw() { python vidcrop_hwaccel.py --input "$1" --output "$F/o" --dry-run "${@:2}" 2>&1; }
-cv() { python vidcrop_cpu_v2.py  --input "$1" --output "$F/o" --dry-run "${@:2}" 2>&1; }
+hw() { "$PY" vidcrop_hwaccel.py --input "$1" --output "$F/o" --dry-run "${@:2}" 2>&1; }
+cv() { "$PY" vidcrop_cpu_v2.py  --input "$1" --output "$F/o" --dry-run "${@:2}" 2>&1; }
 
 # hwaccel 侧固定用「三轴全 CPU」写法，它同时是旧 --hwaccel none 的等价物，
 # 且会走「跳过全部 GPU 探测」的快路径 → 与 cpu_v2 的 CPU 链可逐字对比。

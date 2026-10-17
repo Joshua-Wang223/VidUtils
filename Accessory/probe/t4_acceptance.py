@@ -11,6 +11,10 @@
   B. 运行期：NVENC 真的接受这些选项并出片（`-rc constqp -qp N` / `-qp 0`）
   C. 文档声明：`-qp 0` 到底是不是**数学无损**（交给 probe/probe_lossless_qp0.sh）
 
+R1（2026-10-17）：A/B 组统一钉 `--quality-tier quality`（窗口 [19,22] 覆盖旧基准 21 区段；
+四道 golden 门钉的是 `balanced`，两者互补）。旧期望里越窗的值已按全档钳制更新
+（A7/A8/A9/A13）；A1/A2/A3/A12 经质量档仿射往返后逐字不变。
+
 用法
 ────
     # ① T4 上机（默认跑 A + B + C；需要 GPU 与素材）
@@ -54,14 +58,19 @@ CMD_RE = re.compile(r"命令[^:]*: (ffmpeg .*)$", re.M)
 
 # ── A 组：质量参数在 GPU 策略链上的落点（dry-run 断言）──────────────────────
 # ⚠ 最后一列 `local_ok` = **这一格在 --local（本机无 GPU）下是否仍成立**。
-#   别拿"本机已验"当这个判据：A7~A9（回归格）确实在本机验过，但那是**回归门**
-#   （test/dump_enc_options.sh / dump_cmd_full.sh）用 CPU 轴验的 —— 本脚本这一格写的是
-#   NVENC 形态，本机 `--codec *_nvenc` 必然降级 ⇒ 期望不成立、必须跳过。
+#   别拿"本机已验"当这个判据：A7~A9 的旧期望曾由**回归门**（test/dump_enc_options.sh /
+#   dump_cmd_full.sh）用 CPU 轴覆盖，但 R1 起那些门钉 `balanced` 档 —— 本脚本钉
+#   `quality` 档、写的又是 NVENC 形态，本机 `--codec *_nvenc` 必然降级 ⇒ 期望不成立、必须跳过。
 # (id, 标签, 参数, 必须含[], 必须不含[], local_ok, 本机状态, 红了说明什么)
 # ⚠ A2/A3/A4/A7 的期望值随版本更新过：
 #   旧值 -qp 28 / -qp 26 / -cq 23 → -qp 20 / -qp 18 / -cq 28（2026-09-28 T4 上机核对）
 #   → **-qp 21 / -qp 18 / -cq 26**（2026-10-04 T4 等质量标定落表后：hevc_nvenc 的
 #     QUALITY_MAP=(1.1116,2.1606) ⇒ crf21→-cq 26；constqp 下 crf-ref21→-qp 21）。
+#   → **钉 `--quality-tier quality`（R1，2026-10-17）**：全档窗口钳制生效（quality =
+#     基准轴 [19,22]）；裸跑锚点注入 20 ⇒ A7 `-cq 24`；`--cq 20`（基准轴 ≈16.05）钳到
+#     19 ⇒ A8/A9 `-cq 23`；`libx264 --cq 23`（≈18.02）钳 19 ⇒ `-crf 19`。另经单元级
+#     核算：A1/A2/A3/A12 的最终命令经 quality 档仿射往返后与旧期望逐字相同
+#     （A1/A3 的钳制告警照常打印，只是落回来的原生值不变）。
 A_CASES = [
     ("A1", "nvenc constqp --qp 18", ["--codec", "hevc_nvenc", "--rc-mode", "constqp", "--qp", "18"],
      ["-c:v hevc_nvenc", "-rc constqp -qp 18"], ["libx265", "-cq"], False,
@@ -84,15 +93,17 @@ A_CASES = [
      ["-rc constqp -qp 0", "-b:v 0"], ["-cq 0"], False,
      "只能单元级", "既有的 cq0 改写回归；若变成 -cq 0 说明 0 档改写被本轮改动带坏了"),
     ("A7", "默认（回归）", ["--codec", "hevc_nvenc"],
-     ["-c:v hevc_nvenc", "-cq 26", "-b:v 0", "-rc vbr"], ["libx265"], False,
-     "本机已验（回归门覆盖）", "基准 21 经 hevc_nvenc 等质量表 ⇒ -cq 26；若还是 28 说明仍走 SIZE_MAP 回退"),
+     ["-c:v hevc_nvenc", "-cq 24", "-b:v 0", "-rc vbr"], ["libx265"], False,
+     "只能单元级", "R1：quality 档锚点注入 20 ⇒ hevc_nvenc -cq 24（旧「21 ⇒ -cq 26」已随 R1 作废）；"
+                   "若出现 29 说明锚点/窗口路径回退到了 balanced 表"),
     ("A8", "--cq 20（回归）", ["--codec", "hevc_nvenc", "--cq", "20"],
-     ["-cq 20", "-b:v 0", "-rc vbr"], ["libx265"], False,
-     "本机已验（回归门覆盖）", "既有 -cq 路径被带了（应逐字不变）"),
+     ["-cq 23", "-b:v 0", "-rc vbr"], ["libx265"], False,
+     "只能单元级", "R1 全档钳制：基准轴 ≈16.05 钳到 19 ⇒ -cq 23（旧「-cq 20 原样」已不成立）；"
+                   "若还是 20 说明钳制没生效"),
     ("A9", "vbr + cq + lookahead（回归）",
      ["--codec", "hevc_nvenc", "--cq", "20", "--rc-mode", "vbr", "--lookahead", "40"],
-     ["-cq 20", "-b:v 0", "-rc vbr", "-rc-lookahead 40"], [], False,
-     "本机已验（回归门覆盖）", "rc 轴 / lookahead 的既有组合被带了（应逐字不变）"),
+     ["-cq 23", "-b:v 0", "-rc vbr", "-rc-lookahead 40"], [], False,
+     "只能单元级", "R1 钳制同上（-cq 23）；rc 轴 / lookahead 的既有组合仍应逐字带全"),
     ("A10", "--threads 硬件编码器不发", ["--codec", "hevc_nvenc", "--threads", "4"],
      [], ["-threads"], False,
      "本机已验（回归门覆盖）", "硬件编码器不该拿到 -threads（ffmpeg 帧级线程对它没意义）"),
@@ -102,13 +113,15 @@ A_CASES = [
     ("A12", "概览 constqp 显示 QP 而非 CQ",
      ["--codec", "hevc_nvenc", "--rc-mode", "constqp", "--qp", "18"],
      ["QP: 18"], ["CQ:"], False,
-     "只能单元级", "概览印了命令里根本没有的 CQ（本机降级时它应显示 CRF: 14 —— 两种都算对，"
+     "只能单元级", "概览印了命令里根本没有的 CQ（本机降级时它应显示 CRF: 19 —— 两种都算对，"
                    "但 CQ 一定不对）"),
     # ↓ 两格是"本机也成立"的：用 CPU 编码器把**同一个装置**（解析 + 断言 + 概览抽取）跑通
-    #   （换算值别记混：h264_nvenc cq 23 → libx264 = **18**，→ libx265 = **21**）
-    ("A13", "本机版：libx264 --cq 23 → -crf 18", ["--codec", "libx264", "--cq", "23"],
-     ["-c:v libx264", "-crf 18"], [], True,
-     "本机已验", "字面量 --cq 落到 CPU 软编的换算变了（本机与 T4 同结论）"),
+    #   （R1/quality 档换算值：h264_nvenc cq 23 → 基准轴 ≈18.02 → 窗钳 19 ⇒ libx264 = **19**；
+    #     libx265 同路径 = **19**。旧值 18/21 属未钳制世界，勿再用）
+    ("A13", "本机版：libx264 --cq 23 → -crf 19", ["--codec", "libx264", "--cq", "23"],
+     ["-c:v libx264", "-crf 19"], [], True,
+     "本机已验", "字面量 --cq 落到 CPU 软编的换算变了（本机与 T4 同结论）；"
+                 "若还是 18 说明 quality 窗钳制没生效"),
     ("A14", "本机版：概览 constqp 显示 CRF 而非 CQ",
      ["--codec", "libx265", "--rc-mode", "constqp", "--qp", "18"],
      ["CRF:"], ["CQ:"], True,
@@ -138,6 +151,9 @@ B_CASES = [
      "需上机", "另一个 NVENC 编码器上 constqp 不被接受"),
 ]
 BASE = ["--mode", "crop", "--output-width", "640", "--output-height", "360"]
+# R1（2026-10-17）：A/B 组统一钉 `--quality-tier quality` —— 窗口 [19,22] 覆盖旧基准 21
+# 区段，与四道 golden 门（钉 `balanced`）互补；阶段三默认翻档到 quality 后本脚本不漂移。
+TIER = ["--quality-tier", "quality"]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -280,6 +296,7 @@ def main() -> int:
 
     print(f"素材      : {src}")
     print(f"模式      : {'本机降级自证（--local）' if a.local else 'T4 上机'}")
+    print(f"质量档    : quality（R1 钉死；窗口 [19,22] 全档生效）")
 
     rep = Report()
 
@@ -287,7 +304,7 @@ def main() -> int:
     print("\n── A. 质量参数在 GPU 策略链上的落点（--dry-run，比命令/概览文本）──")
     for cid, label, extra, must, nots, local_ok, local, hint in A_CASES:
         args = [str(HW), "--input", str(src), "--output", str(out_root / cid),
-                "--dry-run"] + BASE + extra
+                "--dry-run"] + BASE + TIER + extra
         if a.local and not local_ok:
             rep.skip(cid, label, local, f"这一格是 NVENC 形态，本机 `--codec *_nvenc` 必然降级 ⇒ "
                                         f"期望不成立（{local}）")
@@ -312,7 +329,7 @@ def main() -> int:
             if extra[:2] == ["--mode", "cover"]:
                 extra = extra + ["--output-width", "640", "--output-height", "360"]
             args = [str(HW), "--input", str(src), "--output", str(dst),
-                    "--overwrite", "--no-chroma-check"] + extra
+                    "--overwrite", "--no-chroma-check"] + TIER + extra
             if "--mode" not in extra:
                 args += ["--mode", "crop", "--output-width", "640", "--output-height", "360"]
             rc, text = run(args)

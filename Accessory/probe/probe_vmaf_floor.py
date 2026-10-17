@@ -31,8 +31,12 @@ print(f"探针：近无损档，复用同一参照与同一打分口径\n")
 
 for codec, flag, val in PROBES:
     out = WORK / f"probe_{codec}_{flag.lstrip('-')}{val}.mp4"
+    # R1（2026-10-17）：钉 `--quality-tier quality`（窗口 [19,22]）—— 参照是 crf-ref 21
+    # （旧基准）；默认档 balanced 会把它钳到 23、改变参照质量口径。候选原生值走
+    # --extra-args 注入（ffmpeg 取最后一个同名选项），不受此钉档影响。
     cmd = [sys.executable, str(ROOT / "convert_sdr_to_hdr.py"), "-i", str(SRC), "-o", str(out),
-           "--model", "agcm", "--codec", codec, "--crf-ref", "21", "--frames", str(FRAMES),
+           "--model", "agcm", "--codec", codec, "--crf-ref", "21", "--quality-tier", "quality",
+           "--frames", str(FRAMES),
            "--device", "cpu", "--split-mode", "off", "--overwrite",
            "--extra-args", flag, str(val)]
     t0 = time.time()

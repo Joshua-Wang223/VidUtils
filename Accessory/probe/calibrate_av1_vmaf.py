@@ -64,11 +64,17 @@ def _run(cmd, timeout):
 def encode_one(src: Path, out: Path, codec: str, flag: str | None,
                value: int | None, model: str, crf_ref: int, frames: int,
                timeout: int) -> tuple[bool, str]:
-    """跑生产同一条管线；flag/value 给出时用 --extra-args 注入原生质量值。"""
+    """跑生产同一条管线；flag/value 给出时用 --extra-args 注入原生质量值。
+
+    R1（2026-10-17）：钉 `--quality-tier quality`（窗口 [19,22]）—— 参照与无注入格都走
+    crf-ref（默认 21）；默认档 `balanced` 会把 21 钳到 23、改变参照质量口径。钉档后 21
+    原样下发。⚠ `--crf-ref` 超出 [19,22] 仍会被钳 —— 本标定不宜跨窗取值。
+    """
     cmd = [sys.executable, str(ROOT / "convert_sdr_to_hdr.py"),
            "-i", str(src), "-o", str(out),
            "--model", model, "--codec", codec,
-           "--crf-ref", str(crf_ref), "--frames", str(frames),
+           "--crf-ref", str(crf_ref), "--quality-tier", "quality",
+           "--frames", str(frames),
            "--device", "cpu", "--split-mode", "off",
            "--overwrite"]
     if flag:

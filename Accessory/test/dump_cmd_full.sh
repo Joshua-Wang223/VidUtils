@@ -33,6 +33,8 @@
 #   · 显式钉 `--quality-tier balanced`（阶段一默认即 balanced ⇒ 判据"两脚本逐字相同"不受影响，
 #     钉死只为阶段三翻默认档时 golden 不随默认漂移）；
 #   · 默认质量锚点 21 → 24（无质量参数的格 `-crf 21` → `-crf 24`）；显式值被档窗口钳制：
+# 基线录制：2026-10-17，开发机（Linux；-threads 24、路径 /workspace/VidUtils）——
+# 换机重录会得到 Windows 路径 (D:\...) 与 -threads 8 两类噪声 token，仅此不同。
 #     `libx265 --crf 20` / `--crf-ref 21`（基准轴 20/21 越下界 ⇒ 钳 23）、
 #     `libx264 --cq 23`（基准轴 ≈18 ⇒ 钳 23 ⇒ `-crf 23`）、`libx264 --cq 4`（≈-1 ⇒ 钳 23）；
 #     `libvpx-vp9 --crf 32` 归一到基准轴后（≈23.3）落在窗内 ⇒ 不变；`libsvtav1 --crf 30`
@@ -44,6 +46,10 @@ set -uo pipefail
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_HERE/../_paths.sh"
 cd "$VU_ROOT" || exit 1
+
+# python 命令名不统一（Linux 常见 python3、Windows 常见 python）——自适应兜底。
+PY="${PYTHON:-python}"
+command -v "$PY" >/dev/null 2>&1 || PY=python3
 
 F=$VU_TEMP/lockstep
 mkdir -p "$F"
@@ -65,9 +71,9 @@ cmd_of() { sed -n 's/.*命令[^:]*: \(ffmpeg .*\)$/\1/p' <<< "$1" | head -1; }
 # 也一并钉在门里。
 # R1（2026-10-17）：显式钉 `--quality-tier balanced`（阶段一默认即 balanced ⇒ 逐字判据不变）。
 TIER=(--quality-tier balanced)
-hw() { python vidcrop_hwaccel.py --input "$SRC" --output "$OUT" \
+hw() { "$PY" vidcrop_hwaccel.py --input "$SRC" --output "$OUT" \
          --decode cpu --scale-algo libswscale-lanczos --dry-run "${TIER[@]}" "$@" 2>&1; }
-cv() { python vidcrop_cpu_v2.py --input "$SRC" --output "$OUT" \
+cv() { "$PY" vidcrop_cpu_v2.py --input "$SRC" --output "$OUT" \
          --dry-run "${TIER[@]}" "$@" 2>&1; }
 
 FAILS=0
@@ -86,7 +92,7 @@ cmp_pair() {   # cmp_pair <标签> <hwaccel 命令> <cpu_v2 命令>
     return 0
   fi
   printf '  ✗ %-30s 命令不同：\n' "$tag" >&2
-  python - "$h" "$c" <<'PY' >&2
+  "$PY" - "$h" "$c" <<'PY' >&2
 import difflib, shlex, sys
 a, b = shlex.split(sys.argv[1]), shlex.split(sys.argv[2])
 for op, i1, i2, j1, j2 in difflib.SequenceMatcher(a=a, b=b).get_opcodes():

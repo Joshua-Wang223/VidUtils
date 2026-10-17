@@ -65,6 +65,11 @@ set -uo pipefail
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_HERE/../_paths.sh"
 cd "$VU_ROOT" || exit 1
+
+# python 命令名不统一（Linux 常见 python3、Windows 常见 python）——自适应兜底。
+PY="${PYTHON:-python}"
+command -v "$PY" >/dev/null 2>&1 || PY=python3
+
 F=$VU_TEMP/lockstep
 mkdir -p "$F"
 [ -f "$F/land.mp4" ] || ffmpeg -nostdin -y -hide_banner -loglevel error \
@@ -78,8 +83,8 @@ tokens() {
     | grep -oE '\-(c:v|cq|crf|qp|b:v|rc|rc-lookahead|lag-in-frames|preset|threads|pix_fmt|profile:v|x264-params|x265-params) [^ ]+' \
     | tr '\n' ' '
 }
-hw() { python vidcrop_hwaccel.py --input "$F/land.mp4" --output "$F/o" --dry-run "$@" 2>&1; }
-cv() { python vidcrop_cpu_v2.py  --input "$F/land.mp4" --output "$F/o" --dry-run "$@" 2>&1; }
+hw() { "$PY" vidcrop_hwaccel.py --input "$F/land.mp4" --output "$F/o" --dry-run "$@" 2>&1; }
+cv() { "$PY" vidcrop_cpu_v2.py  --input "$F/land.mp4" --output "$F/o" --dry-run "$@" 2>&1; }
 
 # hwaccel 固定三轴全 CPU（与 dump_filter_chains.sh 同因：跳过 GPU 探测、与 v2 可比）
 CPU_ONLY=(--decode cpu --scale-algo libswscale-lanczos)

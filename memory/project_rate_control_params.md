@@ -425,3 +425,17 @@ tier = 编码策略基底（preset / lookahead / multipass / aq / tune；由编�
 - 回归：`verify/verify_quality_mapping.py` ⑬、`verify/verify_rc_lookahead.py` ⑩ E/F、
   `verify/verify_overview_lockstep.py` ⑥、`verify/verify_cli_parsing.py` ③；
   规格权威 `Plan/VidUtils_质量参数统一_quality-tier方案_v3_20261015.md`（§4/§8/§9）。
+
+---
+
+## 追加（2026-10-17）：M7 裁定（不扩锚）与四份 golden 重录完成
+
+**M7 裁定**：`draft(36)/test(45)/near-lossless(6)/lossless(0)` 四档**本期不扩锚**，维持 `ANCHOR_CRFS=[18,21,24,27,30]`、`SWEEP`、`GATE_ANCHORS=(0,27)` 不变；四档明确为「未标定、回退 balanced 表 + 告警」，LOO 门禁不放宽。re-visit 触发条件与扩锚预案（+[0,6,33,39,45]、同步扩 SWEEP/锚点集、重审 GATE_ANCHORS）落 Part B §B2「R1-M7 决策」与主方案 §13.14 ① / §13.15 R1-8。
+
+**四份 golden（①）**：本机（Linux 开发机）重录 `dump_cmd_default.sh` / `dump_filter_chains.sh` / `dump_enc_options.sh` / `dump_cmd_full.sh` 四脚本（已补 PY 兜底）；
+- `cmd_before.txt` / `chains_before.txt` 逐字相同（机器无关）
+- `enc_before.txt`：新增 hevc_nvenc lossless 两格（hwaccel/cpu_v2），显式值钳制更新（`libsvtav1 --crf 30 → 34`、`libx264 --cq 23 → 23`、`libx265 --crf 20 → 23` 等），与 dump 脚本头部例外列表一致
+- `cmd_full.txt`：Windows(D:\...\threads 8) → Linux(/workspace/VidUtils...\threads 24) 路径/线程差异预期内；默认锚点 21→24、显式值钳制（如前），两脚本 20/20 逐字相同
+- dump_cmd_full.sh 头部已加录制机来源注
+
+**③ 探针钉 tier**：t4_acceptance.py / probe_lossless_qp0.sh / calibrate_av1_vmaf.py / crossctrl_material_vs_pipeline.py / probe_vmaf_floor.py —— 全钉 `--quality-tier quality`（窗口 [19,22]，覆盖旧基准 21）；bench_sdr_to_hdr.py 留默认（DEFAULT_REF=24 在 balanced 窗内无钳制、且默认值随 DEFAULT_QUALITY_TIER 变）。

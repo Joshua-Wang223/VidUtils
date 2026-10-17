@@ -956,7 +956,7 @@ _EQQUAL_TIER_OVERRIDE = {
 
 > **R1（2026-10-17）**：本节旧稿（`≥93 VMAF / ≥0.98 SSIM` 判据、「遍历 preset 找等价 preset」误述、重复的注意事项段、与 §12.7 重复的进度表）已按审核意见压缩为下述任务清单；判据、阈值、口径一律以 Part B 为准。原任务 1（aom/vp9 恒等值）已由探针完成、原任务 3（并发守卫）已完成——现状统一见 §12.7。
 
-**① CPU 环标定（可立即开始）**：`calibrate_equal_quality.py` 的 `--preset-override` ✅ **已落地**（2026-10-17）→ 按 §13.10R 档值对 `libx264` / `libx265` / `libvpx-vp9` / `libaom-av1` / `libsvtav1` / `librav1e` 逐档跑标定，过 LOO（软编 ≤5.9、rav1e ≤7.5、`GATE_ANCHORS=(0,27)`）后填 `_EQQUAL_TIER_OVERRIDE[tier]`。**M7**：`draft(36)/test(45)/near-lossless(6)/lossless(0)` 需先扩锚（建议 +`0/6/33/39/45`）或明确 LOO 放宽——二选一写进报告。
+**① CPU 环标定（可立即开始）**：`calibrate_equal_quality.py` 的 `--preset-override` ✅ **已落地**（2026-10-17）→ 按 §13.10R 档值对 `libx264` / `libx265` / `libvpx-vp9` / `libaom-av1` / `libsvtav1` / `librav1e` 逐档跑标定，过 LOO（软编 ≤5.9、rav1e ≤7.5、`GATE_ANCHORS=(0,27)`）后填 `_EQQUAL_TIER_OVERRIDE[tier]`。**M7 已裁（2026-10-17）**：**不扩锚**（本期）——四极限档 `draft/test/near-lossless/lossless` 维持「未标定回退 + 告警」，LOO 门禁不放宽；re-visit 条件与扩锚预案（+[0,6,33,39,45]、同步扩 SWEEP/锚点集、重审 GATE_ANCHORS）见 Part B §B2「R1-M7 决策」。
 
 **② T4 环**：NVENC `h264_nvenc` / `hevc_nvenc` 各档量程 + `p5/p6/p7` 可用性 + `_NVENC_PRESET_RETRY` 触发率（红线 1%）+ `_QP_AFFINE_QUALITY` 同步重标（CR-4，⑨ 组逐条断言）。产出：矩阵 NVENC 行经实测核准（不可用则走常量层回退）。
 
@@ -993,3 +993,4 @@ _EQQUAL_TIER_OVERRIDE = {
 | R1-5 | **M1~M9 条文** | M1→§4.1 注/§4.4 步2；M2/M3→§4.3；M4→§2.4；M5→§4.4.1；M6/M8→§4.4 步1；M7→§6.3~6.6；M9→§4.4 样例表/§11 | 用户拍板 |
 | R1-6 | **文档卫生** | 行号→符号（文首注）；§12.7 与 §13.14 台账合并；残留清理（§12.4 等）；「slsx」拼写在实际实现提交中处理 | 用户拍板 |
 | R1-7 | **默认路径轨迹** | 裸跑默认质量值：`21` → **`24`**（阶段一，默认档 `balanced` 锚点）→ **`20`**（翻档后）；三态写进 README/help/memory | R1-1 × Q12 的直接推论 |
+| R1-8 | **M7 = 不扩锚** | `draft/test/near-lossless/lossless` 四档明确「未标定、回退 balanced 表 + 告警」，LOO 门禁不放宽；re-visit 条件与扩锚预案见 Part B §B2 | R1-M7 裁定（2026-10-17） |

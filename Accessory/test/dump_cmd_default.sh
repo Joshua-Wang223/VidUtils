@@ -9,6 +9,12 @@ set -uo pipefail
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_HERE/../_paths.sh"
 cd "$VU_ROOT" || exit 1
+
+# python 命令名不统一（Linux 常见 python3、Windows 常见 python）——自适应兜底，
+# PY 环境变量可显式覆盖（Windows 机想换机重录是单条命令）。
+PY="${PYTHON:-python}"
+command -v "$PY" >/dev/null 2>&1 || PY=python3
+
 F=$VU_TEMP/lockstep
 mkdir -p "$F"
 [ -f "$F/land.mp4" ] || ffmpeg -nostdin -y -hide_banner -loglevel error \
@@ -29,7 +35,7 @@ TIER=(--quality-tier balanced)
 emit() {  # emit <标签> <参数...>
   local tag=$1; shift
   local out
-  out=$(python vidcrop_hwaccel.py --input "$F/land.mp4" --output "$F/o" --dry-run "${TIER[@]}" "$@" 2>&1)
+  out=$("$PY" vidcrop_hwaccel.py --input "$F/land.mp4" --output "$F/o" --dry-run "${TIER[@]}" "$@" 2>&1)
   printf '%-34s %s\n' "$tag" "$(decode_bits "$out")"
 }
 

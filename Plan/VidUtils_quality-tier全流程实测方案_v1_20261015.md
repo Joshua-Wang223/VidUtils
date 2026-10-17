@@ -49,6 +49,17 @@
 
 ---
 
+### R1-M7 决策（2026-10-17 裁定）：**不扩锚（本期）**，四极限档维持「未标定回退 + 告警」，LOO 门禁不放宽
+
+| 项 | 裁定内容 | 依据 |
+|---|---|---|
+| **锚点扩展** | **本期不扩**。`ANCHOR_CRFS` 维持 `[18, 21, 24, 27, 30]`；harness 常量 `ANCHOR_CRFS`、`SWEEP`、`GATE_ANCHORS=(0,27)` 均不变。 | 1) draft/test(36/45) 超出 LOO 判据区间 [0,27] —— 即使跑出数据也无门禁背书（§B7 红线：LOO 超门禁禁止落表）；要落表必须同步扩锚 (+`33/39/45`)、扩 `SWEEP` 高端、重审 `GATE_ANCHORS` 政策（若生产 ref 越过 27 须恢复全区间或改稳健统计量）。<br>2) near-lossless/lossless(6/0) 低端同样缺锚（libx264 锚点自 18 起，`SWEEP` 自 10/12 起），VMAF 在近无损段饱和、反查条件数差（主方案 §10 风险表已预告）；扩锚还须同步压 `SWEEP` 低端至 0~6（aom/vp9 在 cpu-used 低值 + crf≈0 的组合极慢）。<br>3) 四档优先级最低（主方案 §10 风险表 / §B1 表：**质量/平衡 优先**）→ 本期不投入。 |
+| **四档状态** | 明确为**「未标定、回退 balanced 表 + 告警」**（主方案 §2.4 / §10 / §13.14 ① 注），不是待办欠账。 | H4（R1-4）：`_EQQUAL_TIER_OVERRIDE` 非 `balanced` 键一律空；`CALIB_FINGERPRINT` 仅 `balanced`；三脚本 help / README / memory 已说明「阶段一契约：非 balanced 告警是预期」。 |
+| **LOO 门禁** | **不放宽**。维持 `GATE_ANCHORS=(0,27)`、软编 ≤5.9 / rav1e ≤7.5。 | 放宽 = 用未经判据背书的数落表，违反 §B7/§10 红线精神（宁可告警不给错值）。draft/test 的 LOO 误差列已在「监控」区自动打印，无需额外放宽。 |
+| **re-visit 触发条件** | 仅当出现**真实用例**需要 precision-archive（near-lossless）或存储敏感（draft/test）的等质量换算时，再开一轮「扩锚专项」：<br>① 锚点 +`[0, 6, 33, 39, 45]`（其中 0 若因哨兵确认无意义可省）<br>② 同步扩 `libx264` 锚点集（需 ≥18）与各编码器 `SWEEP` 两端<br>③ 重审 `GATE_ANCHORS`（若生产 ref 越过 27/18 边界则须恢复全区间或改稳健统计量）<br>④ `lossless`：0 是哨兵通路，表不参与换算；标定 N/A。落表阶段若遇「未标定告警」语义问题，建议在 `CALIB_FINGERPRINT` 里把 lossless 记为 `{'calibrated': True, 'evidence': 'sentinel — 表不参与换算'}`（具体形态落表时定）。 | 防止静默沿用（`loo_equal_quality.py:14-15` 已预警）。 |
+
+---
+
 ## B3. 测量项定义
 
 | 项 | 定义 | 采集方式 |

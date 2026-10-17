@@ -33,6 +33,10 @@ bench_sdr_to_hdr.py — convert_sdr_to_hdr.py 的生产基准（2026-10-08）
    ref=21 处**没有任何编码器是恒等映射**（实测 `from_x264_crf`）：libx265→20.74、
    hevc_nvenc→25.50、libaom-av1→31.11、libsvtav1→22.64、librav1e→73.66。只有
    libx264 恰好 21.00，而那是**回退到 SIZE_MAP 的副产品**、非显式声明。
+   ⚠ **R1（2026-10-17）**：全档窗口钳制生效后，`--crf-ref` 超出当前默认档窗口会被钳
+   （balanced = 基准轴 23~26）。默认值 = `DEFAULT_REF` = 默认档锚点、恒在窗内（不受影响）；
+   显式传越窗值（如 21 → 钳 23）仍保持「同质量」语义（各编码器统一钳到同一基准轴），
+   但报告里 `crf_ref` 展示值与实测 `crf_sent` 的落差会变大 —— 读表以 `crf_sent` 为准。
    ⚠ 三行 AV1 软编为 **HDR 域**值（2026-10-16 起 convert_sdr_to_hdr 启用 HDR
    覆盖表；SDR 域旧值为 26.37 / 28.96 / 64.38）；libx265 与 NVENC 两域同值。
    ⚠ 不在 QUALITY_MAP 里的编码器（libx264 / 全部 `*_qsv`/`*_amf`/`*_vaapi`/

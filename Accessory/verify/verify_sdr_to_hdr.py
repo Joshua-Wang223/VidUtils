@@ -372,19 +372,31 @@ def enc_crf(args):
     m = re.search(r'-crf (\d+)', ec)
     return rc, (int(m.group(1)) if m else None)
 
-rc, q_val = enc_crf(['--crf-ref', '30'])
-chk('⑦ --crf-ref 30（quality 口径）退出码', rc, 0)
+rc, q_val = enc_crf(['--crf-ref', '30', '--quality-tier', 'preview'])
+chk('⑦ --crf-ref 30（quality 口径 + preview 档）退出码', rc, 0)
 chk('⑦ quality 口径换算到 libx265（等质量表 → 31）', q_val, 31)
-rc, s_val = enc_crf(['--crf-ref', '30', '--quality-mode', 'size'])
+rc, s_val = enc_crf(['--crf-ref', '30', '--quality-mode', 'size',
+                     '--quality-tier', 'preview'])
 chk('⑦ size 口径换算到 libx265（等体积表 → 29）', s_val, 29)
 chk_true('⑦ 两种口径确实给出不同值（否则该参数是摆设）',
          q_val != s_val, f'quality={q_val} size={s_val}')
 
+# R1 默认档兜底：显式质量值先归一到基准轴、再被本档窗口钳制（全档生效，含
+# balanced）。测「等效表换算」本身时把值钉进含它的档（preview [27,33]）⇒ 窗口
+# 不介入；默认档的钳制行为用下面这条钉住：ref 30 + 默认 balanced → 钳到 26。
+rc, out, ec = enc_cmd(['--crf-ref', '30'])
+chk('⑦ --crf-ref 30 + 默认 balanced ⇒ 钳到 26（R1 全档生效）',
+    '-crf 26' in ec, True)
+chk_in('⑦ 钳制要说明窗口', '质量窗口为 CRF 23~26', out)
+chk_in('⑦ 钳制建议改用 preview 档', '请改用 --quality-tier preview', out)
+
 # ② 字面量同族原样下发；跨族换算
-rc, out, ec = enc_cmd(['--crf', '22'])
-chk_in('⑦ --crf 22 字面量原样下发', '-crf 22', ec)
-rc, out, ec = enc_cmd(['--cq', '26'])
-chk_in('⑦ --cq 落到 CPU 编码器时换算为 -crf', '-crf 21', ec)
+# （R1：显式值经四步归一到基准轴后由本档窗口钳制 ⇒ 钉进含该值的档再测换算；
+#   --cq 26 的基准轴 ≈21 落在 quality 档 [19,22] 内。）
+rc, out, ec = enc_cmd(['--crf', '22', '--quality-tier', 'quality'])
+chk_in('⑦ --crf 22 字面量（quality 档内）经本行往返后原样下发', '-crf 22', ec)
+rc, out, ec = enc_cmd(['--cq', '26', '--quality-tier', 'quality'])
+chk_in('⑦ --cq 26 落到 CPU 编码器时换算为 -crf（quality 档内）', '-crf 21', ec)
 chk('⑦ 换算后的值不得与输入相同（防"静默丢值"）', '-cq 26' in ec, False)
 
 # ②b HDR 域覆盖（2026-10-16 重标定；§10 后 svtav1/aom 分段、rav1e 新仿射）：本脚本
@@ -392,29 +404,32 @@ chk('⑦ 换算后的值不得与输入相同（防"静默丢值"）', '-cq 26' 
 # （convert_crf.HDR_EQUAL_QUALITY_OVERRIDE）；其余行与 size 口径不受影响。
 # libsvtav1 / libaom-av1 为分段模型（PiecewiseLinear）。期望值取自标定产物 json
 # （.codecs.*.fit / .piecewise.knots_cuminc[_old]）与 memory … §9/§10，非本仓落表值。
-rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '21'])
+# R1：以下每条都按值钉进含它的档（15~17 → archive，21 → quality，30 → preview），
+# 使窗口钳制不介入 ⇒ 期望值与 pre-R1 逐条相同（测的仍是域表换算本身）。
+rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '21', '--quality-tier', 'quality'])
 chk('⑦-HDR 域：libsvtav1 --crf-ref 21 → -crf 23（旧 sdr 值 29；分段模型锚点不变）', (rc, v), (0, 23))
-rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '15'])
+rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '15', '--quality-tier', 'archive'])
 chk('⑦-HDR 域：libsvtav1 --crf-ref 15 → -crf 6（§10 新锚区；旧表外推 2）', (rc, v), (0, 6))
-rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '16'])
+rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '16', '--quality-tier', 'archive'])
 chk('⑦-HDR 域：libsvtav1 --crf-ref 16 → -crf 8', (rc, v), (0, 8))
-rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '17'])
+rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '17', '--quality-tier', 'archive'])
 chk('⑦-HDR 域：libsvtav1 --crf-ref 17 → -crf 10', (rc, v), (0, 10))
-rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '30'])
+rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '30', '--quality-tier', 'preview'])
 chk('⑦-HDR 域：libsvtav1 --crf-ref 30 → -crf 51（分段模型末锚点；旧仿射 52）', (rc, v), (0, 51))
-rc, v = enc_crf(['--codec', 'libaom-av1', '--crf-ref', '21'])
+rc, v = enc_crf(['--codec', 'libaom-av1', '--crf-ref', '21', '--quality-tier', 'quality'])
 chk('⑦-HDR 域：libaom-av1 --crf-ref 21 → -crf 31（旧 sdr 值 26；§10 分段后不变）', (rc, v), (0, 31))
-rc, v = enc_crf(['--codec', 'libaom-av1', '--crf-ref', '15'])
+rc, v = enc_crf(['--codec', 'libaom-av1', '--crf-ref', '15', '--quality-tier', 'archive'])
 chk('⑦-HDR 域：libaom-av1 --crf-ref 15 → -crf 14（§10 新锚区；旧仿射 17）', (rc, v), (0, 14))
-rc, v = enc_crf(['--codec', 'libaom-av1', '--crf-ref', '30'])
+rc, v = enc_crf(['--codec', 'libaom-av1', '--crf-ref', '30', '--quality-tier', 'preview'])
 chk('⑦-HDR 域：libaom-av1 --crf-ref 30 → -crf 53（§10 分段；旧仿射 54）', (rc, v), (0, 53))
-rc, out, ec = enc_cmd(['--codec', 'librav1e', '--crf-ref', '21'])
+rc, out, ec = enc_cmd(['--codec', 'librav1e', '--crf-ref', '21', '--quality-tier', 'quality'])
 _m = re.search(r'-qp (\d+)', ec)
 chk('⑦-HDR 域：librav1e --crf-ref 21 → -qp 74（旧 sdr 值 64；6 锚新仿射 71→74）',
     (rc, int(_m.group(1)) if _m else None), (0, 74))
-rc, v = enc_crf(['--codec', 'libx265', '--crf-ref', '21'])
+rc, v = enc_crf(['--codec', 'libx265', '--crf-ref', '21', '--quality-tier', 'quality'])
 chk('⑦-HDR 域：未覆盖行不受影响（libx265 → -crf 21）', (rc, v), (0, 21))
-rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '21', '--quality-mode', 'size'])
+rc, v = enc_crf(['--codec', 'libsvtav1', '--crf-ref', '21', '--quality-mode', 'size',
+                 '--quality-tier', 'quality'])
 chk('⑦-HDR 域：size 口径不受影响（svtav1 等体积 → -crf 24）', (rc, v), (0, 24))
 
 # ③ HDR10 能力守卫：8bit-only 编码器直接拒绝
@@ -426,10 +441,12 @@ chk('⑦ --codec libx264（能做 10bit 但非 HDR10 交付格式）应放行', 
 chk_in('⑦ 但必须告警', 'HDR10 的交付格式', out)
 
 # ④ 降级链：本机无 NVENC → 自动降级 libx265，且质量值要按新编码器换算
-rc, out, ec = enc_cmd(['--codec', 'hevc_nvenc', '--cq', '26'])
+# （R1：--cq 26 的基准轴 ≈21 落在 quality 档 [19,22] 内 ⇒ 钉 quality 档，
+#   降级后 libx265 的落值 = 21，与 pre-R1 逐字相同。）
+rc, out, ec = enc_cmd(['--codec', 'hevc_nvenc', '--cq', '26', '--quality-tier', 'quality'])
 chk('⑦ hevc_nvenc 不可用时退出码仍为 0（auto 策略降级）', rc, 0)
 chk_in('⑦ 降级到 libx265 并入命令', '-c:v libx265', ec)
-chk_in('⑦ 降级后 --cq 26 换算成 -crf（质量值不得蒸发）', '-crf 21', ec)
+chk_in('⑦ 降级后 --cq 26 换算成 -crf（quality 档内；质量值不得蒸发）', '-crf 21', ec)
 chk('⑦ 降级后不得残留 -cq', '-cq 26' in ec, False)
 rc, out, ec = enc_cmd(['--codec', 'hevc_nvenc', '--fallback-policy', 'strict'])
 chk('⑦ strict 策略下不可用必须报错', rc, 2)

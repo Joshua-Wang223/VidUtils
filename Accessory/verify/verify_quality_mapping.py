@@ -1214,6 +1214,125 @@ chk('[13] 档值 preset：h264_nvenc archive/balanced = p6/p4',
     [H.default_preset_for('h264_nvenc', t) for t in ('archive', 'balanced')],
     ['p6', 'p4'])
 
+# ── ⑬-10 sdr 端口（convert_sdr_to_hdr）：四步 / HDR 域表（M5）/ 速度轴 / tune ──
+# sdr 的生产语义 = quality 口径 + HDR 域（validate_args 里 set_quality_mode(args.
+# quality_mode) 后 set_quality_domain('hdr')）；直接调 S 的用例先复现该状态、用完
+# 复原。三脚本共享同一份 convert_crf 模块实例（都走 `from convert_crf import`），
+# 状态从本文件加载的 H 实例上取。
+_sdr_spec = importlib.util.spec_from_file_location('vu_sdr',
+                                                   ROOT / 'convert_sdr_to_hdr.py')
+S = importlib.util.module_from_spec(_sdr_spec)
+_sdr_spec.loader.exec_module(S)
+_cc10 = sys.modules['convert_crf']
+_pm10, _pd10 = _cc10.get_quality_mode(), _cc10.get_quality_domain()
+_cc10.set_quality_mode('quality')
+_cc10.set_quality_domain('hdr')
+try:
+    chk('[13] sdr 锚点注入（HDR 域）：libx265 balanced=24 / archive=15（域表落值）',
+        [qq(S, 'libx265', tier=t)[0] for t in ('balanced', 'archive')], [24, 15])
+    chk('[13] sdr HDR 域覆盖行落值：svtav1/aom/vp9 balanced = 33/39/32',
+        [qq(S, c, tier='balanced')[0]
+         for c in ('libsvtav1', 'libaom-av1', 'libvpx-vp9')], [33, 39, 32])
+    _cc10.set_quality_domain('sdr')
+    chk('[13] sdr vs HDR 域对照（同值不同落点 ⇒ 域表确实被使用）：svtav1 36 / aom 33',
+        [qq(S, c, tier='balanced')[0] for c in ('libsvtav1', 'libaom-av1')], [36, 33])
+    _cc10.set_quality_domain('hdr')
+    _buf10 = io.StringIO()
+    with contextlib.redirect_stdout(_buf10):
+        _v10 = S._resolve_quality_params('libx265', 50, None, tier='archive')
+    chk('[13] sdr 四步：--crf 50 + archive ⇒ 落 -crf 17', _v10, (17, None, None))
+    chk_in('[13] sdr 窗口告警逐字（与另两脚本同句）', _w13, _buf10.getvalue())
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            S._resolve_quality_params('libx265', 50, None, tier='archive',
+                                      strict_quality=True)
+        _se10 = None
+    except SystemExit as _e10:
+        _se10 = _e10.code
+    chk('[13] sdr --strict-quality：越窗直接退出码 2', _se10, 2)
+    chk('[13] sdr 0 哨兵：--crf 0（原始）保留通道；--crf 5 + lossless 归零',
+        (qq(S, 'libx265', crf=0, tier='archive'),
+         qq(S, 'libx265', crf=5, tier='lossless')),
+        ((0, None, None), (0, None, None)))
+    chk('[13] sdr 档值 preset 同表：libx265 archive/balanced = slower/medium',
+        [S.default_preset_for('libx265', t) for t in ('archive', 'balanced')],
+        ['slower', 'medium'])
+    chk('[13] sdr tune 派生与 hwaccel 逐项一致（archive→uhq / balanced→None / h264→None / 归零→None）',
+        [S._strategy_tune_for('hevc_nvenc', 'archive', None, False),
+         S._strategy_tune_for('hevc_nvenc', 'balanced', None, False),
+         S._strategy_tune_for('h264_nvenc', 'archive', None, False),
+         S._strategy_tune_for('hevc_nvenc', 'archive', None, True)],
+        ['uhq', None, None, None])
+
+    def _sdr13(codec=None, st=None, **kw):
+        if st is None:
+            st = S.EncodeSettings(codec=codec, crf=kw.pop('crf', None),
+                                  preset='medium', pix_fmt='yuv420p10le',
+                                  tier=kw.pop('tier', None))
+        return ' '.join(S.build_encode_cmd(640, 360, 30.0, WORK / 'o13_sdr.mp4', SRC,
+                                           st, False,
+                                           extra_args=kw.pop('extra_args', None)))
+
+    _aom_s = _sdr13('libaom-av1', crf=24, tier='balanced')
+    _vp9_s = _sdr13('libvpx-vp9', crf=24, tier='balanced')
+    _vp9_n = _sdr13('libvpx-vp9', crf=24)
+    _rv_s = _sdr13('librav1e', crf=24, tier='balanced')
+    _rv_n = _sdr13('librav1e', crf=24)
+    chk('[13] sdr 速度轴：aom=6 / vp9=2（新显式）/ rav1e -speed 6',
+        ('-cpu-used 6' in _aom_s, '-cpu-used 2' in _vp9_s, '-speed 6' in _rv_s),
+        (True, True, True))
+    chk('[13] sdr 速度轴：无 tier 时保持旧行为（vp9 不下发 / rav1e 不下发 -speed）',
+        ('-cpu-used' in _vp9_n, '-speed' in _rv_n), (False, False))
+    _vp9_x = _sdr13('libvpx-vp9', crf=24, tier='balanced',
+                    extra_args=['-cpu-used', '4'])
+    chk('[13] sdr 速度轴尊重 --extra-args 显式值',
+        ('-cpu-used 4' in _vp9_x, '-cpu-used 2' in _vp9_x), (True, False))
+    # rc 轴注入在 build_encode_settings（sdr 的 aq 走结构层，§8-3 登记的不对称）
+    class _NS10:
+        pass
+    _ns10 = _NS10()
+    _ns10.__dict__.update(dict(
+        codec='hevc_nvenc', preset='p4', bit_depth=10, threads=0,
+        audio_codec='copy', audio_bitrate='128k', no_master_display=False,
+        master_display=None, max_cll=None, color_range='pc', rc_mode='auto',
+        quality_tier='archive', lookahead=None, nvenc_multipass=None,
+        nvenc_aq=False, nvenc_tune=None, crf=None, cq=None, qp=None,
+        bitrate=None))
+    _st10 = S.build_encode_settings(_ns10)
+    chk('[13] sdr rc 轴：archive ⇒ lookahead 250 + multipass fullres + aq（§8-3 走结构层）',
+        (_st10.lookahead, _st10.nvenc_multipass, _st10.nvenc_aq),
+        (250, 'fullres', True))
+    _cmd10 = _sdr13(st=_st10)
+    chk('[13] sdr rc 轴进命令：-rc-lookahead 250 / -multipass fullres / -spatial-aq 1',
+        ('-rc-lookahead 250' in _cmd10, '-multipass fullres' in _cmd10,
+         '-spatial-aq 1' in _cmd10), (True, True, True))
+    _ns10.cq = 0
+    _st10z = S.build_encode_settings(_ns10)
+    chk('[13] sdr rc 轴：质量归零（cq 0 哨兵）时不注入',
+        (_st10z.lookahead, _st10z.nvenc_multipass, _st10z.nvenc_aq),
+        (None, None, False))
+
+    # CLI 级：概览的范围提示（M5）+ 标定告警 + strict 隐含（§5.3）
+    def _t10(*extra):
+        return ['--input', str(SRC), '--output', str(WORK / 'o13sdr'), '--dry-run',
+                '--no-model'] + list(extra)
+
+    _r10, _o10 = run_q('convert_sdr_to_hdr.py', _t10('--quality-tier', 'archive'))
+    chk('[13] sdr 概览：HDR 域范围提示（M5）+ 未标定档告警',
+        (S._HDR_TIER_BOUNDARY in _o10, VU_CRF.CALIB_UNCALIB_DIFF in _o10),
+        (True, True))
+    _r10, _o10 = run_q('convert_sdr_to_hdr.py', _t10())
+    chk('[13] sdr 概览：balanced 默认 ⇒ 范围提示在、无"组合偏离"句',
+        (S._HDR_TIER_BOUNDARY in _o10, '当前组合偏离' in _o10), (True, False))
+    _r10, _o10 = run_q('convert_sdr_to_hdr.py',
+                       _t10('--quality-tier', 'archive', '--crf', '50',
+                            '--fallback-policy', 'strict'))
+    chk('[13] sdr --fallback-policy strict 隐含 strict-quality ⇒ rc=2 且首行同告警句',
+        (_r10, _w13.split('。')[0] in _o10), (2, True))
+finally:
+    _cc10.set_quality_mode(_pm10)
+    _cc10.set_quality_domain(_pd10)
+
 if knowns:
     _bad = [cid for cid, ok in knowns if not ok]
     print(f'── ⑨ 跨项目体检：{len(knowns) - len(_bad)}/{len(knowns)} 项一致'

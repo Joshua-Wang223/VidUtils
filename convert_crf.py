@@ -252,8 +252,110 @@ _EQQUAL_TIER_OVERRIDE = {
     'test': {},
 }
 
+# ───────────────────────────────────────────────────────────────────────────
+#  quality-tier 基础设施（R1，2026-10-17）—— 唯一权威：Plan v3 §4.1 / §13.10R。
+#
+#  §4.1 的 preset 列 = §13.10R 矩阵 = `Accessory/preset_matrix.xlsx`（三处同改，§10）。
+#  本模块只做**共享**部分：档值表 / 质量锚点窗口 / 标定指纹 / 活动表按档叠加。
+#  四步质量协调（归一→哨兵→窗口→落值，§4.4）在各脚本的 _resolve_quality_params
+#  顶部做（需要各脚本自己的 from_constqp_qp 等），这里只提供窗口/查档助手。
+#
+#  M2（R1）：lookahead/tune/multipass/aq 是 NVENC 专属策略轴，**只在生效编码器
+#  ∈ NVENC 时注入**（CPU 策略静默跳过，见各脚本注入端）；CPU 行标定口径是
+#  BASE_LOCK（不含这些轴），注入会破 `_EQQUAL_TIER_OVERRIDE` 的等质量性。
+# ───────────────────────────────────────────────────────────────────────────
+QUALITY_TIERS = ('lossless', 'near-lossless', 'archive', 'quality',
+                 'balanced', 'preview', 'draft', 'test')
+DEFAULT_QUALITY_TIER = 'balanced'      # 阶段一（翻档后改 'quality'，§12.5 / §13.14）
+
+# 每档：preset（codec→档值）/ lookahead / tune / multipass / aq / 锚点 / 窗口。
+# ⚠ multipass 的「表值 auto」按 M3 编码为 None：None 才触发既有「auto=仅 cbr/bitrate
+#   场景自动 fullres」规则；字符串 'auto' 会得到非法的 `-multipass auto`。
+TIER_PROFILES = {
+    'lossless': {
+        'preset': {'h264_nvenc': 'p7', 'hevc_nvenc': 'p7', 'av1_nvenc': 'p7',
+                   'libx264': 'veryslow', 'libx265': 'slower', 'libsvtav1': '0',
+                   'libvpx-vp9': '0', 'libaom-av1': '0', 'librav1e': '0'},
+        'lookahead': None, 'tune': None, 'multipass': None, 'aq': False,
+        'ref_crf': 0, 'ref_window': (0, 0),
+    },
+    'near-lossless': {
+        'preset': {'h264_nvenc': 'p7', 'hevc_nvenc': 'p7', 'av1_nvenc': 'p7',
+                   'libx264': 'veryslow', 'libx265': 'slower', 'libsvtav1': '1',
+                   'libvpx-vp9': '0', 'libaom-av1': '1', 'librav1e': '1'},
+        'lookahead': 250, 'tune': 'uhq', 'multipass': 'fullres', 'aq': True,
+        'ref_crf': 6, 'ref_window': (1, 12),
+    },
+    'archive': {
+        'preset': {'h264_nvenc': 'p6', 'hevc_nvenc': 'p6', 'av1_nvenc': 'p6',
+                   'libx264': 'slower', 'libx265': 'slower', 'libsvtav1': '3',
+                   'libvpx-vp9': '0', 'libaom-av1': '2', 'librav1e': '2'},
+        'lookahead': 250, 'tune': 'uhq', 'multipass': 'fullres', 'aq': True,
+        'ref_crf': 16, 'ref_window': (13, 18),
+    },
+    'quality': {
+        'preset': {'h264_nvenc': 'p5', 'hevc_nvenc': 'p5', 'av1_nvenc': 'p5',
+                   'libx264': 'slow', 'libx265': 'slow', 'libsvtav1': '5',
+                   'libvpx-vp9': '1', 'libaom-av1': '3', 'librav1e': '4'},
+        'lookahead': 250, 'tune': 'uhq', 'multipass': 'fullres', 'aq': True,
+        'ref_crf': 20, 'ref_window': (19, 22),
+    },
+    'balanced': {
+        'preset': {'h264_nvenc': 'p4', 'hevc_nvenc': 'p4', 'av1_nvenc': 'p4',
+                   'libx264': 'medium', 'libx265': 'medium', 'libsvtav1': '8',
+                   'libvpx-vp9': '2', 'libaom-av1': '6', 'librav1e': '6'},
+        'lookahead': None, 'tune': None, 'multipass': None, 'aq': False,
+        'ref_crf': 24, 'ref_window': (23, 26),
+    },
+    'preview': {
+        'preset': {'h264_nvenc': 'p3', 'hevc_nvenc': 'p3', 'av1_nvenc': 'p3',
+                   'libx264': 'fast', 'libx265': 'faster', 'libsvtav1': '9',
+                   'libvpx-vp9': '5', 'libaom-av1': '7', 'librav1e': '7'},
+        'lookahead': None, 'tune': 'll', 'multipass': 'disabled', 'aq': False,
+        'ref_crf': 28, 'ref_window': (27, 32),
+    },
+    'draft': {
+        'preset': {'h264_nvenc': 'p2', 'hevc_nvenc': 'p2', 'av1_nvenc': 'p2',
+                   'libx264': 'veryfast', 'libx265': 'veryfast', 'libsvtav1': '11',
+                   'libvpx-vp9': '6', 'libaom-av1': '8', 'librav1e': '8'},
+        'lookahead': None, 'tune': 'll', 'multipass': 'disabled', 'aq': False,
+        'ref_crf': 36, 'ref_window': (33, 40),
+    },
+    'test': {
+        'preset': {'h264_nvenc': 'p1', 'hevc_nvenc': 'p1', 'av1_nvenc': 'p1',
+                   'libx264': 'ultrafast', 'libx265': 'ultrafast', 'libsvtav1': '13',
+                   'libvpx-vp9': '8', 'libaom-av1': '8', 'librav1e': '10'},
+        'lookahead': None, 'tune': 'll', 'multipass': 'disabled', 'aq': False,
+        'ref_crf': 45, 'ref_window': (41, 51),
+    },
+}
+
+# 标定指纹（§2.4；**H4**：「是否已标定」只由本表判定，不得看 _EQQUAL_TIER_OVERRIDE
+# 的键存在性）。M4：按「最终生效编码器（含降级）× strategy」登记 ⇒ `codecs` 是
+# **已标定生效编码器**的集合；`('*',)` = 该档全部编码器已标定。`source=None` ⇒
+# 直接用 QUALITY_MAP 本体（balanced）；否则指向覆盖表。
+CALIB_FINGERPRINT = {
+    'balanced': {
+        'calibrated': True, 'source': None, 'codecs': ('*',),
+        'evidence': '跨仓契约口径（2026-10-04，T4/L40 + 17 素材池，n_subsample=1）',
+    },
+    'lossless':      {'calibrated': False, 'source': '_EQQUAL_TIER_OVERRIDE["lossless"]', 'codecs': (), 'evidence': ''},
+    'near-lossless': {'calibrated': False, 'source': '_EQQUAL_TIER_OVERRIDE["near-lossless"]', 'codecs': (), 'evidence': ''},
+    'archive':       {'calibrated': False, 'source': '_EQQUAL_TIER_OVERRIDE["archive"]', 'codecs': (), 'evidence': ''},
+    'quality':       {'calibrated': False, 'source': '_EQQUAL_TIER_OVERRIDE["quality"]', 'codecs': (), 'evidence': ''},
+    'preview':       {'calibrated': False, 'source': '_EQQUAL_TIER_OVERRIDE["preview"]', 'codecs': (), 'evidence': ''},
+    'draft':         {'calibrated': False, 'source': '_EQQUAL_TIER_OVERRIDE["draft"]', 'codecs': (), 'evidence': ''},
+    'test':          {'calibrated': False, 'source': '_EQQUAL_TIER_OVERRIDE["test"]', 'codecs': (), 'evidence': ''},
+}
+
+# §2.4 固定文案（三脚本逐字一致；calib 告警）。
+CALIB_DEVIATION_FMT = ('⚠ 当前组合偏离 --quality-tier {tier} 的标定点（{diff}）；'
+                       '已回退 balanced 表，--crf-ref/--cq-ref 的跨编码器等效值无标定保证')
+CALIB_UNCALIB_DIFF = '该档未标定：无 _EQQUAL_TIER_OVERRIDE 实测行'
+
 # 当前生效表 + 口径（由 set_quality_mode 维护）；默认 'quality'
 _QUALITY_MODE = 'quality'
+_QUALITY_TIER = DEFAULT_QUALITY_TIER
 _ACTIVE_MAP = {**SIZE_MAP, **QUALITY_MAP}
 
 
@@ -274,14 +376,116 @@ def get_quality_mode():
     return _QUALITY_MODE
 
 
-def get_quality_map():
-    """返回当前生效的 {codec: 表行}。
+def set_quality_tier(tier):
+    """选择当前 quality-tier（八档之一；默认 ``DEFAULT_QUALITY_TIER``=balanced）。
+
+    重建活动表：quality 口径 + sdr 域时把 ``_EQQUAL_TIER_OVERRIDE[tier]`` 叠加到
+    ``{SIZE_MAP ∪ QUALITY_MAP}`` 之上（缺键/空表 ⇒ 该编码器自动回退 balanced 表，
+    不报错、不静默改变换算 —— 告警由 ``tier_calib_notice()`` 负责，§2.4 H4）。
+    ⚠ HDR 域下不叠加（tier 行是 SDR 域标定；HDR 域按 M5 用域表 + 未标定告警）。
+    """
+    global _QUALITY_TIER
+    t = str(tier)
+    if t not in QUALITY_TIERS:
+        raise ValueError(f"quality tier 必须是 {QUALITY_TIERS} 之一，收到 {tier!r}")
+    _QUALITY_TIER = t
+    _rebuild_active_map()
+    return _QUALITY_TIER
+
+
+def get_quality_tier():
+    return _QUALITY_TIER
+
+
+def get_quality_map(tier=None):
+    """返回 {codec: 表行} —— 指定档（默认当前档）在**当前口径/域**下的活动表。
 
     表行通常为 ``(a, b, lo, hi)``；HDR 域 quality 口径下 libsvtav1 与
     libaom-av1 为 :class:`PiecewiseLinear`（2026-10-16 分段升级）。取量程请用
     :func:`row_limits`，不要直接按下标解包。
+
+    ``tier`` 给非当前档时返回**临时叠加**结果（不改全局状态）；缺键自动回退
+    ``QUALITY_MAP`` 本体（H4：缺键 = 未标定回退，不是错误）。
     """
-    return _ACTIVE_MAP
+    t = _QUALITY_TIER if tier is None else str(tier)
+    if t == _QUALITY_TIER:
+        return _ACTIVE_MAP
+    if _QUALITY_MODE != 'quality':
+        return SIZE_MAP
+    m = {**SIZE_MAP, **QUALITY_MAP}
+    if _HDR_DOMAIN == 'hdr':
+        m.update(HDR_EQUAL_QUALITY_OVERRIDE)
+    else:
+        m.update(_EQQUAL_TIER_OVERRIDE.get(t) or {})
+    return m
+
+
+# ── tier 助手（窗口 / 锚点 / 档值 / 指纹）────────────────────────────────────
+
+def tier_is_calibrated(tier, codec=None):
+    """H4：只看 ``CALIB_FINGERPRINT``；M4：按生效编码器（含降级）× strategy 判定。"""
+    fp = CALIB_FINGERPRINT.get(str(tier)) or {}
+    if not fp.get('calibrated'):
+        return False
+    cs = fp.get('codecs') or ()
+    if codec is None or cs == ('*',):
+        return True
+    return codec in cs
+
+
+def tier_calib_notice(tier, codec=None, diff=None):
+    """未标定/组合偏离时的固定告警（§2.4 文案，三脚本逐字一致）。
+
+    已标定且组合未偏离 ⇒ None（``diff`` 不传）。``diff`` 由调用方按实际偏离
+    轴 composed（如 ``--preset slow ≠ 档值 medium``）——**已标定档在组合偏离时
+    同样发告警**（这正是指纹机制存在的意义），未标定档以"未标定"句优先
+    （调用方对未标定档不传 diff）。
+    """
+    if diff is None:
+        if tier_is_calibrated(tier, codec):
+            return None
+        fp = CALIB_FINGERPRINT.get(str(tier)) or {}
+        diff = CALIB_UNCALIB_DIFF if not fp.get('calibrated') \
+            else f'生效编码器 {codec or "?"} 未标定'
+    return CALIB_DEVIATION_FMT.format(tier=tier, diff=diff)
+
+
+def tier_window(tier):
+    """质量窗口（闭区间，统一基准轴 libx264 CRF）。"""
+    return TIER_PROFILES[str(tier)]['ref_window']
+
+
+def tier_anchor(tier=None):
+    """质量锚点（统一基准轴）；默认当前档。"""
+    t = _QUALITY_TIER if tier is None else str(tier)
+    return TIER_PROFILES[t]['ref_crf']
+
+
+def tier_preset(tier, codec):
+    """该档在给定编码器上的策略档值（str）；未知编码器返回 None。"""
+    return (TIER_PROFILES.get(str(tier)) or {}).get('preset', {}).get(str(codec))
+
+
+def clamp_ref_to_tier(tier, ref):
+    """§4.4 步骤 3：窗口钳制（不含 0 哨兵；调用方先行短路）。
+
+    返回 ``(clamped:int, is_clamped:bool)``。八档窗口互不重叠，钳到的是离原值
+    最近的一侧边界。
+    """
+    lo, hi = tier_window(tier)
+    r = int(round(float(ref)))
+    c = max(lo, min(hi, r))
+    return c, (c != r)
+
+
+def tier_suggest_for(ref_int):
+    """找窗内含 ref 的档（区间不重叠 ⇒ 唯一；完整覆盖 [0,51] ⇒ 必命中）。"""
+    r = int(round(float(ref_int)))
+    for t in QUALITY_TIERS:
+        lo, hi = TIER_PROFILES[t]['ref_window']
+        if lo <= r <= hi:
+            return t
+    return None
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -401,17 +605,20 @@ _HDR_DOMAIN = 'sdr'          # 'sdr'（默认）| 'hdr'
 
 
 def _rebuild_active_map():
-    """按 (口径 _QUALITY_MODE, 域 _HDR_DOMAIN) 重建 _ACTIVE_MAP。
+    """按 (口径 _QUALITY_MODE, 域 _HDR_DOMAIN, 档 _QUALITY_TIER) 重建 _ACTIVE_MAP。
 
     size 口径一律用 SIZE_MAP；quality 口径 = SIZE_MAP ∪ QUALITY_MAP（未覆盖回退），
-    且域为 'hdr' 时再叠加 HDR_EQUAL_QUALITY_OVERRIDE 的三行。每次都新建 dict，
-    不原地修改任何基础表。
+    且域为 'hdr' 时再叠加 HDR_EQUAL_QUALITY_OVERRIDE 的三行；sdr 域下叠加当前档的
+    ``_EQQUAL_TIER_OVERRIDE``（非 balanced 且空表 ⇒ 不叠加 = 自动回退本体，H4）。
+    每次都新建 dict，不原地修改任何基础表。
     """
     global _ACTIVE_MAP
     if _QUALITY_MODE == 'quality':
         m = {**SIZE_MAP, **QUALITY_MAP}
         if _HDR_DOMAIN == 'hdr':
             m.update(HDR_EQUAL_QUALITY_OVERRIDE)
+        else:
+            m.update(_EQQUAL_TIER_OVERRIDE.get(_QUALITY_TIER) or {})
         _ACTIVE_MAP = m
     else:
         _ACTIVE_MAP = SIZE_MAP

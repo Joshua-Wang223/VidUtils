@@ -288,14 +288,14 @@ def resolve_quality_for_tier(codec, tier, *, crf=None, cq=None, qp=None,
 
 | 情形 | 归一到基准轴 | 窗口判定 | 结果 |
 |---|---|---|---|
-| `--codec libx265 --quality-tier archive --crf 50` | `to_x264_crf('libx265', 50) ≈ 47.7` → `48` | 越出 `[13, 18]` ⇒ 钳到 `18` | 下发 `-crf 17`（`from_x264_crf ≈ 17.45`），告警见下 |
+| `--codec libx265 --quality-tier archive --crf 50` | `to_x264_crf('libx265', 50) ≈ 47.6` → `48` | 越出 `[13, 18]` ⇒ 钳到 `18` | 下发 `-crf 17`（`from_x264_crf ≈ 17.45`），告警见下 |
 | `--codec libx265 --quality-tier quality --crf-ref 26` | `26` | 越出 `[19, 22]` ⇒ 钳到 `22`（离 26 最近的窗边界） | 下发 `-crf 22`；告警建议「26 属于 `balanced` 的窗口，请改用 `--quality-tier balanced`」 |
 | `--codec libx265 --quality-tier preview --crf-ref 30` | `30` | `30 ∈ [27, 32]` ⇒ 通过 | 下发 `-crf 31`，**不告警**（负向用例：窗内的显式值不受打扰） |
 | `--codec libx265 --quality-tier archive --crf-ref 16` | `16` | `16 ∈ [13, 18]` ⇒ 通过 | 下发 `-crf 15`，不告警（正好是该档锚点） |
-| `--codec libx265 --quality-tier balanced --crf 50` | `to_x264_crf('libx265', 50) ≈ 47.7` → `48` | 越出 `[23, 26]` ⇒ 钳到 `26` | 下发 `-crf 26`；告警（**R1：`balanced` 不豁免**——CRF 48 落在 `test` 档） |
+| `--codec libx265 --quality-tier balanced --crf 50` | `to_x264_crf('libx265', 50) ≈ 47.6` → `48` | 越出 `[23, 26]` ⇒ 钳到 `26` | 下发 `-crf 26`；告警（**R1：`balanced` 不豁免**——CRF 48 落在 `test` 档） |
 
 `archive + --crf 50` 的告警文案（三脚本逐字一致）：
-`⚠ --quality-tier archive 的质量窗口为 CRF 13~18；--crf 50（基准轴 ≈47.7）已钳到 18（libx265 -crf 17）。CRF 48 落在 test 档（41~51），请改用 --quality-tier test`
+`⚠ --quality-tier archive 的质量窗口为 CRF 13~18；--crf 50（基准轴 ≈47.6）已钳到 18（libx265 -crf 17）。CRF 48 落在 test 档（41~51），请改用 --quality-tier test`
 
 > ⚠ **基线含义已改（R1：H1=读法 A + §12.5「默认档最终 = `quality`」）**：不再存在"不指定档位"的第三种状态，`balanced` 也不再豁免窗口 ⇒ 「默认 ≡ 今天的行为」全面不成立。**R1 做法**：旧 inventory 显式钉上 `--quality-tier balanced`（把"旧默认"转成"balanced 档"用例）＋ **四份 golden 全量重录**（旧字节作废；重录 diff 必须逐条人工审阅）；新 default 基线在翻默认档时另建。详见 §7 与 §13.15（R1-1）。
 
@@ -643,7 +643,7 @@ python3 vidcrop_hwaccel.py src.mp4 dst.mp4 --codec hevc_nvenc --quality-tier <qu
 | 阶段零点五（D2 预跑） | ✅ 完成 | 17 条真实 eqq 池。**画质**：svtav1 6→4 码率收益 **+19.6%**、x265 slow→slower **+10.5%**，均远超 3% 门槛。**耗时**（空载复测，以 CPU 时间比为判据）：svtav1 **1.68×**、x265 **4.67×**，均超 1.5× 阈值。结论：**D1+D2 分化成立**，但 x265 的 `archive` 档用 `slower` 性价比差（每 1% 码率收益要付 35% CPU），且该比值**本机特有**（无 AVX2）。**R1 注**：权威档值对 svtav1=`5↔3`、x265=`slow↔slower`；CPU 环按终值复核 |
 | aom / vp9 恒等 effort 探针 | ✅ 完成 | `aom_effort_probe`：balanced 冻结 **6**（6≡8；4 过慢）；`vp9_effort_probe`：balanced **2**（BASE_LOCK 甜点；负值无增益）。R1 已据此定 §13.10R（vp9 慢端 `1/0/0/0`、aom 快端 `8/8/7`） |
 | `bench_preset_ab.py` 并发守卫 | ✅ 完成 | 默认 ≤ 逻辑核数/2（`--jobs` 仍可显式覆盖）；防超订污染 |
-| 阶段一（tier 编码实现） | 🟡 进行中（R1 起可动工） | 实现清单 §6.2；DoD §11；harness 标定可并行 |
+| 阶段一（tier 编码实现） | 🟡 进行中（2026-10-17 起分步提交） | 实现清单 §6.2；DoD §11。**已完成/已提交**：①共享核心（`convert_crf.py`：TIER_PROFILES / 指纹 / 档值助手 / 活动表按档叠加）＋②`vidcrop_hwaccel.py` 接线（`--quality-tier`/`--strict-quality`/`--strict-calib`、§4.4 四步、rc 四轴按档注入、vp9/aom/rav1e 速度轴档值、tune 参数级降档、标定指纹告警）。**待做**：③`vidcrop_cpu_v2.py`、④`convert_sdr_to_hdr.py`（M5 HDR×tier）、⑤ verifier 期望值更新、⑥ golden 重录（dump 脚本钉 `--quality-tier balanced`） |
 | harness `--preset-override` | ✅ 完成（2026-10-17） | R1 第一块砖：`_lock_for` 统一替换速度轴（libx264/x265/svtav1/NVENC=-preset、vp9/aom=-cpu-used）；自测 +4 例（§6.3~6.6） |
 | 阶段三（CPU 环标定） | ⬜ 未开始 | 走 harness；per-tier `_EQQUAL_TIER_OVERRIDE` 落表 |
 | 阶段四（T4）/ 阶段五（L40） | ⬜ 未开始（本机无 GPU） | NVENC 可用性 + `_NVENC_PRESET_RETRY` 触发率（红线 1%）+ `_QP_AFFINE_QUALITY` 重标 |

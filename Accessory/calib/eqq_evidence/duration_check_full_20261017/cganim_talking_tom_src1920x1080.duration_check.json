@@ -1,0 +1,33 @@
+{
+  "material": "cganim_talking_tom_src1920x1080",
+  "frames_full": 144,
+  "wh": "1280x720",
+  "v21_20f": 20.25,
+  "crf_sent_x265": 20.744,
+  "target_20f": 49.880281,
+  "target_full": 50.197415,
+  "points": [
+    {
+      "crf": 20,
+      "psnr_20f": 49.914,
+      "psnr_full": 49.990392,
+      "target_20f": 49.880281,
+      "target_full": 50.197415,
+      "delta_20f": 0.034,
+      "delta_full": -0.207,
+      "diff": -0.241
+    },
+    {
+      "crf": 24,
+      "psnr_20f": 49.373,
+      "psnr_full": 49.494327,
+      "target_20f": 49.880281,
+      "target_full": 50.197415,
+      "delta_20f": -0.507,
+      "delta_full": -0.703,
+      "diff": -0.196
+    }
+  ],
+  "max_abs_diff": 0.241,
+  "verdict": "PASS ≤0.3 dB"
+}

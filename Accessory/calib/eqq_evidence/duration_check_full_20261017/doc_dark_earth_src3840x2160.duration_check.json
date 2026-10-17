@@ -1,0 +1,33 @@
+{
+  "material": "doc_dark_earth_src3840x2160",
+  "frames_full": 284,
+  "wh": "1280x720",
+  "v21_20f": 28.81,
+  "crf_sent_x265": 20.744,
+  "target_20f": 50.29508,
+  "target_full": 45.781818,
+  "points": [
+    {
+      "crf": 28,
+      "psnr_20f": 50.464,
+      "psnr_full": 46.302637,
+      "target_20f": 50.29508,
+      "target_full": 45.781818,
+      "delta_20f": 0.169,
+      "delta_full": 0.521,
+      "diff": 0.352
+    },
+    {
+      "crf": 32,
+      "psnr_20f": 49.628,
+      "psnr_full": 45.11857,
+      "target_20f": 50.29508,
+      "target_full": 45.781818,
+      "delta_20f": -0.667,
+      "delta_full": -0.663,
+      "diff": 0.004
+    }
+  ],
+  "max_abs_diff": 0.352,
+  "verdict": "FAIL >0.3 dB"
+}

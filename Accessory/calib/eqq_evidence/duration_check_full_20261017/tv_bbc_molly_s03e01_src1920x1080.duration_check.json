@@ -1,0 +1,33 @@
+{
+  "material": "tv_bbc_molly_s03e01_src1920x1080",
+  "frames_full": 180,
+  "wh": "1280x720",
+  "v21_20f": 27.92,
+  "crf_sent_x265": 20.744,
+  "target_20f": 47.259118,
+  "target_full": 46.974172,
+  "points": [
+    {
+      "crf": 24,
+      "psnr_20f": 47.852,
+      "psnr_full": 45.833556,
+      "target_20f": 47.259118,
+      "target_full": 46.974172,
+      "delta_20f": 0.593,
+      "delta_full": -1.141,
+      "diff": -1.733
+    },
+    {
+      "crf": 28,
+      "psnr_20f": 47.247,
+      "psnr_full": 45.311992,
+      "target_20f": 47.259118,
+      "target_full": 46.974172,
+      "delta_20f": -0.012,
+      "delta_full": -1.662,
+      "diff": -1.65
+    }
+  ],
+  "max_abs_diff": 1.733,
+  "verdict": "FAIL >0.3 dB"
+}

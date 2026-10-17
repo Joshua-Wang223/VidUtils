@@ -138,24 +138,28 @@ rav1e 重拟合；@21 实发 svtav1 23 / aom 31 / rav1e 74），回归验证双�
 HDR 10bit 直比（该批节点 LOO 与候选裁定见 memory §9/§10）。
 
 **后续：首次「时长方向」精度追加校验（memory §10.2，2026-10-17）**——把标定的 **20 帧
-切片**换成 **6s 全长**做差分兑现校验（7 素材 × 2 点，diff = Δfull − Δ20，判据 |diff| ≤ 0.3 dB）：
+切片**换成 **6s 全长**做差分兑现校验（10 素材 × 2 点，diff = Δfull − Δ20，判据 |diff| ≤ 0.3 dB；
+C 补测已并入）：
 
 | 素材 | 最坏 \|diff\| | 判 |
 |---|---|---|
 | wordworld | 0.16 | PASS |
 | subs | 0.15 | PASS |
 | kids_play | 0.09 | PASS |
+| talking_tom | 0.24 | PASS |
 | kids_seated | −0.76 | FAIL |
 | grassland | +0.66 | FAIL |
 | screen_ui | −1.66 | FAIL |
 | molly_s01e01 | −1.60 | FAIL |
+| molly_s03e01 | −1.73 | FAIL |
+| dark_earth | +0.35 | FAIL |
 
-**3 PASS / 4 FAIL**。分解定位 = **20 帧单独编码上下文偏差（ctx 14/14 为负、均值 −0.66：
-x265 短编码自身吃亏 +0.24~+0.74）+ 帧集内容差（fset，−1.41~+0.88）**。
+**4 PASS / 6 FAIL**。分解定位 = **20 帧单独编码上下文偏差（ctx 20/20 为负、均值 −0.70：
+x265 短编码自身吃亏 +0.24~+0.89）+ 帧集内容差（fset，−1.41~+0.88）**。
 ⇒ 与 §3.1 是同一类教训的**时序版**：不仅 tonemap 要换域，**短切片同样引入口径偏差**——
-20 帧标定系统性高估 svtav1 相对质量（14 点均值 −0.47 dB、最坏 ~±1.7）。
+20 帧标定系统性高估 svtav1 相对质量（20 点均值 −0.50 dB、最坏 ±1.73；molly 家族最强）。
 
-**处置状态（2026-10-17 裁定）**：**C+B** —— 先补 3 素材（talking_tom / dark_earth /
-molly_s03e01）全长校验至 10/10（执行中），随后进入全长重标定。全文与证据：`memory/hdr_equal_quality_calibration_10mat_20261016.md` §10.2 +
+**处置状态（2026-10-17 裁定）**：**C+B** —— C **已完成**（10/10：4 PASS / 6 FAIL，新增
+talking_tom PASS、molly_s03e01 −1.73、dark_earth +0.35），B **全长重标定执行中**。全文与证据：`memory/hdr_equal_quality_calibration_10mat_20261016.md` §10.2 +
 `Accessory/calib/eqq_evidence/duration_check_full_20261017/`。本校验覆盖 svtav1 行；
-aom / rav1e / vp9 未测（同方法论、风险同源）。
+aom / rav1e / vp9 未测（同方法论、风险同源；B 一并覆盖 3 码器）。

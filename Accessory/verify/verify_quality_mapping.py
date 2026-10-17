@@ -1109,6 +1109,35 @@ chk('[13] 钳到 0 时按目标能力走通道（hevc_nvenc --cq 5 + lossless �
     qq(H, 'hevc_nvenc', cq=5, tier='lossless'), (None, 0, None))
 chk('[13] 表内钳制反解到 0.0 不算无损（hevc --cq 5 + near-lossless ⇒ 落 1 → -cq 8）',
     qq(H, 'hevc_nvenc', cq=5, tier='near-lossless'), (None, 8, None))
+# --qp 0（constqp 通道的原始 0）同样是哨兵：窗口再紧也不钳（§4.4 步骤 2a 先于 3）
+chk('[13] --qp 0（constqp）无损哨兵不被钳（archive 窗外、原样保留）',
+    qq(H, 'hevc_nvenc', qp=0, rc='constqp', tier='archive'), (None, None, 0))
+chk('[13] --qp 0 在 lossless 档也保留（哨兵优先于窗口）',
+    qq(H, 'hevc_nvenc', qp=0, rc='constqp', tier='lossless'), (None, None, 0))
+
+# ── ⑬-5b M6/M8（审核修正 M6/M8）：降级换算同口径 + constqp 轴往返一致性 ──────
+# M6：`--codec libx264 --cq 23` 用户敲的是 CPU 编码器（它不认 -cq）⇒ 按默认 GPU
+# 编码器 h264_nvenc 的 -cq 量纲解释；与「hevc_nvenc 请求降级到 libx264」的换算
+# 必须逐字同口径（两条路径的 src_codec 处理不同：前者 src=libx264 走回退轴，
+# 后者 src=h264_nvenc 直接是 cq 轴）。
+chk('[13] M6：--codec libx264 --cq 4（near-lossless）与 NVENC 降级同口径 ⇒ -crf 1',
+    qq(H, 'libx264', cq=4, src='libx264', tier='near-lossless'), (1, None, None))
+chk('[13] M6：计划例 --codec libx264 --cq 23（quality 档 ⇒ 钳到 19）两 src 口径一致',
+    (qq(H, 'libx264', cq=23, src='libx264', tier='quality'),
+     qq(H, 'libx264', cq=23, src='h264_nvenc', tier='quality')),
+    ((19, None, None), (19, None, None)))
+# M8：正向 to_constqp_qp 与反向 from_constqp_qp 必须互为逆（quality 口径用仿射、
+# 其余走 ×qp_scale——反函数引错刻度会在这里露馅）。低端取样会撞 _QP_LIMITS 的
+# 0 钳位（av1 cq≤16 ⇒ qp 钳 0），非线性段不属往返判据，取 v ≥ 21。
+_bad_rt = []
+for _c in ('h264_nvenc', 'hevc_nvenc', 'av1_nvenc'):
+    for _v in (21, 24, 26, 30, 36, 45):
+        _b = H.to_x264_crf(_c, _v)
+        _bk = H.from_constqp_qp(_c, H.to_constqp_qp(_c, _v))
+        if _b is None or abs(_bk - _b) > 0.51:
+            _bad_rt.append((_c, _v, _b, round(_bk, 2)))
+chk('[13] M8：from_constqp_qp(c, to_constqp_qp(c, v)) 回基准轴（±0.51 舍入）',
+    _bad_rt, [])
 
 # ── ⑬-6 §4.4 五样例（**生产默认 quality 口径**，逐字告警）───────────────────
 def run_q(script, args, cpu_only=False):
@@ -1196,12 +1225,14 @@ chk('[13] hwaccel：tune 派生（archive→uhq / balanced→None）；cpu_v2 �
 # ── ⑬-8 速度轴（§13.10R）：aom/vp9 按档钉值、--extra-args 优先 ─────────────
 _aom_b = _cv13('libaom-av1', crf=24, tier='balanced')
 _aom_n = _cv13('libaom-av1', crf=24)
-chk('[13] aom 速度轴：balanced 钉 -cpu-used 6；tier=None 落旧自动值（本机核数）',
-    ('-cpu-used 6' in _aom_b, f'-cpu-used {C.auto_effort()[0]}' in _aom_n), (True, True))
+chk('[13] aom 速度轴：balanced 钉 -cpu-used 6；省略 tier ⇒ 进程档（同值）',
+    ('-cpu-used 6' in _aom_b, '-cpu-used 6' in _aom_n), (True, True))
 _vp9_b = _cv13('libvpx-vp9', crf=24, tier='balanced')
 _vp9_n = _cv13('libvpx-vp9', crf=24)
-chk('[13] vp9 速度轴：balanced 新显式下发 2；tier=None 保持不主动下发',
-    ('-cpu-used 2' in _vp9_b, '-cpu-used' in _vp9_n), (True, False))
+chk('[13] vp9 速度轴：balanced 新显式下发 2；省略 tier ⇒ 进程档（同值）',
+    ('-cpu-used 2' in _vp9_b, '-cpu-used 2' in _vp9_n), (True, True))
+chk('[13] 省略 tier 与显式 balanced 命令逐字等价（cpu_v2 aom/vp9）',
+    (_aom_n == _aom_b, _vp9_n == _vp9_b), (True, True))
 _vp9_x = _cv13('libvpx-vp9', crf=24, tier='balanced', extra_args=['-cpu-used', '4'])
 chk('[13] aom/vp9 速度轴尊重 --extra-args 显式值（原样保留、不叠加档值）',
     ('-cpu-used 4' in _vp9_x, '-cpu-used 2' in _vp9_x), (True, False))

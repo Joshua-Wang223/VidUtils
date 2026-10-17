@@ -23,10 +23,13 @@ decode_bits() {
   printf '%-26s %s\n' "${hw:-<无 -hwaccel>}" "${hof:-<无 hof>}"
 }
 
+# R1（2026-10-17）：显式钉住 `--quality-tier balanced`（与阶段一默认逐字等价）——
+# 本门只取 -hwaccel* / -hwaccel_output_format；钉死后阶段三翻默认档时 golden 不漂移。
+TIER=(--quality-tier balanced)
 emit() {  # emit <标签> <参数...>
   local tag=$1; shift
   local out
-  out=$(python vidcrop_hwaccel.py --input "$F/land.mp4" --output "$F/o" --dry-run "$@" 2>&1)
+  out=$(python vidcrop_hwaccel.py --input "$F/land.mp4" --output "$F/o" --dry-run "${TIER[@]}" "$@" 2>&1)
   printf '%-34s %s\n' "$tag" "$(decode_bits "$out")"
 }
 

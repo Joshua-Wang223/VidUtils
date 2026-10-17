@@ -30,10 +30,13 @@ cv() { python vidcrop_cpu_v2.py  --input "$1" --output "$F/o" --dry-run "${@:2}"
 # 注意别退回成 `--decode cpu` 单独用：那只关解码，缩放轴仍是 auto（优先 cuda），
 # 在带 scale_cuda 的机器上会生成 hwupload 链，与 cpu_v2 不可比。
 CPU_ONLY=(--decode cpu --scale-algo libswscale-lanczos --codec libx264)
+# R1（2026-10-17）：显式钉住 `--quality-tier balanced`（与阶段一默认逐字等价）——
+# 滤镜链不受 tier 影响，钉死是为了阶段三翻默认档时 golden 不随默认漂移。
+TIER=(--quality-tier balanced)
 emit() {  # emit <标签> <源> <公共参数...>
   local tag=$1 src=$2; shift 2
-  printf 'hwaccel  %-46s %s\n' "$tag" "$(pick "$(hw "$src" "${CPU_ONLY[@]}" "$@")")"
-  printf 'cpu_v2   %-46s %s\n' "$tag" "$(pick "$(cv "$src" "$@")")"
+  printf 'hwaccel  %-46s %s\n' "$tag" "$(pick "$(hw "$src" "${CPU_ONLY[@]}" "${TIER[@]}" "$@")")"
+  printf 'cpu_v2   %-46s %s\n' "$tag" "$(pick "$(cv "$src" "${TIER[@]}" "$@")")"
 }
 
 emit "cover 1920x1080->1440x1080 源更宽" "$F/land.mp4" --mode cover --output-width 1440 --output-height 1080

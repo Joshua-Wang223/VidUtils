@@ -326,8 +326,8 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--crop-ratio` | 无 | 目标宽高比（`16:9` / `4:3` / 浮点 `1.777`），单独用时自动算最大化裁剪尺寸；与 `--output-width/height` 并用时**前者定画面比例、后者定分辨率**（`crop-cover` 下后者是裁剪后缩放覆盖的目标尺寸） |
 | `--mode` | `crop` | `crop` / `cover` / `crop-cover`（`crop-cover`=先按 `--crop-ratio`（未给出时即目标宽高比）最大化裁剪，再缩放覆盖到最终尺寸） |
 | `--codec` | `libx264` | 视频编码器；支持别名（`vp9`→`libvpx-vp9`、`av1`→`libaom-av1`、`svtav1`→`libsvtav1`、`rav1e`→`librav1e` …）；`auto` 等同 `libx264`（本脚本为纯 CPU 路径，与硬件版的 `auto` 在无 NVENC 时解析结果一致） |
-| `--crf` | `21` | CPU 编码器质量（0–51）；**字面量原样下发**，但落到只认 `-cq`/`-qp` 的编码器时会按 libx264 CRF 口径换算过去。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档） |
-| `--cq` | `26`（h264_nvenc） | GPU 编码器质量：NVENC/AMF 为 0–51，**av1_nvenc 为 0–63**；落到 CPU 软编时按等效表换算为 CRF。**未给质量参数时按统一基准 21 换算**（h264_nvenc 26 / hevc_nvenc 26 / av1_nvenc 32，见[默认质量](#质量参数的两种取值方式)）。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档） |
+| `--crf` | `24` | CPU 编码器质量（0–51）；**字面量下发**（先归一到基准轴并按档窗口钳制，见「质量档位」），但落到只认 `-cq`/`-qp` 的编码器时会按 libx264 CRF 口径换算过去。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档） |
+| `--cq` | `29`（h264_nvenc） | GPU 编码器质量：NVENC/AMF 为 0–51，**av1_nvenc 为 0–63**；落到 CPU 软编时按等效表换算为 CRF。**未给质量参数时按默认档锚点（阶段一 `balanced` = 24）换算**（h264_nvenc 29 / hevc_nvenc 29 / av1_nvenc 36）。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档） |
 | `--crf-ref` | 无 | 以 **libx264 CRF** 为基准给出质量，按等效表换算到目标编码器；与 `--crf`/`--cq` 互斥。与 `--rc-mode constqp` 并用时结果落到 `-qp` |
 | `--cq-ref` | 无 | 以 **h264_nvenc CQ** 为基准给出质量，按等效表换算；与 `--crf`/`--cq` 互斥。与 `--rc-mode constqp` 并用时结果落到 `-qp` |
 | `--rc-mode` | `auto` | NVENC 码率控制模式（**只对 NVENC 编码器生效**）：`auto`=不下发 `-rc`（由 preset 决定，与不写等价）/ `constqp`（恒定 QP，需 `--qp`）/ `vbr`（可变码率）/ `cbr`（恒定码率，需 `--bitrate`）。写法 `<mode>` 或 `nvenc-<mode>`（本轴只有一个后端，裸名不歧义）。⚠ **FFmpeg 9.0 的 `-rc` 枚举只剩这三个**（`vbr_hq`/`cbr_hq`/`cbr_ld_hq`/`qvbr` 均已移除，传入直接报错）。⚠ 本脚本默认 `libx264` 且不做硬件探测（`--codec hevc_nvenc` 是原样透传给 ffmpeg），所以要用它得先显式 `--codec hevc_nvenc`；其它编码器下告警忽略 |
@@ -383,8 +383,8 @@ v1 的增强版：保留并发模型，补齐 **AV1 / VP9 全链路**、编码�
 | `--scale-algo` | 裸 `lanczos` | 缩放算法，写法 `<backend>-<algo>` 或裸 `<algo>`（后端自动）。`libswscale-*`：同 v2 的那 10 个；`cuda-*`：`nearest` `bilinear` `bicubic` `lanczos`（**仅 cover 模式**，走显存内缩放，需自建 FFmpeg）。前缀用于**强制**后端；裸名字要求两表都认（只在一个后端有的必须带前缀，如 `libswscale-spline`）。降级与冲突处理见[硬件加速说明](#硬件加速说明) |
 | `--original-width/height` | 自动检测 | 手动指定源尺寸，跳过 ffprobe |
 | `--codec` | **`h264_nvenc`** | 支持 `auto`；无 NVENC 时自动降级为 **`libx264`** |
-| `--cq` | **`26`**（h264_nvenc） | GPU 编码器质量：NVENC/AMF 为 0–51，**av1_nvenc 为 0–63**；字面量原样下发。**未给质量参数时按统一基准 21 换算**（h264_nvenc 26 / hevc_nvenc 26 / av1_nvenc 32）。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档）（不是普通取值，见[质量参数的换算](#质量参数的两种取值方式)） |
-| `--crf` | **`21`** | CPU 编码器质量（0–51）；字面量原样下发。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档）；落到只认 `-cq`/`-qp` 的编码器（NVENC / AMF）时**按 libx264 CRF 口径换算过去**（不再静默回落默认 CQ） |
+| `--cq` | **`29`**（h264_nvenc） | GPU 编码器质量：NVENC/AMF 为 0–51，**av1_nvenc 为 0–63**；字面量下发（先归一到基准轴并按档窗口钳制，见「质量档位」）。**未给质量参数时按默认档锚点（阶段一 `balanced` = 24）换算**（h264_nvenc 29 / hevc_nvenc 29 / av1_nvenc 36）。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档）（不是普通取值，见[质量参数的换算](#质量参数的两种取值方式)） |
+| `--crf` | **`24`** | CPU 编码器质量（0–51）；字面量下发（先归一到基准轴并按档窗口钳制，见「质量档位」）。**`0` = 无损请求**（**实测**：libx265 / libx264 逐位无损；NVENC 只是最高质量档）；落到只认 `-cq`/`-qp` 的编码器（NVENC / AMF）时**按 libx264 CRF 口径换算过去**（不再静默回落默认 CQ） |
 | `--crf-ref` / `--cq-ref` | 无 | 统一质量基准（同上），与 `--crf`/`--cq` **互斥，混用直接报错退出**。⚠ 与 `--rc-mode constqp` **可以并用**：换算结果落到 `-qp`（`-qp` 是该编码器的**真实 QP / 基准轴**，不是 CQ 轴；AV1 NVENC 为基准×4），此时它与 `--qp` 属**三选一** |
 | `--rc-mode` | `auto` | NVENC 码率控制模式（**只对 NVENC 编码器生效**）：`auto`=不下发 `-rc`（由 preset 决定，与不写等价）/ `constqp`（恒定 QP，需 `--qp`）/ `vbr`（可变码率）/ `cbr`（恒定码率，需 `--bitrate`）。写法 `<mode>` 或 `nvenc-<mode>`。⚠ **FFmpeg 9.0 的 `-rc` 枚举只剩这三个**（`vbr_hq`/`cbr_hq`/`cbr_ld_hq`/`qvbr` 均已移除）。⚠ 实际编码器是**逐策略**定的：`--codec auto` 或 NVENC 不可用而降级到 CPU 编码器时，本参数会被**告警忽略**（`--fallback-policy strict` 下改为报错退出 2） |
 | `--qp` | 无 | NVENC 恒定 QP：**H.264/HEVC 0–51，av1_nvenc 0–255（qindex；quality 口径走仿射 `7.9338·ref−97.5136`，size 口径 `×3`）**，VAAPI 0–52；只在 `--rc-mode constqp` 下生效。constqp 下与 `--crf-ref` / `--cq-ref` **三选一**（同给报错退出 2），与字面量 `--crf` / `--cq` 互斥；非 constqp 模式给了它 → 告警忽略。**落到 CPU 编码器时按基准轴换算成等效 `-crf`**（不再静默丢弃、回落默认 CRF 21），`--qp 0` 是无损 |
@@ -507,11 +507,14 @@ qp_range('av1_nvenc')                         # → (0, 255)
 
 退出码：`0` 正常 / `1` ffmpeg 或推理失败 / `2` 参数错误
 
-> ⚠️ **本版有三处默认值变更**（升级时请注意，均为有意为之）：
-> ① `--crf` 默认从字面量 `20` 改为「按统一基准 `DEFAULT_REF=21` 逐编码器换算」
-> （`libx265` → CRF 21）；② `--preset` 默认从 `slow` 改为按编码器取（`libx265` → `medium`，
+> ⚠️ **本版有四处默认值/契约变更**（升级时请注意，均为有意为之）：
+> ① `--crf` 默认从字面量 `20` 改为「按统一基准 `DEFAULT_REF` 逐编码器换算」——
+> `DEFAULT_REF` = 默认档锚点（阶段一 `balanced` → 24；翻档 `quality` 后 → 20），
+> 例如 `libx265` → CRF 24；② `--preset` 默认从 `slow` 改为按编码器取（`libx265` → `medium`，
 > 与两个 vidcrop 脚本一致，见 CR-1）；③ `--threads` 现在是**每任务 ffmpeg 线程数**，
-> 原来的 torch 线程数旋钮改名为 `--torch-threads`。
+> 原来的 torch 线程数旋钮改名为 `--torch-threads`；④ 新增 `--quality-tier`（默认
+> `balanced`）：显式质量值先归一到基准轴、再被本档窗口钳制（**全档生效，含默认档**——
+> 例如 `--crf-ref 21` 会被钳到 23 并告警），详见「质量档位」一节。
 
 **批量与并行**
 
@@ -675,8 +678,9 @@ python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --model hr
 # 5) 冒烟：前 6 帧、CPU 推理
 python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --frames 6 --device cpu
 
-# 6) 用统一基准轴给质量（libx264 CRF 21 的等质量换算；--quality-mode size 则等体积）
-python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --crf-ref 21
+# 6) 用统一基准轴给质量（例：基准 24 = 阶段一默认档 balanced 的锚点；给 21 会被
+#    balanced 窗口钳到 23 并告警，见「质量档位」；--quality-mode size 则等体积）
+python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --crf-ref 24
 
 # 7) NVENC 硬件编码（会告警 HDR10 静态元数据丢失）
 python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --codec hevc_nvenc --cq 26 --nvenc-aq
@@ -1188,9 +1192,9 @@ python vidcrop_cpu_v2.py \
 python vidcrop_cpu_v2.py \
     --input ./videos --output ./out \
     --output-width 1280 --output-height 720 \
-    --mode cover --codec svtav1 --crf-ref 21
+    --mode cover --codec svtav1 --crf-ref 24
 
-# 硬件加速版：整目录批量，默认 h264_nvenc + cq 26（基准 21）+ p4，自动选最优路径
+# 硬件加速版：整目录批量，默认 h264_nvenc + cq 29（基准档锚点 24）+ p4，自动选最优路径
 python vidcrop_hwaccel.py \
     --input ./videos --output ./out \
     --output-width 1280 --output-height 720 --overwrite
@@ -1334,7 +1338,7 @@ python vidcrop_hwaccel.py \
 ```bash
 python vidcrop_cpu_v2.py \
     --input ./clips --output ./out \
-    --crop-ratio 16:9 --codec libx264 --crf-ref 21
+    --crop-ratio 16:9 --codec libx264 --crf-ref 24
 ```
 
 ### 6. 递归扫描子目录 + 保留目录结构
@@ -1352,7 +1356,7 @@ python vidcrop_hwaccel.py \
 python vidcrop_hwaccel.py \
     --input ./clips --output ./out \
     --output-width 1280 --output-height 720 \
-    --codec libx264 --crf-ref 21 --decode vaapi
+    --codec libx264 --crf-ref 24 --decode vaapi
 ```
 
 ### 8. CI / 容器环境（三轴全 CPU，等价于旧的 `--hwaccel none`）
@@ -1394,7 +1398,7 @@ python vidcrop_cpu_v2.py \
 python vidcrop_cpu_v2.py \
     --input ./videos --output ./archive \
     --output-width 1920 --output-height 1080 \
-    --codec svtav1 --crf-ref 21
+    --codec svtav1 --crf-ref 24
 ```
 
 ### 11. AV1 硬件编码（需 Ada / RTX 40 / L40 及以上）
@@ -1703,6 +1707,57 @@ CRF / CQ  →  0 = 0 档（CPU 逐位无损；NVENC 仅最高质量档），18 �
 ⚠ 低端取值（如 `--cq 1~5` 落到 `libx264` / `libvpx-vp9`）会被钳到同一个最小值，
 **在等效表里分辨不出来** —— 这是线性表的固有低端饱和，不是 bug。
 两条规则都由 `Accessory/verify/verify_quality_mapping.py` 钉住（含"非无损换算永不落到 0"的扫描）。
+
+### 质量档位（`--quality-tier`）
+
+八档：`lossless` → `near-lossless` → `archive` → `quality` → `balanced` → `preview`
+→ `draft` → `test`（默认 `balanced`；三个脚本同默认同语义）。一个旋钮同时管三样东西：
+
+```
+tier = 编码策略基底（preset / lookahead / multipass / aq / tune —— 由编码器实例化，
+        codec 是输入不是成员）
+     × 质量锚点 / 窗口（统一基准轴上的一个区间；未给质量参数时注入锚点）
+     × 标定指纹（该档是否已实测标定；未标定 ⇒ 回退 balanced 表并告警）
+```
+
+| 档 | 基准轴窗口 | 锚点 | `hevc_nvenc` preset | `libx265` preset | `libx264` preset |
+|---|---|---|---|---|---|
+| `lossless` | 0–0 | 0 | p7 | slower | veryslow |
+| `near-lossless` | 1–12 | 6 | p7 | slower | veryslow |
+| `archive` | 13–18 | 16 | p6 | slower | slower |
+| `quality` | 19–22 | 20 | p5 | slow | slow |
+| `balanced` | 23–26 | 24 | p4 | medium | medium |
+| `preview` | 27–32 | 28 | p3 | faster | fast |
+| `draft` | 33–40 | 36 | p2 | veryfast | veryfast |
+| `test` | 41–51 | 45 | p1 | ultrafast | ultrafast |
+
+**契约接管（全档，含 `balanced`）**：显式质量值（`--crf` / `--cq` / `--qp` /
+`--crf-ref` / `--cq-ref`）不再"原样下发"——先归一到统一基准轴，再被**本档窗口**
+钳制；越界钳到边界并告警（写出钳前值、基准轴落点、钳后值、目标编码器**实际下发
+值**，以及"想更低质量该改用哪个档"）。`0` 是不参与换算的哨兵（见上），不会被钳。
+未给任何质量参数时注入**本档锚点**（`DEFAULT_REF` 常量保留为单一来源，取值 =
+默认档锚点）。
+
+```bash
+--codec libx265 --quality-tier archive --crf 50
+# ⚠ --quality-tier archive 的质量窗口为 CRF 13~18；--crf 50（基准轴 ≈47.6）已钳到 18
+#   （libx265 -crf 17）。CRF 48 落在 test 档（41~51），请改用 --quality-tier test
+```
+
+默认质量值轨迹：**`21 → 24`（阶段一 `balanced` 锚点）→ `20`（翻档 `quality` 后）**
+（未给质量参数时的默认逐编码器值：libx264/libx265 `24`、h264_nvenc/hevc_nvenc `29`、
+av1_nvenc `36`、libvpx-vp9 `32`、libsvtav1 `36`、libaom-av1 `33`、librav1e `88`）。
+
+> **非 `balanced` 档当前未标定**（各编码器的等质量系数尚无实测数据）⇒ 换算自动回退
+> `balanced` 表并告警 —— 预期状态，不是缺陷。标定按 CPU → T4 → L40 逐步补，见
+> `Plan/VidUtils_质量参数统一_quality-tier方案_v3_20261015.md`。
+> hwaccel / sdr 另有严格开关 `--strict-quality` / `--strict-calib`
+> （`--fallback-policy strict` 隐含两者）把「钳制 / 未标定回退」升级为 `exit 2`；
+> **cpu_v2 有意不对称（§8）**：无 `--nvenc-aq`；tier 不派生 `-tune uhq`；
+> 无上述两个 strict 开关、也无 `--fallback-policy`（两道 tier 判定恒为告警）。
+
+> 下文各换算表展示的是**原始表值**；真实下发前所有显式质量值都先过 tier 窗口
+> 钳制（例如表中示例 `--crf-ref 21` 在当前默认档下会被钳到 23）。
 
 ### 等效换算表（`convert_crf.py`）
 
@@ -2441,7 +2496,8 @@ SELFTEST=1 bash Accessory/test/check_readme_refs.sh   # 自检判据本身（五
   实测 `-x265-params` 后者**整条覆盖**前者，故必须与 HDR 元数据合并成同一条；
   **2026-09-28（V1~V12）+ T4 上机实测**：`-qp` 不是一套刻度（AV1 0~255 qindex、VAAPI 0~52、
   H.264/HEVC 0~51），constqp 走 `to_constqp_qp()` 回基准轴、CLI 量程 `qp_range(codec)`；
-  默认质量统一 `DEFAULT_REF=21`；实测 **B 组 `-cq` 偏移（h264 26→1.17×、hevc 28→0.76×）
+  默认质量统一到默认档锚点（`DEFAULT_REF` = 阶段一 `balanced` → 24，翻档 `quality`
+  后 → 20）；实测 **B 组 `-cq` 偏移（h264 26→1.17×、hevc 28→0.76×）
   与 C 组 constqp `-qp 21` 都落在容忍带 ⇒ 表与 V1 均无需改**；av1 在 T4 必 SKIP（编不了），
   **`-qp` ×3 尺度已在 L40 实测确认（crf_ref 21 → qp 63）**；报告在 `verification_report`/;
   **L40/Ada 交接已完成：`B-av1-结论`（`-cq 27` PASS，不改表）/ `C-av1-结论`（`×3(qp=63)` PASS，`_QP_SCALE` 已修正为 3），步骤见方案 §4.10

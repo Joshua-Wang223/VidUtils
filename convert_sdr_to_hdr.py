@@ -159,10 +159,10 @@ python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4
 python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --frames 48 --device cpu
 
 # 5) 用 NVENC 硬件编码（会告警静态元数据丢失）
-python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --codec hevc_nvenc --cq 26 --nvenc-aq
+python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --codec hevc_nvenc --cq 29 --nvenc-aq
 
-# 6) 统一基准轴给质量（libx264 CRF 21 的等质量换算）
-python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --crf-ref 21
+# 6) 统一基准轴给质量（libx264 CRF 24 = 阶段一 balanced 锚点 的等质量换算）
+python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --crf-ref 24
 
 # 7) 批量目录 + 文件级并行
 python3 convert_sdr_to_hdr.py -i ./videos -o ./out -r --workers 2
@@ -1543,6 +1543,48 @@ def crf_to_rav1e_qp(crf: int) -> int:
     return max(0, min(255, int(round(v))))
 
 
+# ── [TIER] 概览展示（R1 §9）：四步流程溯源 + tier 基底 rc 轴 ──────────────────
+# `质量` 行格式（三脚本**逐字一致**，进 verify_overview_lockstep.py）：
+#   tier=<档>   crf-ref <钳后基准轴值>[（钳自 --crf 50 / --cq 26 归一 / 无损哨兵）]
+# 括号注只在「用户原始输入被加工」时出现；锚点注入与同通道直取不加注
+# （tier= 已说明来源，数值本身即输入）。四步未跑（该编码器无质量通道）时显示 `—`。
+_TIER_LAST: Dict[str, object] = {}
+
+
+def tier_quality_display(tier: str) -> str:
+    """`质量` 行的值部分（§9：`crf-ref 18（钳自 --crf 50）`）。"""
+    _base = _TIER_LAST.get('base')
+    if _base is None:
+        return f"tier={tier}   crf-ref —"
+    _note = str(_TIER_LAST.get('note') or '')
+    return (f"tier={tier}   crf-ref {_base}"
+            + (f"（{_note}）" if _note else ''))
+
+
+def tier_rc_basis(codec: str, tier: Optional[str], quality_zero: bool,
+                  lookahead: Optional[int], nvenc_multipass: Optional[str],
+                  nvenc_aq: bool) -> Tuple[Optional[int], Optional[str], bool]:
+    """tier 基底的 rc 轴生效值（§4.3 M2/M3）：lookahead / multipass / aq。
+
+    只对 NVENC 编码器注入（CPU 行标定口径是 BASE_LOCK，不含这些 NVENC 专属
+    轴）；质量归零（无损哨兵）时不注入（constqp 与 lookahead/multipass 冲突）。
+    用户显式值优先。tune 不在此列（由 _strategy_tune_for 派生）。
+    命令构造（build_encode_settings）与概览展示**共用**本函数。
+    """
+    if tier is None or quality_zero or codec not in NVENC_CODECS:
+        return lookahead, nvenc_multipass, nvenc_aq
+    _tprof = TIER_PROFILES.get(str(tier)) or {}
+    _t_la = _tprof.get('lookahead')
+    if lookahead is None and _t_la is not None:
+        lookahead = int(_t_la)
+    _t_mp = _tprof.get('multipass')
+    if nvenc_multipass is None and _t_mp is not None:
+        nvenc_multipass = str(_t_mp)          # 表值 'auto' 已在常量层编码为 None
+    if _tprof.get('aq') and not nvenc_aq:
+        nvenc_aq = True
+    return lookahead, nvenc_multipass, nvenc_aq
+
+
 def _resolve_quality_params(
     codec: str,
     user_crf: Optional[int],
@@ -1600,6 +1642,8 @@ def _resolve_quality_params(
                       or encoder_supports_qp(codec) or codec == "librav1e")
     _prof = TIER_PROFILES.get(str(tier)) if _tier_landable else None
     if _prof is not None:
+        _tier_note: Optional[str] = None       # [TIER] 概览溯源（§9）
+        _tier_warn: Optional[str] = None
         _chan = ('crf' if user_crf is not None else
                  'cq' if user_cq is not None else
                  'qp' if qp is not None else
@@ -1654,6 +1698,7 @@ def _resolve_quality_params(
                 cq_ref = 0
             else:
                 user_crf = 0
+            _tier_note = '无损哨兵'
         else:
             # 步骤 3：窗口钳制（闭区间，八档完整覆盖 [0,51] 且互不重叠 ⇒ 唯一归属）
             _r_int = int(round(_ref_t))
@@ -1684,6 +1729,8 @@ def _resolve_quality_params(
                     print(_msg)
                     raise SystemExit(2)
                 print(_msg)
+                _tier_warn = _msg
+                _tier_note = f'钳自 {_label}'
             if _clamped == 0:
                 # 步骤 2b：**最终**基准轴值为 0 ⇒ 无损哨兵（M1：含"钳制到 0"，
                 # 也含归一后本身为 0 的情形——如表内钳制把 --cq 4 反解成 0.0）。
@@ -1696,10 +1743,20 @@ def _resolve_quality_params(
                     qp = 0
                 else:
                     user_crf = 0
+                if _tier_note is None:
+                    _tier_note = '无损哨兵'
             else:
                 # 步骤 4：把归一/钳制结果表达成 crf_ref，落值交给「方式 2」。
                 user_crf = user_cq = qp = crf_ref = cq_ref = None
                 crf_ref = _clamped
+        # [TIER] 记录概览溯源（§9）：base = 钳制后的基准轴值；非 CRF 通道的
+        # 直取/归一要加注（否则概览上的基准轴值与用户敲的输入对不上）。
+        if _tier_note is None and _chan in ('cq', 'qp', 'cq-ref'):
+            _tier_note = f'{_label} 归一'
+        _TIER_LAST.clear()
+        _TIER_LAST.update(tier=str(tier),
+                          base=0 if _raw_zero else int(_clamped),
+                          note=_tier_note, warn=_tier_warn)
 
     # ── VAAPI 等"只认 -qp"的编码器：所有质量输入先归一到基准轴，再经 -qp 下发 ──
     if codec in _QP_ONLY_CODECS:
@@ -3869,10 +3926,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
   python3 convert_sdr_to_hdr.py -i uhd.mp4 -o out.mp4 --tile 1024 --tile-overlap 128
 
   # 6) 用 NVENC 硬件编码（HDR10 静态元数据会丢失，见 --codec 说明）
-  python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --codec hevc_nvenc --cq 26
+  python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --codec hevc_nvenc --cq 29
 
-  # 7) 以统一基准轴给质量：libx264 CRF 21 的等质量换算（默认 quality 口径）
-  python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --crf-ref 21
+  # 7) 以统一基准轴给质量：libx264 CRF 24（默认档锚点）的等质量换算（默认 quality 模式）
+  python3 convert_sdr_to_hdr.py -i in.mp4 -o out.mp4 --crf-ref 24
 
   # 8) 批量目录：多文件并行（外加 / 保留目录结构）
   python3 convert_sdr_to_hdr.py -i ./videos -o ./out -r --workers 2
@@ -3941,13 +3998,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="质量档位（R1，八档，默认 balanced；最终默认 quality）。"
                         "tier = 编码策略基底（preset/tune/lookahead/multipass/aq，"
                         "由编码器实例化——codec 是输入不是成员）× 质量锚点/窗口 × "
-                        "标定指纹。质量数值（--crf/--cq/--qp/--crf-ref/--cq-ref）"
+                        "标定指纹。 质量数值（--crf/--cq/--qp/--crf-ref/--cq-ref）"
                         "在档内：先归一到统一基准轴（libx264 CRF）、再被本档窗口"
-                        "钳制（越界钳到边界并告警；--strict-quality 或 "
-                        "--fallback-policy strict 下改 exit 2）。非 balanced 档"
-                        "当前未标定 ⇒ 换算自动回退 balanced 表并告警（预期状态）。"
-                        "本脚本产出 HDR：等质量换算恒走 HDR 域覆盖表（tier 行不叠加，"
-                        "§4.4.1 范围边界，概览会提示）")
+                        "钳制（全档生效，含默认档 balanced；越界钳到边界并告警；"
+                        "--strict-quality 或 --fallback-policy strict 下改 exit 2）。 "
+                        "非 balanced 档当前未标定 ⇒ 换算自动回退 balanced 表并告警"
+                        "（预期状态）。 默认质量值轨迹：21 → 24（阶段一 balanced "
+                        "锚点）→ 20（翻档后）。 本脚本产出 HDR：等质量换算恒走 HDR 域"
+                        "覆盖表（tier 行不叠加，§4.4.1 范围边界，概览会提示）")
     g.add_argument("--strict-quality", action="store_true",
                    help="质量窗口越界不再钳制告警，而是 exit 2（首行同告警句）。"
                         "--fallback-policy strict 会隐含打开它。")
@@ -4436,17 +4494,13 @@ def build_encode_settings(args: argparse.Namespace, codec: Optional[str] = None,
     # _run_job_with_fallback 用 _strategy_tune_for() 派好后经 tune= 传入
     # （与 vidcrop_hwaccel.py 的分工一致；sdr 的 aq 走本结构、hwaccel 走策略层，
     #  见 §8-3 登记）。
-    _tier = getattr(args, "quality_tier", None)
-    _la, _mp, _aq = args.lookahead, args.nvenc_multipass, args.nvenc_aq
-    if _tier is not None and c in NVENC_CODECS \
-            and not (q_crf == 0 or q_cq == 0 or q_qp == 0):
-        _tprof = TIER_PROFILES.get(str(_tier)) or {}
-        if _la is None and _tprof.get("lookahead") is not None:
-            _la = int(_tprof["lookahead"])
-        if _mp is None and _tprof.get("multipass") is not None:
-            _mp = str(_tprof["multipass"])        # 表值 'auto' 已在常量层编码为 None
-        if _tprof.get("aq") and not _aq:
-            _aq = True
+    # 三个轴经 tier_rc_basis() 计算 —— 概览展示（§9）与命令构造共用同一实现。
+    # 档名归一（R1）：省略（None）⇒ 进程档 —— 与二脚本 build_ffmpeg_cmd 的归一
+    # 一致，防止「质量按全局档、rc 基底按 None 跳过」的半档状态。
+    _tier = getattr(args, "quality_tier", None) or get_quality_tier()
+    _la, _mp, _aq = tier_rc_basis(c, _tier, (q_crf == 0 or q_cq == 0 or q_qp == 0),
+                                  args.lookahead, args.nvenc_multipass,
+                                  args.nvenc_aq)
 
     # tune：未显式覆盖（dry-run / print_plan / 阶梯首轮）⇒ 按 tier 派生（§4.3
     # 顺序 1–5；质量归零时 _strategy_tune_for 自身返回用户值/None）。阶梯层传
@@ -5890,6 +5944,9 @@ def print_overview(args: argparse.Namespace, jobs: List[Job],
         _q.append(f"CQ-ref: {args.cq_ref}（h264_nvenc 基准，{args.quality_mode} 口径换算）")
     print(_label("编码器") + f"{codec}   {_preset_field}" + "   ".join(_q)
           + f"   pix_fmt: {(_PIXFMT_BY_DEPTH.get(args.bit_depth, {}).get(codec) or _DEFAULT_PIXFMT_BY_DEPTH[args.bit_depth])}")
+    # R1（§9）：统一基准轴的质量行（§4.4 四步流程的落点 + 溯源）。窗口告警在
+    # validate_args 里已打一次（本脚本的质量参数在配置阶段一次性解析）。
+    print(_label("质量") + tier_quality_display(args.quality_tier))
     # ── R1 标定指纹告警（§2.4 固定文案）+ M5 范围提示（§4.4.1）──────────────
     # 本脚本产出 HDR ⇒ 等质量换算恒走 HDR 域覆盖表、tier 行不叠加 ⇒ 恒提示一句
     # 范围边界；再按指纹机制报「未标定 / 组合偏离」。strict-calib 只针对后者
@@ -5907,6 +5964,30 @@ def print_overview(args: argparse.Namespace, jobs: List[Job],
             print(_calib_notice)
             return 2
         print("  " + _calib_notice)
+    # R1（§6.2-⑧）：tier 基底注入后的**生效** rc 轴（sdr 措辞：tune= /
+    # multipass= / AQ）；非 NVENC 编码器不出现这些 NVENC 专属位（命令里也没有）。
+    # 默认档无注入且用户全空 ⇒ 无此行（与引入 tier 之前的概览逐字相同）。
+    _q0 = any(_v == 0 for _v in (args.crf, args.cq, args.qp))
+    _e_la, _e_mp, _e_aq = tier_rc_basis(codec, args.quality_tier, _q0,
+                                        args.lookahead, args.nvenc_multipass,
+                                        args.nvenc_aq)
+    _e_tn = (_strategy_tune_for(codec, args.quality_tier, args.nvenc_tune, _q0)
+             if codec in NVENC_CODECS else None)
+    _rc_bits = []
+    if args.rc_mode != "auto":
+        _rc_bits.append(f"rc-mode: {args.rc_mode}")
+    if args.bitrate:
+        _rc_bits.append(f"码率: {args.bitrate}")
+    if _e_la is not None:
+        _rc_bits.append(f"lookahead: {_e_la}")
+    if _e_aq:
+        _rc_bits.append("AQ")
+    if _e_tn:
+        _rc_bits.append(f"tune={_e_tn}")
+    if _e_mp:
+        _rc_bits.append(f"multipass={_e_mp}")
+    if _rc_bits:
+        print(_label("码率控制") + "   ".join(_rc_bits))
     print(_label("解码") + f"{getattr(args, 'decode_resolved', args.decode)}"
           + ("（硬件解码）" if getattr(args, "decode_resolved", "cpu") == "cuda"
              else "（软件，本脚本默认）"))

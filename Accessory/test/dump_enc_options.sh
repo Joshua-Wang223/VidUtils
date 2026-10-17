@@ -43,6 +43,21 @@
 #           （(1.1116, 2.1606) / (1.0979, -2.3119)），即 -crf 15 是标定后的正确值；
 #         · ⑨ 跨仓组 14/14 通过，说明表本身没问题。
 #       故更新的是**过期基线**，不是把代码改回旧行为。判据见 verify_quality_mapping.py ⑨。
+#   例外（2026-10-17，有意变更，R1 quality-tier）：
+#     · 显式钉 `--quality-tier balanced`（阶段一默认即 balanced，与不写逐字等价）——
+#       阶段三翻默认档到 quality 时本门不随默认漂移。单格自带的 --quality-tier（下面
+#       lossless 两格）写在钉住值之后、argparse 后写覆盖 ⇒ 以单格为准。
+#     · 默认质量锚点 21 → 24：无质量参数的格 `-crf 21` → `-crf 24`。
+#     · 显式值被**档窗口**（balanced = 基准轴 23~26）钳制：
+#         `libx264 --cq 23`（基准轴 ≈18 ⇒ 钳 23 → `-crf 23`）、`--cq 4`（≈-1 ⇒ 钳 23）、
+#         `hevc_nvenc --cq 20`（基准轴 ≈16.05 ⇒ 钳 23 → 有 GPU 时 `-cq 28`；
+#         无 GPU 的机器 hwaccel 降级 libx265 → `-crf 23`，与既有 hevc_nvenc 格同因）；
+#         `libvpx-vp9 --crf 32` 归一到基准轴（≈23.3）在窗内 ⇒ 不变；`libsvtav1 --crf 30`
+#         按「基准轴量纲」处理（svt 不在 CRF_SUPPORTED_CODECS）⇒ 30 越上界钳 26 → `-crf 34`；
+#     · 新增 lossless 两格：`--quality-tier lossless`（锚点注入 ⇒ 基准轴 0 ⇒ 通道哨兵）
+#       与 `lossless + --crf 5`（显式 5 被窗 [0,0] 钳到 0，步骤 2b ⇒ 同一份无损下发，
+#       仅多一条钳制告警）。NVENC 侧 hwaccel 把 0 改写成 `-rc constqp -qp 0 -b:v 0`、
+#       cpu_v2 原样透传 `-cq 0 -b:v 0 -rc vbr`（既有 ⑩ C 的差异化，不是本轮新增）。
 # 用法: bash test/dump_enc_options.sh > out.txt
 set -uo pipefail
 # 仓库根定位：向上搜标记（.git / convert_crf.py），不数 /.. 的层数 ——
@@ -69,10 +84,13 @@ cv() { python vidcrop_cpu_v2.py  --input "$F/land.mp4" --output "$F/o" --dry-run
 # hwaccel 固定三轴全 CPU（与 dump_filter_chains.sh 同因：跳过 GPU 探测、与 v2 可比）
 CPU_ONLY=(--decode cpu --scale-algo libswscale-lanczos)
 BASE=(--mode crop --output-width 640 --output-height 360)
+# R1（2026-10-17）：显式钉 `--quality-tier balanced`（阶段一默认即 balanced；单格若自带
+# --quality-tier 写在其后 ⇒ argparse 后写覆盖，以单格为准）。
+TIER=(--quality-tier balanced)
 emit() {  # emit <标签> <参数...>
   local tag=$1; shift
-  printf 'hwaccel  %-34s %s\n' "$tag" "$(tokens "$(hw "${CPU_ONLY[@]}" "$@" "${BASE[@]}")")"
-  printf 'cpu_v2   %-34s %s\n' "$tag" "$(tokens "$(cv "$@" "${BASE[@]}")")"
+  printf 'hwaccel  %-34s %s\n' "$tag" "$(tokens "$(hw "${CPU_ONLY[@]}" "${TIER[@]}" "$@" "${BASE[@]}")")"
+  printf 'cpu_v2   %-34s %s\n' "$tag" "$(tokens "$(cv "${TIER[@]}" "$@" "${BASE[@]}")")"
 }
 
 emit "默认编码器(无质量参数)"
@@ -81,3 +99,7 @@ emit "libvpx-vp9"                    --codec libvpx-vp9 --crf 32
 emit "libsvtav1"                     --codec libsvtav1 --crf 30
 emit "libx264 显式 --cq(降级换算)"   --codec libx264 --cq 23
 emit "hevc_nvenc 显式 --cq"          --codec hevc_nvenc --cq 20
+# R1 新增：lossless 两格 —— ①锚点注入（无质量参数）；②显式 --crf 5 被窗 [0,0] 钳到 0
+# （步骤 2b）⇒ 下发命令与 ① 相同、只多一条钳制告警（见文件头的例外说明）。
+emit "hevc_nvenc · lossless 档"       --codec hevc_nvenc --quality-tier lossless
+emit "hevc_nvenc · lossless + --crf 5" --codec hevc_nvenc --quality-tier lossless --crf 5

@@ -24,6 +24,7 @@ ROOT = repo_root()
 sys.path.insert(0, str(ROOT))
 import vidcrop_hwaccel as H
 import vidcrop_cpu_v2 as C
+import convert_sdr_to_hdr as S
 
 # fixture 是 lavfi 生成的，不入库（与 verify_pixfmt_bitdepth.py 同因）
 SRC = temp_root() / 'fixture_1080p.mp4'
@@ -300,31 +301,54 @@ chk('⑩ C lossless 与 lookahead 合并成一条 -x265-params',
     (_mc.count('-x265-params'),
      set(_mc[_mc.index('-x265-params') + 1].split(':'))),
     (1, {'lossless=1', 'rc-lookahead=40'}))
-# [E] --nvenc-aq
+# [E] --nvenc-aq（2026-10-04 建；R1 2026-10-17 收口：补 sdr；cpu_v2 有意无该轴 —— §8-2）
 _c = hw('hevc_nvenc', cq=20, nvenc_aq=True)[0]
-chk('⑩ E --nvenc-aq 给 NVENC 加 -spatial-aq/-temporal-aq',
+chk('⑩ E hwaccel --nvenc-aq 给 NVENC 加 -spatial-aq/-temporal-aq',
     ('-spatial-aq' in _c and '-temporal-aq' in _c), True)
 _c2, _w2 = hw('libx264', crf=20, nvenc_aq=True)
-chk('⑩ E --nvenc-aq 对非 NVENC 忽略并告知',
+chk('⑩ E hwaccel --nvenc-aq 对非 NVENC 忽略并告知',
     ('-spatial-aq' not in _c2 and 'nvenc-aq' in _w2), True)
+# sdr：同一契约走 apply_rc_control_args（x265_params 另走合并——不得被 aq 污染）
+_sw = []
+_sa, _sx = S.apply_rc_control_args('hevc_nvenc', aq=True, warn=_sw.append)
+chk('⑩ E sdr --nvenc-aq 给 NVENC 加 -spatial-aq/-temporal-aq（不污染 x265_params）',
+    ('-spatial-aq' in _sa, '-temporal-aq' in _sa, _sx, _sw),
+    (True, True, [], []))
+_sw2 = []
+_sa2, _ = S.apply_rc_control_args('libx264', aq=True, warn=_sw2.append)
+chk('⑩ E sdr --nvenc-aq 对非 NVENC 忽略并告知',
+    ('-spatial-aq' in _sa2, bool(_sw2) and 'nvenc-aq' in _sw2[0]), (False, True))
+# cpu_v2：签名里就没有 nvenc_aq（传即 TypeError），命令里也不可能出现（§8-2 有意不对称）
+try:
+    cv('hevc_nvenc', cq=20, nvenc_aq=True)
+    _cv_aq = 'accepted'
+except TypeError:
+    _cv_aq = 'TypeError'
+chk('⑩ E cpu_v2 无 --nvenc-aq 参数（传即 TypeError）', _cv_aq, 'TypeError')
+chk('⑩ E cpu_v2 NVENC 命令无 AQ 选项',
+    '-spatial-aq' not in ' '.join(cv('hevc_nvenc', cq=20)[0]), True)
 
-# [F] --nvenc-tune / --nvenc-multipass（2026-10-04，依据 Plan/ffmpeg_nvenc_knowledge.md + T4 A/B）
-_default = ' '.join(hw('hevc_nvenc', cq=26)[0])
-chk('⑩ F 默认不下发 -tune / -multipass（-tune hq 是 ffmpeg 默认值）',
-    ('-tune' in _default or '-multipass' in _default), False)
+# [F] --nvenc-tune / --nvenc-multipass × tier 基底（2026-10-04 建；R1 扩，§4.3）
+# 默认档 = balanced：基底为空 ⇒ 一条都不下发（-tune hq 是 ffmpeg 默认值）。
+_default = ' '.join(hw('hevc_nvenc', cq=28)[0])
+chk('⑩ F 默认（进程档 = balanced）不下发 -tune / -multipass / -rc-lookahead',
+    ('-tune' in _default or '-multipass' in _default
+     or '-rc-lookahead' in _default), False)
+chk('⑩ F 省略 tier ⇒ 进程档（默认与显式 balanced 逐字相等）',
+    _default, ' '.join(hw('hevc_nvenc', cq=28, tier='balanced')[0]))
 for _fn, _name in ((hw, 'hwaccel'), (cv, 'cpu_v2')):
     chk(f'⑩ F {_name} --nvenc-tune uhq → -tune uhq',
-        '-tune uhq' in ' '.join(_fn('hevc_nvenc', cq=26, nvenc_tune='uhq')[0]), True)
+        '-tune uhq' in ' '.join(_fn('hevc_nvenc', cq=28, nvenc_tune='uhq')[0]), True)
     chk(f'⑩ F {_name} cbr 自动 -multipass fullres',
         '-multipass fullres' in ' '.join(_fn('hevc_nvenc', rc_mode='cbr', bitrate='8M')[0]), True)
     chk(f'⑩ F {_name} 受限码率自动 -multipass fullres',
-        '-multipass fullres' in ' '.join(_fn('hevc_nvenc', rc_mode='vbr', cq=26,
+        '-multipass fullres' in ' '.join(_fn('hevc_nvenc', rc_mode='vbr', cq=28,
                                              bitrate='8M')[0]), True)
     chk(f'⑩ F {_name} 显式 --nvenc-multipass 优先于自动',
         '-multipass disabled' in ' '.join(_fn('hevc_nvenc', rc_mode='cbr', bitrate='8M',
                                               nvenc_multipass='disabled')[0]), True)
     chk(f'⑩ F {_name} CQ 路径不自动 multipass',
-        '-multipass' not in ' '.join(_fn('hevc_nvenc', rc_mode='vbr', cq=26)[0]), True)
+        '-multipass' not in ' '.join(_fn('hevc_nvenc', rc_mode='vbr', cq=28)[0]), True)
 _h264, _w264 = hw('h264_nvenc', cq=26, nvenc_tune='uhq')
 chk('⑩ F h264_nvenc 无 uhq 档 → 忽略并告知',
     ('-tune uhq' not in ' '.join(_h264) and 'uhq' in _w264), True)
@@ -334,6 +358,84 @@ chk('⑩ F 非 NVENC → -tune/-multipass 忽略并告知',
 _cq, _wq = hw('hevc_nvenc', rc_mode='constqp', qp=23, nvenc_multipass='fullres')
 chk('⑩ F constqp 无码率目标 → multipass 忽略并告知',
     ('-multipass' not in _cq and 'multipass' in _wq), True)
+
+# ── R1 新增：各档 lookahead/multipass/aq 基底（命令级；preset/tune 见下）─────
+for _t, _la, _mp, _aq in (
+        # tier,   lookahead250, multipass,     aq
+        ('balanced', False,      None,         False),
+        ('archive',  True,       'fullres',    True),
+        ('quality',  True,       'fullres',    True),
+        ('preview',  False,      'disabled',   False),
+        ('draft',    False,      'disabled',   False),
+        ('test',     False,      'disabled',   False),
+):
+    _s = ' '.join(hw('hevc_nvenc', cq=26, tier=_t)[0])
+    chk(f'⑩ F tier={_t}：lookahead 基底', '-rc-lookahead 250' in _s, _la)
+    chk(f'⑩ F tier={_t}：multipass 基底',
+        (f'-multipass {_mp}' in _s) if _mp else ('-multipass' not in _s), True)
+    chk(f'⑩ F tier={_t}：aq 基底', '-spatial-aq 1' in _s, _aq)
+
+# preset 列（§13.10R）：走两条真实路径 —— hwaccel 策略层 strategy_preset、
+# cpu_v2 的 args 填充期 default_preset_for（vidcrop_cpu_v2.py `args.preset = …`）。
+for _t, _p in (('balanced', 'p4'), ('archive', 'p6'), ('quality', 'p5'),
+               ('preview', 'p3'), ('draft', 'p2'), ('test', 'p1')):
+    chk(f'⑩ F preset 基底 tier={_t}（hwaccel strategy_preset）',
+        H.strategy_preset(None, 'hevc_nvenc', 'hevc_nvenc', tier=_t), _p)
+    chk(f'⑩ F preset 基底 tier={_t}（cpu_v2 default_preset_for）',
+        C.default_preset_for('hevc_nvenc', _t), _p)
+chk('⑩ F preset 基底 libx265（archive=slower / preview=faster）',
+    (H.strategy_preset(None, 'libx265', 'libx265', tier='archive'),
+     H.strategy_preset(None, 'libx265', 'libx265', tier='preview')),
+    ('slower', 'faster'))
+
+# ── R1 新增：显式覆盖 tier 的行为（§4.3 M3）────────────────────────────────
+_ov = ' '.join(hw('hevc_nvenc', cq=20, tier='archive', lookahead=40,
+                  nvenc_multipass='disabled', nvenc_tune='hq', nvenc_aq=True)[0])
+chk('⑩ F 显式值覆盖 tier 基底（lookahead/multipass/tune/aq）',
+    ('-rc-lookahead 40' in _ov, '-multipass disabled' in _ov,
+     '-tune hq' in _ov, '-spatial-aq 1' in _ov), (True, True, True, True))
+_pv = ' '.join(hw('hevc_nvenc', cq=26, tier='preview', nvenc_aq=True)[0])
+chk('⑩ F --nvenc-aq 显式 True 能打开档值 False 的轴（preview）',
+    ('-spatial-aq 1' in _pv, '-multipass disabled' in _pv), (True, True))
+_cc = sys.modules['convert_crf']
+_prev_tier = _cc.get_quality_tier()
+_cc.set_quality_tier('preview')
+try:
+    chk('⑩ F 进程档（set_quality_tier）对省略 tier 的直接调用生效',
+        ' '.join(hw('hevc_nvenc', cq=26)[0]),
+        ' '.join(hw('hevc_nvenc', cq=26, tier='preview')[0]))
+    chk('⑩ F 显式 tier= 覆盖进程档',
+        '-rc-lookahead 250' in ' '.join(hw('hevc_nvenc', cq=26, tier='archive')[0]),
+        True)
+finally:
+    _cc.set_quality_tier(_prev_tier)
+
+# ── R1 新增：tune 派生（hwaccel 在策略层派、cpu_v2 有意不对称 §8-2）──────────
+chk('⑩ F hwaccel tune 派生：archive→uhq / preview→ll / balanced→None',
+    (H._strategy_tune_for('hevc_nvenc', 'archive', None),
+     H._strategy_tune_for('hevc_nvenc', 'preview', None),
+     H._strategy_tune_for('hevc_nvenc', 'balanced', None)), ('uhq', 'll', None))
+chk('⑩ F hwaccel tune 派生：质量归零不派生 / 用户显式值不覆写',
+    (H._strategy_tune_for('hevc_nvenc', 'archive', None, True),
+     H._strategy_tune_for('hevc_nvenc', 'archive', 'll')), (None, 'll'))
+chk('⑩ F cpu_v2 tune 派生的有意不对称：uhq 档不派生、其余档值照派',
+    (C.tier_tune_basis('hevc_nvenc', 'quality', False, None),
+     C.tier_tune_basis('hevc_nvenc', 'archive', False, None),
+     C.tier_tune_basis('hevc_nvenc', 'preview', False, None),
+     C.tier_tune_basis('hevc_nvenc', 'archive', False, 'll')),
+    (None, None, 'll', 'll'))
+chk('⑩ F cpu_v2 quality 档命令里无 -tune（负向对照；preview 有 -tune ll）',
+    ('-tune' in ' '.join(cv('hevc_nvenc', cq=26, tier='quality')[0]),
+     '-tune ll' in ' '.join(cv('hevc_nvenc', cq=26, tier='preview')[0])),
+    (False, True))
+
+# ── R1 新增：preview + 非 NVENC ⇒ 静默跳过（M2：CPU 行不告警、不加轴）───────
+for _fn, _name in ((hw, 'hwaccel'), (cv, 'cpu_v2')):
+    _cs_pv, _ws_pv = _fn('libx264', crf=30, tier='preview')
+    _s_pv = ' '.join(_cs_pv)
+    chk(f'⑩ F {_name} preview + 非 NVENC：静默（无告警、无 NVENC 轴）',
+        ('-tune' in _s_pv or '-multipass' in _s_pv or '-spatial-aq' in _s_pv,
+         (_ws_pv or '').strip()), (False, ''))
 
 print('── ⑪ 借鉴项 [D]：--workers 反推每任务线程预算（cpu_v2 专属）──')
 _w, _t = C.compute_parallelism(8, 'libx264', 8, 32.0, 16.0,

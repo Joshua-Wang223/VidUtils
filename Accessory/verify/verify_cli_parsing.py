@@ -10,6 +10,11 @@
 #    （死代码）⇒ 奇数尺寸会一路带到 ffmpeg、在编码器初始化时才报错；cpu_v2 早就有。
 #    现在两脚本的退出码与报错首行必须逐字一致。
 #
+# ③ R1 quality-tier 的 CLI 契约（2026-10-17）：`--quality-tier` 走 argparse choices；
+#    §4.4 越窗告警三脚本逐字一致；`--strict-quality`（以及隐含它的
+#    `--fallback-policy strict`，§5.3）下同组合 exit 2；cpu_v2 有意无这三道开关
+#    （§8-5：恒为告警）。
+#
 # 纯 CPU 用例，不需要 GPU。
 import re
 import subprocess
@@ -112,6 +117,85 @@ for label, expect_rc, dims in DIM_CASES:
             (err_first(h_out), err_first(c_out)), ('', ''))
     else:
         chk(f'[2] {label}：拒绝时首行非空', bool(err_first(h_out)), True)
+
+print('── ③ --quality-tier：choices 拒绝 / 窗口告警三脚本逐字 / strict 与隐含（R1 §5.3/§7）──')
+SDR_BASE = ['--input', str(SRC), '--output', str(temp_root() / 'verify_cli' / 'os'),
+            '--dry-run', '--no-model']
+
+
+def after_error(text):
+    """argparse 报错行 `prog: error: <正文>` 的正文（跨脚本可比；无 → ''）。"""
+    for line in (text or '').splitlines():
+        if ': error: ' in line:
+            return line.split(': error: ', 1)[1]
+    return ''
+
+
+def first_with(text, needle):
+    """含 needle 的第一行（无 → ''）。"""
+    return next((ln for ln in (text or '').splitlines() if needle in ln), '')
+
+
+def run3(extra):
+    """同一组质量参数跑三脚本（sdr 不吃 BASE 的宽高/scale-algo）。"""
+    return {
+        'hwaccel': run('vidcrop_hwaccel.py', BASE + extra, cpu_only=True),
+        'cpu_v2': run('vidcrop_cpu_v2.py', BASE + extra),
+        'sdr': run('convert_sdr_to_hdr.py', SDR_BASE + extra),
+    }
+
+
+# ③-1 非法档名：argparse choices 拒绝（rc=2）且报错正文三脚本逐字一致
+_e = {k: (v[0], after_error(v[1])) for k, v in run3(['--quality-tier', 'bogus']).items()}
+chk('[3] --quality-tier bogus 三脚本 rc=2', [v[0] for v in _e.values()], [2, 2, 2])
+chk('[3] bogus 报错正文三脚本逐字一致',
+    [_e['cpu_v2'][1], _e['sdr'][1]], [_e['hwaccel'][1]] * 2)
+chk_in('[3] 报错正文含 invalid choice', 'invalid choice', _e['hwaccel'][1])
+chk_in('[3] 报错正文指名 --quality-tier', '--quality-tier', _e['hwaccel'][1])
+
+# ③-2 越窗告警首行（--quality-tier archive --crf 50；钉 libx265 使三脚本原生值同串）
+_r = run3(['--codec', 'libx265', '--quality-tier', 'archive', '--crf', '50'])
+chk('[3] archive+--crf 50 默认仅告警（三脚本 rc=0）',
+    [v[0] for v in _r.values()], [0, 0, 0])
+_w = {k: first_with(v[1], '质量窗口为') for k, v in _r.items()}
+chk('[3] 窗口告警首行三脚本逐字一致且非空',
+    (_w['cpu_v2'], _w['sdr']), (_w['hwaccel'], _w['hwaccel']))
+chk_in('[3] 告警首行含 §4.4 固定句（钳后值 + 原生值）',
+       '⚠ --quality-tier archive 的质量窗口为 CRF 13~18；--crf 50（基准轴 ≈47.6）'
+       '已钳到 18（libx265 -crf 17）', _w['hwaccel'])
+
+# ③-3 --strict-quality：越窗 exit 2、首行同告警句；窗内组合放行（负向）
+_sq = ['--codec', 'libx265', '--quality-tier', 'archive', '--crf', '50',
+       '--strict-quality']
+_rh, _oh = run('vidcrop_hwaccel.py', BASE + _sq, cpu_only=True)
+_rs, _os = run('convert_sdr_to_hdr.py', SDR_BASE + _sq)
+chk('[3] hwaccel/sdr --strict-quality 越窗 exit 2', (_rh, _rs), (2, 2))
+chk('[3] strict 首行与默认告警同句',
+    (first_with(_oh, '质量窗口为'), first_with(_os, '质量窗口为')),
+    (_w['hwaccel'], _w['hwaccel']))
+_ok = ['--codec', 'libx265', '--quality-tier', 'archive', '--crf-ref', '16',
+       '--strict-quality']
+_rh2, _ = run('vidcrop_hwaccel.py', BASE + _ok, cpu_only=True)
+_rs2, _ = run('convert_sdr_to_hdr.py', SDR_BASE + _ok)
+chk('[3] --strict-quality 窗内组合放行（负向：rc=0）', (_rh2, _rs2), (0, 0))
+
+# ③-4 --fallback-policy strict 隐含打开 --strict-quality（§5.3）
+_fp = ['--codec', 'libx265', '--quality-tier', 'archive', '--crf', '50',
+       '--fallback-policy', 'strict']
+_rh3, _oh3 = run('vidcrop_hwaccel.py', BASE + _fp, cpu_only=True)
+_rs3, _os3 = run('convert_sdr_to_hdr.py', SDR_BASE + _fp)
+chk('[3] --fallback-policy strict 隐含 strict-quality ⇒ exit 2', (_rh3, _rs3), (2, 2))
+chk('[3] 隐含路径首行同告警句',
+    (first_with(_oh3, '质量窗口为'), first_with(_os3, '质量窗口为')),
+    (_w['hwaccel'], _w['hwaccel']))
+
+# ③-5 cpu_v2 有意无这三个开关（§8-5）：两道判定恒为告警、参数被 argparse 拒
+for _flag in (['--strict-quality'], ['--fallback-policy', 'strict']):
+    _rc, _o = run('vidcrop_cpu_v2.py',
+                  BASE + ['--codec', 'libx265', '--quality-tier', 'archive',
+                          '--crf', '50'] + _flag)
+    chk(f'[3] cpu_v2 无 {_flag[0]}（有意不对称，未识别）',
+        _rc != 0 and 'unrecognized' in _o, True)
 
 print()
 if fails:

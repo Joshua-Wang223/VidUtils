@@ -28,6 +28,16 @@
 #   diff test/baseline/cmd_full.txt out.txt   # 基线回归
 #   SELFTEST=1 bash test/dump_cmd_full.sh     # 自检判词装置（正/负/空三格）
 #   SABOTAGE=1 bash test/dump_cmd_full.sh     # 负向对照：门必须判失败（期望 exit 1）
+#
+# 例外（2026-10-17，有意变更，R1 quality-tier）：
+#   · 显式钉 `--quality-tier balanced`（阶段一默认即 balanced ⇒ 判据"两脚本逐字相同"不受影响，
+#     钉死只为阶段三翻默认档时 golden 不随默认漂移）；
+#   · 默认质量锚点 21 → 24（无质量参数的格 `-crf 21` → `-crf 24`）；显式值被档窗口钳制：
+#     `libx265 --crf 20` / `--crf-ref 21`（基准轴 20/21 越下界 ⇒ 钳 23）、
+#     `libx264 --cq 23`（基准轴 ≈18 ⇒ 钳 23 ⇒ `-crf 23`）、`libx264 --cq 4`（≈-1 ⇒ 钳 23）；
+#     `libvpx-vp9 --crf 32` 归一到基准轴后（≈23.3）落在窗内 ⇒ 不变；`libsvtav1 --crf 30`
+#     按「基准轴量纲」处理（svt 不在 CRF_SUPPORTED_CODECS）⇒ 30 越上界钳 26 → `-crf 34`。
+#   · 重录后本门仍必须**全部逐字相同**（两脚本同受同一钳制）；分叉时 stderr 有逐 token diff。
 set -uo pipefail
 # 仓库根定位：向上搜标记（.git / convert_crf.py），不数 /.. 的层数 ——
 # 本目录已移进 Accessory/，数层数会在目录再移动时悄悄失效。
@@ -53,10 +63,12 @@ cmd_of() { sed -n 's/.*命令[^:]*: \(ffmpeg .*\)$/\1/p' <<< "$1" | head -1; }
 # hwaccel 固定「三轴全 CPU」：否则默认路径会带 GPU 项、与 cpu_v2 不可比。
 # 两边都**不显式给 --threads**，这样连自动值（两脚本共用同一套 cgroup 感知探测）
 # 也一并钉在门里。
+# R1（2026-10-17）：显式钉 `--quality-tier balanced`（阶段一默认即 balanced ⇒ 逐字判据不变）。
+TIER=(--quality-tier balanced)
 hw() { python vidcrop_hwaccel.py --input "$SRC" --output "$OUT" \
-         --decode cpu --scale-algo libswscale-lanczos --dry-run "$@" 2>&1; }
+         --decode cpu --scale-algo libswscale-lanczos --dry-run "${TIER[@]}" "$@" 2>&1; }
 cv() { python vidcrop_cpu_v2.py --input "$SRC" --output "$OUT" \
-         --dry-run "$@" 2>&1; }
+         --dry-run "${TIER[@]}" "$@" 2>&1; }
 
 FAILS=0
 PAIRS=0

@@ -141,6 +141,19 @@ FFmpeg NVENC 封装中，`-rc` 仅暴露三个基础值：
     时**自动补 fullres**（该场景才有意义），可用本参数显式覆盖（含 `disabled`）。
 - 等质量标定 harness（`probe/calibrate_equal_quality.py`）**不受影响**：`BASE_LOCK` 依旧裸 `-rc vbr`。
 - ⚠ 别把 `-preset p7` 当 two-pass：现代 `p1~p7` 别名不带 multipass 标记（只有 legacy `slow` 会开两遍）。
+- **R1（2026-10-17）起改为 tier 基底**（`--quality-tier`，默认 `balanced`）—— lookahead /
+  multipass / aq / tune 这四个轴由档值统一注入，**只在最终生效编码器 ∈ NVENC 时**生效：
+  · `near-lossless` / `archive` / `quality`：`-rc-lookahead 250 -multipass fullres
+    -spatial-aq 1 -temporal-aq 1`，hevc/av1 另派 `-tune uhq`；
+  · `preview` / `draft` / `test`：`-multipass disabled`，preview 另派 `-tune ll`；
+  · **`balanced` = 全空** ⇒ 上面"默认路径裸命令"的结论仍然逐字成立（≤ 标定 `BASE_LOCK` 不变）。
+  用户显式 `--nvenc-tune` / `--nvenc-multipass` / `--lookahead` / `--nvenc-aq` 一律优先。
+  · ⚠ 与 §5.1 "CQ 默认不开 multipass"**不矛盾**：那里的"默认"= balanced 的裸路径；archive /
+    quality 档族的定位是母带/高质量归档，用 fullres 换码率命中精度是**有意选择**（代价 = 耗时 +
+    显存），且随时可被显式参数覆盖。`tune uhq` 自动开 lookahead + temporal filter 的语义与
+    near-lossless/archive/quality 的"全面高配"一致；preview/draft/test 与 `ll` 的低延迟取向一致。
+  · 实现（§9 概览 / §4.3 四步）与回归见 `Plan/VidUtils_质量参数统一_quality-tier方案_v3_20261015.md`、
+    `memory/project_rate_control_params.md` 追加（2026-10-17）。
 
 ## 6. 软编 vs 硬编
 

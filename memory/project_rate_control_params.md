@@ -1,6 +1,6 @@
 ---
 name: 码率控制轴：--rc-mode / --qp / --lookahead / --bitrate（两脚本同名同默认）
-description: 2026-09-22 两个裁剪脚本新增的四个码率控制参数——默认值基本=不下发（CR-2 例外：h264/hevc NVENC 的 auto 默认发 -rc vbr_hq）、-rc/-qp 是 NVENC 专属（非 NVENC 告警忽略、strict 报错）、--lookahead 按编码器映射且默认值三边不同、实测 -x265-params 后者整条覆盖前者故必须与 HDR 元数据合并成同一条；2026-09-28 追加：-qp 不是一套刻度（AV1 是 0~255 qindex、VAAPI 0~52），constqp 必须走 QP 尺度层；av1_nvenc 的 -cq 实为 0~63；2026-10-03 追加：等质量表 QUALITY_MAP 只覆盖软编、硬编回退 SIZE_MAP，GPU 标定的前置是扩展只支持软编的 harness（calibrate_equal_quality.py 聚合段对未落表的 nvenc 会 KeyError）；2026-10-04 追加：CR-2 把 NVENC 默认 rc 改为显式下发（后随 FFmpeg 9.0 统一为 vbr）；2026-10-04 追加②：`to_constqp_qp(0)` 无损守卫缺口（已落地）—— 原先 NVENC 靠 `_QP_LIMITS` clamp 恰好为 0，`librav1e`/`libsvtav1` 给 48/52、10/9，VU 侧已加显式 `if value==0: return 0` + ⑪ 组断言（独立于 CR-4）
+description: 2026-09-22 两个裁剪脚本新增的四个码率控制参数——默认值基本=不下发（CR-2 例外：h264/hevc NVENC 的 auto 默认发 -rc vbr_hq）、-rc/-qp 是 NVENC 专属（非 NVENC 告警忽略、strict 报错）、--lookahead 按编码器映射且默认值三边不同、实测 -x265-params 后者整条覆盖前者故必须与 HDR 元数据合并成同一条；2026-09-28 追加：-qp 不是一套刻度（AV1 是 0~255 qindex、VAAPI 0~52），constqp 必须走 QP 尺度层；av1_nvenc 的 -cq 实为 0~63；2026-10-03 追加：等质量表 QUALITY_MAP 只覆盖软编、硬编回退 SIZE_MAP，GPU 标定的前置是扩展只支持软编的 harness（calibrate_equal_quality.py 聚合段对未落表的 nvenc 会 KeyError）；2026-10-04 追加：CR-2 把 NVENC 默认 rc 改为显式下发（后随 FFmpeg 9.0 统一为 vbr）；2026-10-04 追加②：`to_constqp_qp(0)` 无损守卫缺口（已落地）—— 原先 NVENC 靠 `_QP_LIMITS` clamp 恰好为 0，`librav1e`/`libsvtav1` 给 48/52、10/9，VU 侧已加显式 `if value==0: return 0` + ⑪ 组断言（独立于 CR-4）；2026-10-17 追加：`--quality-tier`（八档）统一质量锚点/窗口（**全档生效，含 balanced**）与 NVENC 调优基底（balanced=全空 ⇒ 默认路径逐字不变），`DEFAULT_REF` 迁移为默认档锚点（21→24→20），非 balanced 未标定 ⇒ 回退 balanced 表 + 告警
 type: project
 ---
 
@@ -383,3 +383,45 @@ librav1e + libsvtav1 + libx264），`verify/verify_quality_mapping.py` 全绿（
 
 **How to apply**：动无损 / constqp 时记住 —— **0 档靠「短路」而非「换算」**；任何 `to_*` 纯函数
 都应能被单独断言「入 0 出 0」，别依赖 clamp 的巧合（NVENC 恰好为 0 只是巧合）。
+
+## 追加（2026-10-17）：`--quality-tier` —— 质量锚点/窗口 × 编码策略基底（R1）
+
+**事实**：三脚本（hwaccel / cpu_v2 / sdr）新增同名同默认的 `--quality-tier`（八档：
+`lossless` → `near-lossless` → `archive` → `quality` → `balanced` → `preview` → `draft` → `test`，
+默认 `balanced`；阶段三再翻默认到 `quality`）。一个档同时决定三样东西：
+
+```
+tier = 编码策略基底（preset / lookahead / multipass / aq / tune；由编码器实例化，
+        codec 是输入不是成员）
+     × 质量锚点 / 窗口（统一基准轴上的区间；未给质量参数时注入锚点）
+     × 标定指纹（该档是否已实测标定；未标定 ⇒ 回退 balanced 表 + 告警）
+```
+
+- **四步流程**（`_resolve_quality_params` 内，覆盖全部显式质量输入
+  `--crf/--cq/--qp/--crf-ref/--cq-ref`）：① 归一到统一基准轴（libx264 CRF）→ ② `0` 哨兵
+  （原始输入 0、或归一后基准轴落点 0 ⇒ 无损档；**不参与换算、不被钳**）→ ③ **窗口钳制
+  （全档生效，含 `balanced`**；越界钳到边界并告警，固定句含钳前值 + 基准轴落点 + 钳后值 +
+  目标编码器实际下发值 + 建议档）→ ④ 落值交既有换算。`--strict-quality` 或
+  `--fallback-policy strict`（隐含 strict-quality + strict-calib）下越窗改 `exit 2`，首行同告警句。
+- **rc 基底**（**只在最终生效编码器 ∈ NVENC 时注入**，M2）：`near-lossless/archive/quality` =
+  `-rc-lookahead 250 -multipass fullres -spatial-aq 1 -temporal-aq 1`（hevc/av1 另派 `-tune uhq`）；
+  `preview/draft/test` = `-multipass disabled`（preview 另派 `-tune ll`）；**`balanced` = 全空**
+  （默认路径与 R1 前逐字相同，标定 `BASE_LOCK` 不动）。用户显式值一律优先；单源实现
+  `tier_rc_basis()`（命令构造与概览共用）。
+- **默认质量**：`DEFAULT_REF` 常量保留，取值改为**默认档锚点**——轨迹 `21 → 24`（阶段一
+  `balanced`）`→ 20`（翻档 `quality` 后）；默认逐编码器值随之变化（libx264/265 24、
+  h264/hevc_nvenc 29、av1_nvenc 36、vp9 32、svt 36、aom 33、rav1e 88）。
+- **未标定**：`CALIB_FINGERPRINT` 目前只标了 balanced ⇒ 其余七档的等质量换算回退 balanced 表
+  并告警（预期状态；标定环 CPU → T4 → L40 逐步补，harness `--preset-override` 已解锁）。
+- **有意不对称（§8）**：cpu_v2 无 `--nvenc-aq`；tier 不派生 `-tune uhq`（无 fallback ladder，
+  派生值踩雷只能硬失败）；无 `--strict-quality`/`--strict-calib`/`--fallback-policy`
+  （两道判定恒为告警）；hwaccel 的 aq 走策略层插点、sdr 走 `apply_rc_control_args`（双插点，防"漏移植"误报）。
+
+**How to apply:**
+- 动质量轴/默认值时先看**本档窗口**：显式值可能被钳；探针/门禁里用**窗内值**避免钳制噪声。
+- 直接调 `build_ffmpeg_cmd` / `build_encode_settings` 时 `tier=None` ⇒ **进程档**
+  （`get_quality_tier()`，三脚本同规则）——不要拿 None 表达"无档"，否则 rc 基底/速度轴会与
+  质量解析（按全局档）分叉成半档状态。
+- 回归：`verify/verify_quality_mapping.py` ⑬、`verify/verify_rc_lookahead.py` ⑩ E/F、
+  `verify/verify_overview_lockstep.py` ⑥、`verify/verify_cli_parsing.py` ③；
+  规格权威 `Plan/VidUtils_质量参数统一_quality-tier方案_v3_20261015.md`（§4/§8/§9）。

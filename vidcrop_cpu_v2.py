@@ -1389,7 +1389,12 @@ def _resolve_quality_params(
     if tier is None:
         tier = get_quality_tier()
     _tier_hint_mute = False
-    _prof = TIER_PROFILES.get(str(tier))
+    # 只对**有质量下发通道**的编码器启用四步（cq / crf / -qp / rav1e 的 -qp）。
+    # QSV / VideoToolbox 这类一条都不认的编码器跳过 ⇒ 保持既有「没有可用的质量
+    # 参数」告警路径（否则 --cq 会被转成 crf_ref，误报「不支持 -crf，已忽略」）。
+    _tier_landable = (encoder_supports_cq(codec) or encoder_supports_crf(codec)
+                      or encoder_supports_qp(codec) or codec == 'librav1e')
+    _prof = TIER_PROFILES.get(str(tier)) if _tier_landable else None
     if _prof is not None:
         _chan = ('crf' if user_crf is not None else
                  'cq' if user_cq is not None else
@@ -1406,8 +1411,15 @@ def _resolve_quality_params(
                         'crf-ref': crf_ref, 'cq-ref': cq_ref}[_chan]
             _raw_zero = (_raw_val == 0)
             if _chan == 'crf':
-                _r0 = to_x264_crf(codec, user_crf)
-                _ref_t = float(user_crf) if _r0 is None else float(_r0)
+                # --crf 在**支持 CRF 的编码器**上走它自己的行（libx265 50 → 47.6）；
+                # 在**不支持 CRF 的编码器**上（NVENC/VAAPI/QSV/…）它是「libx264 CRF
+                # 量纲」——与既有 crf_to_cq / rav1e 单链的口径一致，直取为基准轴值
+                # （否则会把 CQ 轴的数当 CRF 反解，hevc 的 --crf 21 会漂到 26）。
+                if encoder_supports_crf(codec):
+                    _r0 = to_x264_crf(codec, user_crf)
+                    _ref_t = float(user_crf) if _r0 is None else float(_r0)
+                else:
+                    _ref_t = float(user_crf)
                 _label = f'--crf {user_crf}'
             elif _chan == 'cq':
                 _r0 = to_x264_crf(_src, user_cq)      # M6：与 _src 降级换算同口径

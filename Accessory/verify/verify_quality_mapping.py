@@ -40,6 +40,13 @@ import vidcrop_cpu_v2 as C                                    # noqa: E402
 # 本判据的既有期望值全部按**等体积（size）**口径写成；而 convert_crf 的默认口径已改为
 # 'quality'（2026-09-30），故这里显式钉住 size，避免默认口径改动把判据染红。
 # （等质量口径的专项断言在 ⑨-eqq 组内临时切到 'quality' 再切回。）
+# R1（tier）起另有两条约定：
+#   · CLI 调用默认带 --quality-tier balanced（无窗口豁免）；**直接调
+#     _resolve_quality_params 的用例一律显式钉 tier** —— 测换算路径的既有用例
+#     要把值钉进「含该值的档」（如 qp 18 → archive），否则先被 balanced 窗口
+#     钳制成 23 再换算，测的就不是原路径了；
+#   · 钉档后期望值与 pre-R1 逐条相同（同一段换算链）；窗口/锚点/哨兵/rc 轴等
+#     新语义的专项断言在 ⑬ 组。
 H.set_quality_mode('size')
 
 WORK = temp_root() / 'verify_quality'
@@ -66,11 +73,13 @@ def q(mod, codec, **kw):
         return mod._resolve_quality_params(codec, **kw)
 
 
-def qq(mod, codec, crf=None, cq=None, src=None, cref=None, qref=None, qp=None, rc='auto'):
+def qq(mod, codec, crf=None, cq=None, src=None, cref=None, qref=None, qp=None, rc='auto',
+       tier=None):
+    """tier=None ⇒ 走模块当前档（默认 balanced）；测换算路径时显式钉含该值的档。"""
     return q(mod, codec, user_crf=crf, user_cq=cq, src_codec=src, crf_ref=cref,
-             cq_ref=qref, qp=qp, rc_mode=rc) if mod is H else \
+             cq_ref=qref, qp=qp, rc_mode=rc, tier=tier) if mod is H else \
         q(mod, codec, user_crf=crf, user_cq=cq, crf_ref=cref,
-          cq_ref=qref, qp=qp, rc_mode=rc)
+          cq_ref=qref, qp=qp, rc_mode=rc, tier=tier)
 
 
 def cmd_of(text):
@@ -112,25 +121,32 @@ def ensure_fixtures():
 
 # ═══════════════════════════════════════════════════════════════════
 print('── ① D1：--qp 落到 CPU 编码器时换算成 -crf（2026-09-28 V2：回基准轴）──')
+# R1：全部钉在 archive（窗 [13,18] 恰好含 18/13）——显式值不再被默认档 balanced 钳制。
 chk("[1] hevc_nvenc 的 qp 18 → libx265 的 crf（基准 18，经新表 0.9155x+1.6385）",
-    qq(H, 'libx265', src='hevc_nvenc', qp=18, rc='constqp'), (18, None, None))
+    qq(H, 'libx265', src='hevc_nvenc', qp=18, rc='constqp', tier='archive'), (18, None, None))
 chk("[1] h264_nvenc 的 qp 18 → libx264 的 crf（基准轴直取 18）",
-    qq(H, 'libx264', src='h264_nvenc', qp=18, rc='constqp'), (18, None, None))
+    qq(H, 'libx264', src='h264_nvenc', qp=18, rc='constqp', tier='archive'), (18, None, None))
 chk("[1] NVENC 目标仍原样透传 -qp（不降级时）",
-    qq(H, 'hevc_nvenc', src='hevc_nvenc', qp=18, rc='constqp'), (None, None, 18))
+    qq(H, 'hevc_nvenc', src='hevc_nvenc', qp=18, rc='constqp', tier='archive'), (None, None, 18))
 chk("[1] cpu_v2 侧同一条规则（无 src_codec，按 h264_nvenc 量纲）",
-    qq(C, 'libx265', qp=18, rc='constqp'), (18, None, None))
+    qq(C, 'libx265', qp=18, rc='constqp', tier='archive'), (18, None, None))
 # V1/V2 的核心：-qp（真实 QP / 基准轴）与 --cq（targetQuality / CQ 轴）**不再同量纲**，
 # 故同数字下两条路径的结果必须不同（此前本判据把两者钉成相等，是待修值）。
+# R1 附注：--cq 18 在 hevc 量纲下归一到 10.5 → 被 archive 下界钳到 13 → libx265 13；
+# 而 --qp 18 是基准轴上的 18 → 仍 18。两者不同，且顺带覆盖「非 0 归一后被窗口钳制」。
 chk("[1] --qp 18 与 --cq 18 现在走了不同的轴（不再等价）",
-    qq(H, 'libx265', src='hevc_nvenc', qp=18, rc='constqp')
-    != qq(H, 'libx265', cq=18, src='hevc_nvenc'), True)
+    qq(H, 'libx265', src='hevc_nvenc', qp=18, rc='constqp', tier='archive')
+    != qq(H, 'libx265', cq=18, src='hevc_nvenc', tier='archive'), True)
+chk("[1] --cq 18（hevc 量纲）在 archive 归一后被钳到 13 → libx265 13",
+    qq(H, 'libx265', cq=18, src='hevc_nvenc', tier='archive'), (13, None, None))
 
 # 端到端：在无 NVENC 的环境下 hevc_nvenc 会降级到 libx265 → -crf 18；
 # 在有 NVENC (L40) 的环境下直接透传 -qp 18。两者都正确。
+# R1：钉 archive，否则默认档 balanced 会把 18 钳到 23（窗口接管）。
 _rc, _out = run('vidcrop_hwaccel.py',
                 ['--input', str(SRC), '--output', str(WORK / 'o1'), '--dry-run',
                  '--codec', 'hevc_nvenc', '--rc-mode', 'constqp', '--qp', '18',
+                 '--quality-tier', 'archive',
                  '--output-width', '640', '--output-height', '360'], cpu_only=True)
 _has_nvenc = '-qp 18' in cmd_of(_out)
 _fallback = '-crf 18' in cmd_of(_out)
@@ -138,16 +154,21 @@ chk("[1] 端到端命令：hevc_nvenc + constqp + --qp 18 → -qp 18 (有 NVENC)
     _has_nvenc or _fallback, True)
 
 print('── ② D2：constqp 下 --qp / --crf-ref / --cq-ref 三选一（V1：-qp 回基准轴）──')
-chk("[2] crf-ref 21 + constqp → hevc_nvenc 的 qp 20（基准 21，经 CQ 值回算）",
-    qq(H, 'hevc_nvenc', src='hevc_nvenc', cref=21, rc='constqp'), (None, None, 20))
-chk("[2] cq-ref 23 + constqp → hevc_nvenc 的 qp 18",
-    qq(H, 'hevc_nvenc', src='hevc_nvenc', qref=23, rc='constqp'), (None, None, 18))
-chk("[2] h264_nvenc 的 crf-ref 21 + constqp → -qp 21（无 .5 舍入）",
-    qq(H, 'h264_nvenc', src='h264_nvenc', cref=21, rc='constqp'), (None, None, 21))
-chk("[2] av1_nvenc 的 crf-ref 21 + constqp → -qp 63（AV1 qindex ≈ 3×QP，L40 扩扫最佳）",
-    qq(H, 'av1_nvenc', src='av1_nvenc', cref=21, rc='constqp'), (None, None, 63))
-chk("[2] 非 constqp 时 -ref 仍走 -cq",
-    qq(H, 'hevc_nvenc', src='hevc_nvenc', cref=21), (None, 28, None))
+chk("[2] crf-ref 21 + constqp → hevc_nvenc 的 qp 20（基准 21，经 CQ 值回算；钉 quality）",
+    qq(H, 'hevc_nvenc', src='hevc_nvenc', cref=21, rc='constqp', tier='quality'),
+    (None, None, 20))
+# cq-ref 23 归一到基准 18.02 → round 18（刚好是 archive 窗的上界，钉 archive）。
+chk("[2] cq-ref 23 + constqp → hevc_nvenc 的 qp 18（钉 archive）",
+    qq(H, 'hevc_nvenc', src='hevc_nvenc', qref=23, rc='constqp', tier='archive'),
+    (None, None, 18))
+chk("[2] h264_nvenc 的 crf-ref 21 + constqp → -qp 21（无 .5 舍入；钉 quality）",
+    qq(H, 'h264_nvenc', src='h264_nvenc', cref=21, rc='constqp', tier='quality'),
+    (None, None, 21))
+chk("[2] av1_nvenc 的 crf-ref 21 + constqp → -qp 63（AV1 qindex ≈ 3×QP，L40 扩扫最佳；钉 quality）",
+    qq(H, 'av1_nvenc', src='av1_nvenc', cref=21, rc='constqp', tier='quality'),
+    (None, None, 63))
+chk("[2] 非 constqp 时 -ref 仍走 -cq（钉 quality）",
+    qq(H, 'hevc_nvenc', src='hevc_nvenc', cref=21, tier='quality'), (None, 28, None))
 for label, extra in (('constqp 无质量输入', ['--rc-mode', 'constqp']),
                      ('constqp + 字面量 --cq', ['--rc-mode', 'constqp', '--qp', '23', '--cq', '20']),
                      ('constqp + qp 与 -ref 同给', ['--rc-mode', 'constqp', '--qp', '23', '--crf-ref', '21']),
@@ -171,16 +192,18 @@ for label, extra in (('constqp + --crf-ref 21', ['--rc-mode', 'constqp', '--crf-
     chk(f"[2] {label}：现在被接受（rc=0）", (h_rc, c_rc), (0, 0))
 
 print('── ③ D4：字面量 --crf 落到只认 -cq/-qp 的编码器时换算 ──')
-chk("[3] hevc_nvenc + --crf 21 → -cq 28",
-    qq(H, 'hevc_nvenc', crf=21, src='hevc_nvenc'), (None, 28, None))
-chk("[3] h264_nvenc + --crf 21 → -cq 26",
-    qq(H, 'h264_nvenc', crf=21, src='h264_nvenc'), (None, 26, None))
-# 用 crf=18 验证"确实做了换算"：它算出的 cq 与「未给质量时的默认 CQ」（V7 后为 26）
-# 不同，故能排除"静默回落默认值"。
-chk("[3] h264_nvenc + --crf 18 → -cq 23（非默认值，证明做了换算）",
-    qq(H, 'h264_nvenc', crf=18, src='h264_nvenc'), (None, 23, None))
+# R1：--crf 在不支持 CRF 的编码器上按「libx264 CRF 量纲」直取基准轴（与 crf_to_cq
+# 及 rav1e 单链口径一致），再过档窗口。21 钉 quality、18 钉 archive。
+chk("[3] hevc_nvenc + --crf 21 → -cq 28（钉 quality）",
+    qq(H, 'hevc_nvenc', crf=21, src='hevc_nvenc', tier='quality'), (None, 28, None))
+chk("[3] h264_nvenc + --crf 21 → -cq 26（钉 quality）",
+    qq(H, 'h264_nvenc', crf=21, src='h264_nvenc', tier='quality'), (None, 26, None))
+# 用 crf=18 验证"确实做了换算"：它算出的 cq 与「未给质量时的默认 CQ」（R1 后：锚点
+# 24 → 29）不同，故能排除"静默回落默认值"。
+chk("[3] h264_nvenc + --crf 18 → -cq 23（非默认值，证明做了换算；钉 archive）",
+    qq(H, 'h264_nvenc', crf=18, src='h264_nvenc', tier='archive'), (None, 23, None))
 chk("[3] 换算值 ≠ 未给质量时的默认值",
-    qq(H, 'h264_nvenc', crf=18, src='h264_nvenc')[1]
+    qq(H, 'h264_nvenc', crf=18, src='h264_nvenc', tier='archive')[1]
     != C.default_quality_for('h264_nvenc'), True)
 
 print('── ④ D7：0 是特殊档哨兵（不参与线性换算；实测是否逐位无损见文件头注释）──')
@@ -209,6 +232,8 @@ chk("[4] 0 档 + --bitrate：不报错（rc=0）", _b6_rc, 0)
 chk_in("[4] 0 档 + --bitrate：提示'受码率约束'的语义冲突", '受码率约束', _b6_out)
 
 print('── ⑤ D7/B3：非 0 换算的结果**永不落到 0**（低端不得意外命中 0 档）──')
+# R1：默认（balanced）下小值先被窗口钳到 23 ⇒ 更不存在落到 0 的可能；本扫描保留为
+# 负向回归（任何一格出 0 都说明哨兵/钳制被绕过）。
 _z = 0
 for src in ('h264_nvenc', 'hevc_nvenc'):
     for dst in ('libx264', 'libx265', 'libvpx-vp9', 'libsvtav1', 'libaom-av1'):
@@ -219,26 +244,35 @@ for src in ('h264_nvenc', 'hevc_nvenc'):
                 _z += 1
                 fails.append(f'[5] {src} cq {v} → {dst} 落到 0（=0 档），应为 ≥1：{got}')
 chk("[5] 小值扫描里没有任何一格落到 0", _z, 0)
-chk("[5] libx264 --cq 4 → -crf 1（此前是 -crf 0 = 真无损）",
-    qq(H, 'libx264', cq=4, src='h264_nvenc'), (1, None, None))
-chk("[5] libvpx-vp9 --cq 3 → -crf 1", qq(H, 'libvpx-vp9', cq=3, src='h264_nvenc'), (1, None, None))
-chk("[5] --cq-ref 4 同样钳到 1", qq(H, 'libx264', qref=4), (1, None, None))
-chk("[5] 端到端：--codec libx264 --cq 4 → -crf 1",
+# 钉 near-lossless（窗 [1,12]）：低端钳到 1 的既有语义。
+chk("[5] libx264 --cq 4 → -crf 1（此前是 -crf 0 = 真无损；钉 near-lossless）",
+    qq(H, 'libx264', cq=4, src='h264_nvenc', tier='near-lossless'), (1, None, None))
+chk("[5] libvpx-vp9 --cq 3 → -crf 1（钉 near-lossless）",
+    qq(H, 'libvpx-vp9', cq=3, src='h264_nvenc', tier='near-lossless'), (1, None, None))
+chk("[5] --cq-ref 4 同样钳到 1（钉 near-lossless）",
+    qq(H, 'libx264', qref=4, tier='near-lossless'), (1, None, None))
+chk("[5] 端到端：--codec libx264 --cq 4 --quality-tier near-lossless → -crf 1",
     '-crf 1 ' in cmd_of(run('vidcrop_cpu_v2.py',
                             ['--input', str(SRC), '--output', str(WORK / 'o5'), '--dry-run',
                              '--codec', 'libx264', '--cq', '4',
+                             '--quality-tier', 'near-lossless',
                              '--output-width', '640', '--output-height', '360'])[1]) + ' ',
     True)
+# R1 读法 A 的正向：默认档（balanced）同样钳制 —— 低端小值全部上钳到 23。
+chk("[5] 默认档不豁免：libx264 --cq 4（balanced）→ -crf 23 + 窗口告警",
+    (qq(H, 'libx264', cq=4, src='h264_nvenc', tier='balanced'),
+     qq(H, 'libvpx-vp9', cq=3, src='h264_nvenc', tier='balanced')),
+    ((23, None, None), (31, None, None)))
 
 print('── ⑥ 边界：上限饱和 / .5 舍入锁定（防漂移）──')
-chk("[6] hevc_nvenc 的 crf 51 + constqp → -qp 44（CQ 值先被 hi=51 截，再回基准）",
-    qq(H, 'hevc_nvenc', cref=51, src='hevc_nvenc', rc='constqp'), (None, None, 44))
-chk("[6] av1_nvenc 的 crf 51 + constqp → -qp 153（CQ 值 57，基准 51 ×3）",
-    qq(H, 'av1_nvenc', cref=51, src='av1_nvenc', rc='constqp'), (None, None, 153))
-chk("[6] libx265 的 cq 18（hevc 量纲）→ 换算值（新表 0.9155x+1.6385）",
-    qq(H, 'libx265', cq=18, src='hevc_nvenc'), (11, None, None))
-chk("[6] libx265 的 cq 23（hevc 量纲）→ 换算值",
-    qq(H, 'libx265', cq=23, src='hevc_nvenc'), (16, None, None))
+chk("[6] hevc_nvenc 的 crf 51 + constqp → -qp 44（CQ 值先被 hi=51 截，再回基准；钉 test）",
+    qq(H, 'hevc_nvenc', cref=51, src='hevc_nvenc', rc='constqp', tier='test'), (None, None, 44))
+chk("[6] av1_nvenc 的 crf 51 + constqp → -qp 153（CQ 值 57，基准 51 ×3；钉 test）",
+    qq(H, 'av1_nvenc', cref=51, src='av1_nvenc', rc='constqp', tier='test'), (None, None, 153))
+chk("[6] libx265 的 cq 18（hevc 量纲）→ 13（钉 archive：round(10.5)=10 → 钳到 13）",
+    qq(H, 'libx265', cq=18, src='hevc_nvenc', tier='archive'), (13, None, None))
+chk("[6] libx265 的 cq 23（hevc 量纲）→ 16（钉 archive：15.5→16 在窗内）",
+    qq(H, 'libx265', cq=23, src='hevc_nvenc', tier='archive'), (16, None, None))
 
 print('── ⑦ D5 / 孪生一致性：-threads 只软编 + 两张表相等 ──')
 chk("[7] _HW_ENCODERS 两脚本集合相等", H._HW_ENCODERS, C._HW_ENCODERS)
@@ -479,32 +513,35 @@ if VE_QM is not None:
 # [V1 已修复] -qp 回基准轴（不再拿 CQ 轴值直发）；AV1 另加 ×4 的 QP 尺度层。
 # 判据与 VE 的 to_constqp_qp() 对齐：把 CQ 轴值回算到基准轴即为该编码器的 -qp。
 for _c in ('h264_nvenc', 'hevc_nvenc'):
-    _cq_v = qq(H, _c, src=_c, cref=21)[1]                 # 非 constqp：-cq 值
-    _qp_v = qq(H, _c, src=_c, cref=21, rc='constqp')[2]   # constqp：-qp 值
+    _cq_v = qq(H, _c, src=_c, cref=21, tier='quality')[1]            # 非 constqp：-cq 值
+    _qp_v = qq(H, _c, src=_c, cref=21, rc='constqp', tier='quality')[2]  # constqp：-qp 值
     _exp = (VE_QM.to_constqp_qp(_c, _cq_v) if VE_QM is not None
             else int(round(H.to_x264_crf(_c, _cq_v))))    # 无 VE 时按基准轴手算
     note(f'[9-QP:{_c}]', f'constqp 下 --crf-ref 21 的 -qp（CQ 轴值 {_cq_v}）',
          _qp_v == _exp, f'-qp {_qp_v}', f'-qp {_exp}',
          f'V1：CQ 轴值 {_cq_v} 先 --to_x264_crf--> 基准轴，再取为该编码器的 -qp '
-         f'（= VE 的 to_constqp_qp）')
+         f'（= VE 的 to_constqp_qp；钉 quality 档）')
 # --qp 落到软编：QP 已在基准轴 ⇒ 直接经等效表换算到软编的 CRF。
-_qp_soft = qq(H, 'libx265', src='hevc_nvenc', qp=18, rc='constqp')[0]
+# R1：钉 archive（18 在该档窗内；默认档会把 18 钳到 23）。
+_qp_soft = qq(H, 'libx265', src='hevc_nvenc', qp=18, rc='constqp', tier='archive')[0]
 _soft_exp = int(round(H.from_x264_crf('libx265', 18)))
 note('[9-QP:soft]', '--qp 18 落到 libx265 的 -crf',
      _qp_soft == _soft_exp, f'-crf {_qp_soft}', f'-crf {_soft_exp}',
-     'V2：--qp 是基准轴上的真实 QP ⇒ 18 经 libx265 的新等效表（0.9155x+1.6385）→ '
-     f'{_soft_exp}（此前按 CQ 轴回算得 14）')
+     'V2：--qp 是基准轴上的真实 QP ⇒ 18 直接经 libx265 的等效表（size 0.9272x+1.336）→ '
+     f'{_soft_exp}（此前按 CQ 轴回算得 14；钉 archive）')
 
 # ── ⑨-4 librav1e：字面量与基准轴走了两条换算链 ──────────────────────────
 _lit = opt_of(run('vidcrop_cpu_v2.py',
                   ['--input', str(SRC), '--output', str(WORK / 'o9'), '--dry-run',
                    '--codec', 'librav1e', '--crf', '21',
+                   '--quality-tier', 'quality',
                    '--output-width', '640', '--output-height', '360'])[1], '-qp')
 _ref = opt_of(run('vidcrop_cpu_v2.py',
                   ['--input', str(SRC), '--output', str(WORK / 'o9'), '--dry-run',
                    '--codec', 'librav1e', '--crf-ref', '21',
+                   '--quality-tier', 'quality',
                    '--output-width', '640', '--output-height', '360'])[1], '-qp')
-note('[9-rav1e]', '--crf 21 与 --crf-ref 21 在 librav1e 上同源',
+note('[9-rav1e]', '--crf 21 与 --crf-ref 21 在 librav1e 上同源（钉 quality）',
      _lit == _ref, f'--crf→-qp {_lit} / --crf-ref→-qp {_ref}', '两者相同（均为 66）',
      '[V8 已修复] librav1e 移出 CRF_SUPPORTED_CODECS，字面量与 -ref 都先归一到基准轴，'
      "再由 crf_to_rav1e_qp 查 SIZE_MAP['librav1e'] 的**等体积（native 档）**标定值得 66。"
@@ -525,8 +562,8 @@ note('[9-default]', '未给质量参数时软编/硬编的默认质量等效',
      bool(_q_def and _c_def and int(_q_back) == int(_c_def)),
      f'libx264 -crf {_c_def} / h264_nvenc -cq {_q_def}（回基准 {_q_back}）',
      f'回基准 {_c_def}',
-     '[V7 已修复] 统一用 DEFAULT_REF=21：未给质量时按基准换算到目标编码器'
-     '（libx264 21 / libx265 21 / h264_nvenc 26 / hevc_nvenc 28）。'
+     'R1：DEFAULT_REF 语义迁移为「默认档 balanced 锚点」= 24（size 口径：libx264 24 / '
+     'libx265 24 / h264_nvenc 29 / hevc_nvenc 32）——回基准与锚点相等仍成立。'
      '此前 DEFAULT_CRF=21 与 DEFAULT_CQ=23（≡ crf 18）不等效')
 
 # ── ⑨-6 preset 档位：两项目 x264→NVENC 映射错位 + svtav1 表内不自洽 ──────
@@ -643,10 +680,10 @@ chk("[10] SIZE_MAP['av1_nvenc'] hi == 63（NVIDIA 规格 0~63）", _av1_hi, 63)
 # 运行时校验：literal_range 返回 ffmpeg 实际量程（本机 ffmpeg 报 0~63，符合 V3 修正）
 _rt_cq = H.literal_range('av1_nvenc', 'cq')
 chk("[10] literal_range('av1_nvenc','cq') 返回 ffmpeg 实际量程", _rt_cq, (0, 63))
-chk("[10] crf_ref 51 → av1_nvenc -cq 57（此前被 hi=51 截到 51）",
-    qq(H, 'av1_nvenc', cref=51), (None, 57, None))
-chk("[10] crf_ref 40 → av1_nvenc -cq 46（常用区不受影响）",
-    qq(H, 'av1_nvenc', cref=40), (None, 46, None))
+chk("[10] crf_ref 51 → av1_nvenc -cq 57（此前被 hi=51 截到 51；钉 test）",
+    qq(H, 'av1_nvenc', cref=51, tier='test'), (None, 57, None))
+chk("[10] crf_ref 40 → av1_nvenc -cq 46（常用区不受影响；钉 draft）",
+    qq(H, 'av1_nvenc', cref=40, tier='draft'), (None, 46, None))
 
 print('  [V4] literal_range：字面量按生效编码器量程（运行时查询 ffmpeg 实际范围）')
 # 期望值基于本机 ffmpeg 的实际报告值
@@ -695,19 +732,20 @@ print('  [V6] VAAPI 族：-cq/-crf 归一到基准轴后走 -qp')
 chk("[10] 两脚本 _QP_ONLY_CODECS 相等且非空",
     (C._QP_ONLY_CODECS, C._QP_ONLY_CODECS == H._QP_ONLY_CODECS),
     (H._QP_ONLY_CODECS, True))
-for _c, _kw, _want in (('h264_vaapi', {'cq': 26}, 21),      # 26 - 5 = 21
-                       ('h264_vaapi', {'crf': 21}, 21),
-                       ('hevc_vaapi', {'cq': 26}, 21),
-                       ('hevc_vaapi', {'qref': 26}, 21),    # 经 h264_nvenc 归一
-                       ('h264_vaapi', {'cref': 30}, 30),
-                       ('h264_vaapi', {'qp': 23, 'rc': 'constqp'}, 23),
-                       ('h264_vaapi', {'cq': 0}, 0)):       # 0 档保持 0
+for _c, _kw, _want in (('h264_vaapi', {'cq': 26, 'tier': 'quality'}, 21),   # 26-5=21，钉 quality
+                       ('h264_vaapi', {'crf': 21, 'tier': 'quality'}, 21),
+                       ('hevc_vaapi', {'cq': 26, 'tier': 'quality'}, 21),
+                       ('hevc_vaapi', {'qref': 26, 'tier': 'quality'}, 21),  # 经 h264_nvenc 归一
+                       ('h264_vaapi', {'cref': 30, 'tier': 'preview'}, 30),
+                       ('h264_vaapi', {'qp': 23, 'rc': 'constqp', 'tier': 'balanced'}, 23),
+                       ('h264_vaapi', {'cq': 0, 'tier': 'balanced'}, 0)):    # 0 档保持 0
     chk(f"[10] {_c} {_kw} → -qp {_want}", qq(H, _c, **_kw), (None, None, _want))
 _va = cmd_of(run('vidcrop_cpu_v2.py',
                  ['--input', str(SRC), '--output', str(WORK / 'o10'), '--dry-run',
                   '--codec', 'h264_vaapi', '--cq', '26',
                   '--output-width', '640', '--output-height', '360'])[1])
-chk_in("[10] VAAPI 命令含 -qp 21（此前静默无任何质量参数）", '-qp 21', _va)
+# R1 读法 A：默认档 balanced 下 --cq 26 归一到 21 → 被窗口上钳到 23 ⇒ -qp 23 + 告警。
+chk_in("[10] VAAPI 命令含 -qp 23（默认档钳制后的落值；此前静默无任何质量参数）", '-qp 23', _va)
 chk("[10] VAAPI 命令不再出现无效的 -cq / -crf",
     ('-cq ' in _va or '-crf ' in _va), False)
 # --rc-mode 落到 VAAPI：模式名要告警，但 --qp 不该被误报为"已忽略"
@@ -790,12 +828,13 @@ chk("[11] qp_range 按编码器取",
     ((0, 255), (0, 52), (0, 51)))
 
 print('  [V2] --qp 落到软编按基准轴回算（不再走 CQ 轴）')
-chk("[11] libx265：--qp 18 → -crf 18（新表），不是 CQ 轴的 14",
-    qq(H, 'libx265', src='hevc_nvenc', qp=18, rc='constqp'), (18, None, None))
-chk("[11] 端到端 cpu_v2：libx265 + constqp --qp 18 → -crf 18",
+chk("[11] libx265：--qp 18 → -crf 18（新表），不是 CQ 轴的 14（钉 archive）",
+    qq(H, 'libx265', src='hevc_nvenc', qp=18, rc='constqp', tier='archive'), (18, None, None))
+chk("[11] 端到端 cpu_v2：libx265 + constqp --qp 18 --quality-tier archive → -crf 18",
     '-crf 18' in cmd_of(run('vidcrop_cpu_v2.py',
                             ['--input', str(SRC), '--output', str(WORK / 'o11'), '--dry-run',
                              '--codec', 'libx265', '--rc-mode', 'constqp', '--qp', '18',
+                             '--quality-tier', 'archive',
                              '--output-width', '640', '--output-height', '360'])[1]),
     True)
 
@@ -821,13 +860,15 @@ _qsq2_rc, _qsq2 = run('vidcrop_cpu_v2.py',
 chk("[11] QSV 收到 --cq 仍能出命令（rc=0）", _qsq2_rc, 0)
 chk_in("[11] QSV --cq 有告警（不静默丢值）", '没有可用的质量参数', _qsq2)
 
-print('  [V7] 默认质量统一到基准 DEFAULT_REF=21')
-chk("[11] DEFAULT_REF=21（两脚本）", (H.DEFAULT_REF, C.DEFAULT_REF), (21, 21))
-chk("[11] default_quality_for：libx264/21、libx265/21、h264_nvenc/26、hevc_nvenc/28",
+print('  [V7] 默认质量统一到 B1 基准（R1：DEFAULT_REF = 默认档 balanced 锚点 24）')
+chk("[11] DEFAULT_REF=24（两脚本）且 = tier_anchor(默认档)",
+    (H.DEFAULT_REF, C.DEFAULT_REF,
+     H.DEFAULT_REF == H.tier_anchor(H.DEFAULT_QUALITY_TIER)), (24, 24, True))
+chk("[11] default_quality_for（size 口径）：libx264/24、libx265/24、h264_nvenc/29、hevc_nvenc/32",
     [C.default_quality_for(c) for c in ('libx264', 'libx265', 'h264_nvenc', 'hevc_nvenc')],
-    [21, 21, 26, 28])
-for _codec, _opt, _val in (('libx264', '-crf', '21'), ('libx265', '-crf', '21'),
-                           ('h264_nvenc', '-cq', '26'), ('hevc_nvenc', '-cq', '28')):
+    [24, 24, 29, 32])
+for _codec, _opt, _val in (('libx264', '-crf', '24'), ('libx265', '-crf', '24'),
+                           ('h264_nvenc', '-cq', '29'), ('hevc_nvenc', '-cq', '32')):
     _cmd = cmd_of(run('vidcrop_cpu_v2.py',
                       ['--input', str(SRC), '--output', str(WORK / 'o11'), '--dry-run',
                        '--codec', _codec,
@@ -838,22 +879,31 @@ print('  [V8] librav1e 单链')
 chk("[11] librav1e 不在 CRF_SUPPORTED_CODECS（两脚本）",
     ('librav1e' in H.CRF_SUPPORTED_CODECS, 'librav1e' in C.CRF_SUPPORTED_CODECS),
     (False, False))
-chk("[11] librav1e 字面量 --crf 21 → -qp 66（查表口径，native 档）",
+chk("[11] librav1e 字面量 --crf 21 → -qp 66（查表口径，native 档；钉 quality）",
     '-qp 66' in cmd_of(run('vidcrop_cpu_v2.py',
                            ['--input', str(SRC), '--output', str(WORK / 'o11'), '--dry-run',
                             '--codec', 'librav1e', '--crf', '21',
+                            '--quality-tier', 'quality',
                             '--output-width', '640', '--output-height', '360'])[1]), True)
-chk("[11] librav1e --crf-ref 21 → -qp 66（与字面量同源）",
+chk("[11] librav1e --crf-ref 21 → -qp 66（与字面量同源；钉 quality）",
     '-qp 66' in cmd_of(run('vidcrop_cpu_v2.py',
                            ['--input', str(SRC), '--output', str(WORK / 'o11'), '--dry-run',
                             '--codec', 'librav1e', '--crf-ref', '21',
+                            '--quality-tier', 'quality',
                             '--output-width', '640', '--output-height', '360'])[1]), True)
 _r1e_cmd = cmd_of(run('vidcrop_cpu_v2.py',
                      ['--input', str(SRC), '--output', str(WORK / 'o11'), '--dry-run',
                       '--codec', 'librav1e', '--crf', '21',
                       '--output-width', '640', '--output-height', '360'])[1])
-chk("[11] librav1e 默认不下发 -speed（native 档，与共享表标定档一致）",
-    '-speed' not in _r1e_cmd, True)
+# R1（§13.10R）：显式档值 6 与 rav1e native 默认同值（逐字节等价），写成显式只为
+# 可复现/消歧；tier=None 的直连调用保持旧行为（不下发）。
+chk("[11] librav1e 默认档（balanced）显式下发 -speed（档值 6 = native）",
+    '-speed 6' in _r1e_cmd, True)
+_b_none = ' '.join(C.build_encoder_options_v2('librav1e', 21, None, lambda _m: None))
+_b_bal = ' '.join(C.build_encoder_options_v2('librav1e', 21, None, lambda _m: None,
+                                             tier='balanced'))
+chk("[11] librav1e：tier=None 不下发 -speed / tier=balanced 下发 6",
+    ('-speed' in _b_none, '-speed 6' in _b_bal), (False, True))
 
 print('  [V10] preset 表')
 chk("[11] 两脚本 X264_TO_NVENC_PRESET 相等", H.X264_TO_NVENC_PRESET, C.X264_TO_NVENC_PRESET)
@@ -966,6 +1016,203 @@ except ValueError:
     pass
 VU_CRF.set_quality_domain('sdr')
 VU_CRF.set_quality_mode(_12_mode)
+
+# ═══════════════════════════════════════════════════════════════════
+# ⑬ R1 quality-tier（阶段一 DoD）：档表 / 锚点 / 窗口 / 哨兵 / 标定告警 / 速度·rc 轴
+# ═══════════════════════════════════════════════════════════════════
+print('── ⑬ R1 quality-tier 核心语义（阶段一 DoD）──')
+
+# ── ⑬-1 档表结构自检（§6.2-420：八档覆盖 [0,51] + 互斥 + preset 合法）────────
+_tiers = list(VU_CRF.QUALITY_TIERS)
+chk('[13] 八档齐全（松→紧）', _tiers,
+    ['lossless', 'near-lossless', 'archive', 'quality', 'balanced', 'preview', 'draft', 'test'])
+_wins = sorted((VU_CRF.tier_window(t)[0], VU_CRF.tier_window(t)[1], t) for t in _tiers)
+chk('[13] 窗口从 0 起、到 51 止、相邻无缝隙（⇒ 天然互斥）',
+    (_wins[0][0], _wins[-1][1],
+     all(_wins[i][1] + 1 == _wins[i + 1][0] for i in range(len(_wins) - 1))),
+    (0, 51, True))
+chk('[13] 各档锚点落在本档窗内',
+    [VU_CRF.tier_window(t)[0] <= VU_CRF.tier_anchor(t) <= VU_CRF.tier_window(t)[1]
+     for t in _tiers], [True] * 8)
+_t9 = ('libx264', 'libx265', 'libvpx-vp9', 'libsvtav1', 'libaom-av1', 'librav1e',
+       'h264_nvenc', 'hevc_nvenc', 'av1_nvenc')
+chk('[13] 每档九个编码器键齐全（无多余键）',
+    [sorted((VU_CRF.TIER_PROFILES[t].get('preset') or {})) == sorted(_t9) for t in _tiers],
+    [True] * 8)
+_bad_p = [(t, c, (VU_CRF.TIER_PROFILES[t].get('preset') or {}).get(c))
+          for t in _tiers for c in _t9
+          if not isinstance((VU_CRF.TIER_PROFILES[t].get('preset') or {}).get(c), str)]
+chk('[13] 每档 preset 值全为非空字符串', _bad_p, [])
+_bad_ax = [(t, k, VU_CRF.TIER_PROFILES[t].get(k)) for t in _tiers
+           for k, ok in (('tune', lambda v: v in (None, 'll', 'uhq')),
+                         ('lookahead', lambda v: v is None or (isinstance(v, int) and v > 0)),
+                         ('multipass', lambda v: v in (None, 'qres', 'fullres', 'disabled')),
+                         ('aq', lambda v: isinstance(v, bool)))
+           if not ok(VU_CRF.TIER_PROFILES[t].get(k))]
+chk('[13] tune/lookahead/multipass/aq 取值域合法', _bad_ax, [])
+
+# ── ⑬-2 clamp / suggest 助手 ────────────────────────────────────────────────
+_bad_c = []
+for t in _tiers:
+    lo, hi = VU_CRF.tier_window(t)
+    if VU_CRF.clamp_ref_to_tier(t, lo) != (lo, False):
+        _bad_c.append((t, 'lo', VU_CRF.clamp_ref_to_tier(t, lo)))
+    if VU_CRF.clamp_ref_to_tier(t, hi) != (hi, False):
+        _bad_c.append((t, 'hi', VU_CRF.clamp_ref_to_tier(t, hi)))
+    if lo > 0 and VU_CRF.clamp_ref_to_tier(t, lo - 1) != (lo, True):
+        _bad_c.append((t, 'below', VU_CRF.clamp_ref_to_tier(t, lo - 1)))
+    if hi < 51 and VU_CRF.clamp_ref_to_tier(t, hi + 1) != (hi, True):
+        _bad_c.append((t, 'above', VU_CRF.clamp_ref_to_tier(t, hi + 1)))
+chk('[13] clamp：窗内原样不改位、窗外钳到边界并置位', _bad_c, [])
+_own = {}
+for t in _tiers:
+    _lo, _hi = VU_CRF.tier_window(t)
+    for _v in range(_lo, _hi + 1):
+        _own[_v] = t
+chk('[13] tier_suggest_for(0..51) 恰好归属唯一档',
+    [VU_CRF.tier_suggest_for(v) for v in range(52)], [_own[v] for v in range(52)])
+
+# ── ⑬-3 标定指纹与告警（H4：只由 CALIB_FINGERPRINT 判定）────────────────────
+chk('[13] CALIB_FINGERPRINT 键 = 八档', sorted(VU_CRF.CALIB_FINGERPRINT), sorted(_tiers))
+chk('[13] 阶段一仅 balanced 标定（其余档待标定产）',
+    [t for t in _tiers if VU_CRF.tier_is_calibrated(t)], ['balanced'])
+chk('[13] balanced + 无偏离 ⇒ 无告警（组合未偏离）',
+    VU_CRF.tier_calib_notice('balanced', 'libx264'), None)
+chk_in('[13] balanced + 组合偏离 ⇒ 逐字告警且含偏离项',
+       '⚠ 当前组合偏离 --quality-tier balanced 的标定点（--preset slow ≠ 档值 p4）',
+       VU_CRF.tier_calib_notice('balanced', 'hevc_nvenc', diff='--preset slow ≠ 档值 p4') or '')
+chk_in('[13] 未标定档 ⇒ 固定未标定句（不看表键存在性）',
+       VU_CRF.CALIB_UNCALIB_DIFF, VU_CRF.tier_calib_notice('archive', 'libx265') or '')
+
+# ── ⑬-4 锚点注入（无质量输入 ⇒ 本档锚点；换算提示静音）────────────────────
+chk('[13] 八档锚点注入（libx264 = 锚点原文）',
+    [(t, qq(H, 'libx264', tier=t)[0]) for t in _tiers],
+    [('lossless', 0), ('near-lossless', 6), ('archive', 16), ('quality', 20),
+     ('balanced', 24), ('preview', 28), ('draft', 36), ('test', 45)])
+chk('[13] 锚点注入落目标编码器（libx265，size 口径换算）',
+    [(t, qq(H, 'libx265', tier=t)[0])
+     for t in ('near-lossless', 'archive', 'quality', 'preview', 'draft', 'test')],
+    [('near-lossless', 7), ('archive', 16), ('quality', 20),
+     ('preview', 27), ('draft', 35), ('test', 43)])
+_buf13 = io.StringIO()
+with contextlib.redirect_stdout(_buf13):
+    H._resolve_quality_params('libx265', None, None, src_codec=None, crf_ref=None,
+                              cq_ref=None, qp=None, rc_mode='auto', tier='quality')
+chk('[13] 锚点注入静音三处换算提示（libx265 不刷屏）', _buf13.getvalue().strip(), '')
+
+# ── ⑬-5 0 哨兵（M1）────────────────────────────────────────────────────────
+chk('[13] 原始输入 0（--crf 0 + lossless）⇒ 0 哨兵、保留原文通道',
+    qq(H, 'libx264', crf=0, tier='lossless'), (0, None, None))
+chk('[13] 非 0 归一后被窗口钳到 0（--crf 5 + lossless）⇒ 0 哨兵',
+    qq(H, 'libx264', crf=5, tier='lossless'), (0, None, None))
+chk('[13] 钳到 0 时按目标能力走通道（hevc_nvenc --cq 5 + lossless ⇒ -cq 0）',
+    qq(H, 'hevc_nvenc', cq=5, tier='lossless'), (None, 0, None))
+chk('[13] 表内钳制反解到 0.0 不算无损（hevc --cq 5 + near-lossless ⇒ 落 1 → -cq 8）',
+    qq(H, 'hevc_nvenc', cq=5, tier='near-lossless'), (None, 8, None))
+
+# ── ⑬-6 §4.4 五样例（**生产默认 quality 口径**，逐字告警）───────────────────
+def run_q(script, args, cpu_only=False):
+    """默认口径（quality）跑一遍：五样例的期望值按生产默认口径写。"""
+    base = [sys.executable, str(ROOT / script)]
+    if cpu_only:
+        base += ['--decode', 'cpu', '--scale-algo', 'libswscale-lanczos']
+    p = subprocess.run(base + args, capture_output=True, text=True,
+                       encoding='utf-8', errors='replace')
+    return p.returncode, (p.stdout or '') + (p.stderr or '')
+
+
+def _t5(tier, qarg, qv):
+    return ['--input', str(SRC), '--output', str(WORK / 'o13'), '--dry-run',
+            '--codec', 'libx265', '--quality-tier', tier, qarg, qv,
+            '--output-width', '640', '--output-height', '360']
+
+
+_w13 = ('⚠ --quality-tier archive 的质量窗口为 CRF 13~18；--crf 50（基准轴 ≈47.6）'
+        '已钳到 18（libx265 -crf 17）。CRF 48 落在 test 档（41~51），'
+        '请改用 --quality-tier test')
+_r13, _o13 = run_q('vidcrop_cpu_v2.py', _t5('archive', '--crf', '50'))
+chk('[13] 五样例 1：rc=0 且落 -crf 17', (_r13, '-crf 17' in cmd_of(_o13)), (0, True))
+chk_in('[13] 五样例 1：窗口告警逐字（含建议 test）', _w13, _o13)
+_r13b, _o13b = run_q('vidcrop_hwaccel.py', _t5('archive', '--crf', '50'), cpu_only=True)
+chk_in('[13] 五样例 1：告警两脚本逐字一致（hwaccel）', _w13, _o13b)
+_r13, _o13 = run_q('vidcrop_cpu_v2.py', _t5('quality', '--crf-ref', '26'))
+chk_in('[13] 五样例 2：--crf-ref 26 + quality ⇒ -crf 22 + 建议 balanced',
+       '⚠ --quality-tier quality 的质量窗口为 CRF 19~22；--crf-ref 26（基准轴 ≈26.0）'
+       '已钳到 22（libx265 -crf 22）。CRF 26 落在 balanced 档（23~26），'
+       '请改用 --quality-tier balanced', _o13)
+_r13, _o13 = run_q('vidcrop_cpu_v2.py', _t5('preview', '--crf-ref', '30'))
+chk('[13] 五样例 3：--crf-ref 30 + preview ⇒ -crf 31、无窗口告警',
+    ('-crf 31' in cmd_of(_o13), '⚠ --quality-tier' in _o13), (True, False))
+_r13, _o13 = run_q('vidcrop_cpu_v2.py', _t5('archive', '--crf-ref', '16'))
+chk('[13] 五样例 4：--crf-ref 16 + archive ⇒ -crf 15、无窗口告警',
+    ('-crf 15' in cmd_of(_o13), '⚠ --quality-tier' in _o13), (True, False))
+_r13, _o13 = run_q('vidcrop_cpu_v2.py', _t5('balanced', '--crf', '50'))
+chk('[13] 五样例 5：--crf 50 + balanced ⇒ 钳到 26（不豁免默认档）',
+    ('-crf 26' in cmd_of(_o13), 'CRF 48 落在 test 档（41~51）' in _o13), (True, True))
+
+# ── ⑬-7 rc 轴注入（直调 build；无 GPU 也能验证注入逻辑）────────────────────
+def _cv13(codec, **kw):
+    warns13 = []
+    _cmd = C.build_ffmpeg_cmd(SRC, WORK / 'o13.mp4', 640, 360, 1920, 1080, 'crop', codec,
+                              kw.pop('crf', None), kw.pop('cq', None), 'medium',
+                              kw.pop('pix_fmt', None), 0, True, 'copy', '128k',
+                              kw.pop('extra_args', []), warns13.append, **kw)
+    return ' '.join(_cmd)
+
+
+def _hw13(codec, **kw):
+    with contextlib.redirect_stderr(io.StringIO()):
+        _cmd = H.build_ffmpeg_cmd(SRC, WORK / 'o13.mp4', 'crop=640:360:640:360', codec,
+                                  kw.pop('crf', None), kw.pop('cq', None), 'medium', True, **kw)
+    return ' '.join(_cmd)
+
+
+_a16 = _cv13('hevc_nvenc', cq=16, tier='archive')
+chk('[13] cpu_v2 rc 轴：archive 注入 lookahead+multipass；不注入 tune/aq（§8-2 不对称）',
+    ('-rc-lookahead 250' in _a16, '-multipass fullres' in _a16,
+     '-tune' in _a16, '-spatial-aq' in _a16), (True, True, False, False))
+_b24 = _cv13('hevc_nvenc', cq=24, tier='balanced')
+chk('[13] cpu_v2 rc 轴：balanced 一条不注入',
+    ('-rc-lookahead' in _b24, '-multipass' in _b24), (False, False))
+_z16 = _cv13('hevc_nvenc', cq=0, tier='archive')
+chk('[13] cpu_v2 rc 轴：质量归零（cq 0 哨兵）时不注入',
+    ('-rc-lookahead' in _z16, '-multipass' in _z16), (False, False))
+_h16 = _hw13('hevc_nvenc', cq=16, tier='archive')
+chk('[13] hwaccel rc 轴：archive 注入 lookahead+multipass+aq；tune 由调用方派生（此处不出现）',
+    ('-rc-lookahead 250' in _h16, '-multipass fullres' in _h16,
+     '-spatial-aq 1' in _h16, '-temporal-aq 1' in _h16, '-tune' in _h16),
+    (True, True, True, True, False))
+_h16t = _hw13('hevc_nvenc', cq=16, tier='archive', nvenc_tune='uhq')
+chk('[13] hwaccel：tune 派生值经参数传入后原样下发（-tune uhq）',
+    '-tune uhq' in _h16t, True)
+_hpv = _hw13('hevc_nvenc', cq=28, tier='preview')
+chk('[13] hwaccel rc 轴：preview 注入 multipass disabled（无 lookahead）',
+    ('-multipass disabled' in _hpv, '-rc-lookahead' in _hpv), (True, False))
+chk('[13] hwaccel：tune 派生（archive→uhq / balanced→None）；cpu_v2 不派生（§8-2）',
+    (H._strategy_tune_for('hevc_nvenc', 'archive', None, False),
+     H._strategy_tune_for('hevc_nvenc', 'balanced', None, False),
+     hasattr(C, '_strategy_tune_for')), ('uhq', None, False))
+
+# ── ⑬-8 速度轴（§13.10R）：aom/vp9 按档钉值、--extra-args 优先 ─────────────
+_aom_b = _cv13('libaom-av1', crf=24, tier='balanced')
+_aom_n = _cv13('libaom-av1', crf=24)
+chk('[13] aom 速度轴：balanced 钉 -cpu-used 6；tier=None 落旧自动值（本机核数）',
+    ('-cpu-used 6' in _aom_b, f'-cpu-used {C.auto_effort()[0]}' in _aom_n), (True, True))
+_vp9_b = _cv13('libvpx-vp9', crf=24, tier='balanced')
+_vp9_n = _cv13('libvpx-vp9', crf=24)
+chk('[13] vp9 速度轴：balanced 新显式下发 2；tier=None 保持不主动下发',
+    ('-cpu-used 2' in _vp9_b, '-cpu-used' in _vp9_n), (True, False))
+_vp9_x = _cv13('libvpx-vp9', crf=24, tier='balanced', extra_args=['-cpu-used', '4'])
+chk('[13] aom/vp9 速度轴尊重 --extra-args 显式值（原样保留、不叠加档值）',
+    ('-cpu-used 4' in _vp9_x, '-cpu-used 2' in _vp9_x), (True, False))
+
+# ── ⑬-9 档值 preset / tune（§4.1 = §13.10R）────────────────────────────────
+chk('[13] 档值 preset 周换：libx265 archive/quality/balanced = slower/slow/medium',
+    [H.default_preset_for('libx265', t) for t in ('archive', 'quality', 'balanced')],
+    ['slower', 'slow', 'medium'])
+chk('[13] 档值 preset：h264_nvenc archive/balanced = p6/p4',
+    [H.default_preset_for('h264_nvenc', t) for t in ('archive', 'balanced')],
+    ['p6', 'p4'])
 
 if knowns:
     _bad = [cid for cid, ok in knowns if not ok]

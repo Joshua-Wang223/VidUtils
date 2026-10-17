@@ -10,6 +10,9 @@
   * 支持 **NVENC 硬编**（`h264_nvenc` / `hevc_nvenc` / `av1_nvenc`）：走 `-cq` 轴 + `-b:v 0`，
     锁定 **`-preset p4`**（CR-1）与**显式默认 rc**（CR-2：h264/hevc/av1=`vbr`）——
     均与 VE 口径一致，见 `Video_Enhancement/memory/equal-quality-gpu-cross-repo-contract.md`。
+  * **`--preset-override <值>`**（R1，2026-10-17）：把 `BASE_LOCK` 里的速度轴整体替换为给定值
+    （libx264/x265/svtav1/NVENC 的 `-preset`、vp9/aom 的 `-cpu-used`）⇒ 用于按 `--quality-tier`
+    各档档值重标（Plan v3 §13.10R）；librav1e 请走 `--rav1e-speed` / 档位键 `librav1e@<speed>`。
     ⚠ 硬件编码器**「列表里有」≠「本机可编」**（T4 的 av1_nvenc 即此）：开跑前用真实短编码**探测**，
     不可用即跳过该档；`--require-codecs` / `--expect-av1` 可把「静默跳过」升级为 **fail-fast（exit 2）**。
 
@@ -90,6 +93,7 @@ SWEEP = {
 HW_CODECS = {'h264_nvenc', 'hevc_nvenc', 'av1_nvenc'}
 
 # 各编码器**必须锁定**的配套参数（标定与下发必须一致，否则等效点漂移）。
+# ⚠ 速度轴可被 `--preset-override` 整体替换（见下方 `PRESET_AXIS` / `_lock_for`，R1）。
 # ⚠ librav1e 的 `-speed` 不在此处 —— 它按「档」在运行时追加（见 _lock_for）。
 BASE_LOCK = {
     'libx264':    ['-preset', 'medium'],
@@ -105,6 +109,16 @@ BASE_LOCK = {
     'hevc_nvenc': ['-b:v', '0', '-preset', 'p4', '-rc', 'vbr'],
     'av1_nvenc':  ['-b:v', '0', '-preset', 'p4', '-rc', 'vbr'],
 }
+
+# 速度轴（可被 `--preset-override` 整体替换）：codec -> 锁列表里的轴 flag。
+# 不在表里的编码器（librav1e）走 `--rav1e-speed` / 档位键 `librav1e@<speed>`。
+PRESET_AXIS = {
+    'libx264': '-preset', 'libx265': '-preset', 'libsvtav1': '-preset',
+    'h264_nvenc': '-preset', 'hevc_nvenc': '-preset', 'av1_nvenc': '-preset',
+    'libvpx-vp9': '-cpu-used', 'libaom-av1': '-cpu-used',
+}
+# main() 按 `--preset-override` 设置；None = 沿用 BASE_LOCK。
+_PRESET_OVERRIDE = None
 QUALITY_FLAG = {
     'libx264': '-crf', 'libx265': '-crf', 'libvpx-vp9': '-crf',
     'libaom-av1': '-crf', 'libsvtav1': '-crf', 'librav1e': '-qp',
@@ -126,12 +140,22 @@ def _ffcodec(key):
     return key.split('@')[0]
 
 
-def _lock_for(key):
-    """档位键 → 该次编码必须附带的配套参数。"""
+def _lock_for(key, preset_override=None):
+    """档位键 → 该次编码必须附带的配套参数。
+
+    ``preset_override``（或 main() 设置的模块级 ``_PRESET_OVERRIDE``，R1）会把该
+    编码器锁列表里的速度轴（见 ``PRESET_AXIS``）替换为给定值 —— 按 `--quality-tier`
+    档值重标用；librav1e 不在表里（走 `--rav1e-speed` / 档位键）。
+    """
+    if preset_override is None:
+        preset_override = _PRESET_OVERRIDE
     c = _ffcodec(key)
     lock = list(BASE_LOCK[c])
     if c == 'librav1e' and '@' in key:
         lock += ['-speed', key.split('@', 1)[1]]
+    flag = PRESET_AXIS.get(c)
+    if preset_override is not None and flag is not None and flag in lock:
+        lock[lock.index(flag) + 1] = str(preset_override)
     return lock
 
 
@@ -661,6 +685,12 @@ def selftest():
     chk('_lock_for rav1e native', _lock_for('librav1e'), [])
     chk('_lock_for rav1e@10', _lock_for('librav1e@10'), ['-speed', '10'])
     chk('_lock_for x265', _lock_for('libx265'), ['-preset', 'medium'])
+    chk('_lock_for x265 + preset_override', _lock_for('libx265', 'slow'), ['-preset', 'slow'])
+    chk('_lock_for vp9 + preset_override', _lock_for('libvpx-vp9', '0'),
+        ['-b:v', '0', '-deadline', 'good', '-cpu-used', '0'])
+    chk('_lock_for nvenc + preset_override', _lock_for('hevc_nvenc', 'p6'),
+        ['-b:v', '0', '-preset', 'p6', '-rc', 'vbr'])
+    chk('_lock_for rav1e 忽略 preset_override', _lock_for('librav1e@10', 'slow'), ['-speed', '10'])
     chk('_max_resid rav1e', _max_resid('librav1e@10'), 5.0, 1e-9)
     chk('_max_resid x265', _max_resid('libx265'), 1.5, 1e-9)
 
@@ -711,6 +741,10 @@ def main():
                     help='对侧仓库根（VE 对等方案）；不给则自动找同级的 Video_Enhancement / VidUtils。'
                          '用于报告「两表是否同步 / 对侧 harness 是否同版」的跨仓态势。')
     ap.add_argument('--tag', default='')
+    ap.add_argument('--preset-override', default=None,
+                    help='把 BASE_LOCK 的速度轴整体替换为该值（libx264/x265/svtav1/NVENC='
+                         '-preset；vp9/aom=-cpu-used）⇒ 按 --quality-tier 档值重标时传入'
+                         '（Plan v3 §13.10R）；librav1e 走 --rav1e-speed。默认 None=沿用 BASE_LOCK。')
     ap.add_argument('--keep', action='store_true')
     ap.add_argument('--resume', action='store_true', help='跳过 points.json 里已完成的点')
     ap.add_argument('--subsample', type=int, default=1,
@@ -724,6 +758,9 @@ def main():
 
     if args.selftest:
         return selftest()
+
+    global _PRESET_OVERRIDE
+    _PRESET_OVERRIDE = str(args.preset_override) if args.preset_override is not None else None
 
     if args.expect_av1 and args.quick:
         print('[ERROR] --expect-av1 需要真正跑探测/标定，不能与 --quick 同用')
@@ -836,6 +873,7 @@ def main():
               'cross_repo': cross,
               'width': args.width, 'height': args.height, 'duration': args.duration,
               'tiers': tiers, 'lock': {t: _lock_for(t) for t in tiers},
+              'preset_override': _PRESET_OVERRIDE,
               'anchors': ANCHOR_CRFS, 'tol_vmaf': TOL_VMAF,
               'subsample': args.subsample, 'with_filters': bool(args.with_filters),
               'max_resid': {t: _max_resid(t) for t in tiers},

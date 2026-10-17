@@ -232,48 +232,24 @@ _EQQUAL_SPEED_OVERRIDE = {
     'librav1e': (7.9173, -106.6317, 0, 255),   # 仅当 _RAV1E_SPEED > 0 时生效
 }
 
-# 阶段零点五探针结果（2026-10-16，CPU 侧快速测量，2 片 5s，-crf 30）：
-# balanced 已确认（与 BASE_LOCK 一致）；archive 仅为探针建议，待 T4/L40 全量标定后确认。
-# 其余档（lossless / near-lossless / quality / preview / draft / test）待 §13.14 T4/L40 三环标定完成后填充。
-# 阶段一编码实现（_EQQUAL_TIER_OVERRIDE 完整填充 + TIER_PROFILES 同步）已被用户指示延后，
-# 必须等待两侧（T4 / L40）测试完成并数据填充后才能启动。
+# 按档覆盖的等质量表（R1，2026-10-17）。范式同上方 ``_EQQUAL_SPEED_OVERRIDE``。
+# **H4 拍板**：非 balanced 档一律 **空 dict** —— 空/缺键 = 未标定 ⇒ 该档自动回退
+# ``QUALITY_MAP`` 本体（= balanced 表）并打告警（Plan v3 §2.4 指纹制）。
+# · preset / ``-speed`` 等**策略值不属于本表**（它们是 ``TIER_PROFILES`` 的职责；
+#   权威取值见 Plan v3 §13.10R 与 ``Accessory/preset_matrix.xlsx``，勿在此重复登记）。
+# · 本表只放 ``codec -> (a, b, lo, hi)`` 系数行；探针初值（如 aom archive=4 的建议）
+#   一律不作数，必须过 ``calibrate_equal_quality.py --preset-override <档值> --tag <tier>``
+#   的全量标定 + LOO 门禁（软编 ≤5.9 / rav1e ≤7.5）后才逐档填入。
+# · ``balanced`` 不登记：直接读 ``QUALITY_MAP`` 本体（source=None，已标定）。
+# · 「是否已标定」只由（规划中的）``CALIB_FINGERPRINT`` 判定，**不得**看本表的键存在性。
 _EQQUAL_TIER_OVERRIDE = {
-    'balanced': {
-        'libx264':    QUALITY_MAP.get('libx264'),   # medium（基准轴不动，待标定确认）
-        'libx265':    QUALITY_MAP.get('libx265'),
-        'libvpx-vp9': QUALITY_MAP.get('libvpx-vp9'),
-        'libaom-av1': QUALITY_MAP.get('libaom-av1'),
-        'libsvtav1':  QUALITY_MAP.get('libsvtav1'),
-        'librav1e':    QUALITY_MAP.get('librav1e'),  # balanced 档：显式下发 -speed 6（与 native 逐字节相同，消除歧义，零回归）
-    },
-    # 探针快速测量（§13.14）：archive 档可考虑 4（同 -4 体积），但仅为建议；
-    # 质量锚点与窗口（§4.1 / §4.4）尚未在完整 17 素材池上标定完成。
-    'archive': {
-        # 仅填入探针建议值；缺键 = 自动回退 balanced 表并告警（本方案 §2.4 指纹制）。
-        # 完整值需 §B4 三环主测（CPU→T4→L40）后才能写入。
-    },
-    # 其余档位（§13 用户同步 preset_matrix slsx，待 T4/L40 三环标定确认）：
-    # librav1e 速度值：test=10 / draft=8 / preview=7（修正）/ balanced=6 / quality=4 / archive=2 / near-lossless=1 / lossless=0
-    # 完整标定后应替换为实际 (a,b,lo,hi)；当前仅填入矩阵值并标注待确认。
-    'lossless': {
-        'librav1e': (0.0, 0.0, 0, 255),  # -speed 0（无损，待标定）
-    },
-    'near-lossless': {
-        'librav1e': (1.0, 0.0, 0, 255),  # -speed 1（待标定）
-    },
-    'quality': {
-        'librav1e': (4.0, 0.0, 0, 255),  # -speed 4（待标定）
-    },
-    'draft': {
-        'librav1e': (8.0, 0.0, 0, 255),  # -speed 8（待标定）
-    },
-    'test': {
-        'librav1e': (10.0, 0.0, 0, 255),  # -speed 10（待标定）
-    },
-    # 预览档（§13 用户修正：native 与 -speed 6 逐字节相同 ⇒ 预览无差异；改为 7 以区分）
-    'preview': {
-        'librav1e': (7.0, 0.0, 0, 255),  # 预览档：-speed 7（与 balanced native / speed 6 区分；实测 byte 相同问题已修正；零回归）
-    },
+    'lossless': {},
+    'near-lossless': {},
+    'archive': {},
+    'quality': {},
+    'preview': {},
+    'draft': {},
+    'test': {},
 }
 
 # 当前生效表 + 口径（由 set_quality_mode 维护）；默认 'quality'
@@ -541,6 +517,9 @@ def convert_quality(src_codec, src_value, dst_codec, table=None):
 
     注意：裁剪脚本只把它用于"GPU 编码器降级为 CPU 编码器"这一条路径；
     用户显式给出的同族参数（CPU 的 --crf、GPU 的 --cq）一律原样下发，不换算。
+    ⚠ 计划注记（R1，2026-10-17，**尚未实装**）：``--quality-tier`` 上线后，该约定在
+    **档内被全档接管（含 balanced）**——显式值先归一到基准轴、过该档窗口、再按该档
+    活动表换算回目标编码器；未标定档回退 balanced 表并告警（Plan v3 §4.4 / §9 / §2.4）。
     """
     ref = to_x264_crf(src_codec, src_value, table=table)
     if ref is None:

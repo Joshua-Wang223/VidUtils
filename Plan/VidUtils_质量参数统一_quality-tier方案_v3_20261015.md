@@ -7,6 +7,8 @@
 - 配套文档：`Plan/VidUtils_quality-tier全流程实测方案_v1_20261015.md`（实测与补标定）
 - 复测工具：`Accessory/probe/bench_preset_ab.py`（preset A/B 耗时专测，自动检测 AVX2、带负载守卫）
 - 最新输入：§13 `preset_matrix.xlsx` 评估与修正矩阵（2026-10-16，Q11 据此拍板为「区分」）
+- **修订 R1（2026-10-17，审核后执行）**：① H1 拍板**读法 A**——窗口/钳制/锚点注入对**全档**生效（`balanced` 无特殊地位），旧 baseline 改为「钉档 + 四份 golden 全量重录 + 人工审阅」；② H2 定案**唯一权威 `TIER_PROFILES`**（§4.1 preset 列 = §13.10R = `preset_matrix.xlsx`）；③ H3 时序重排：harness 标定先行（`--preset-override` ✅ 已落地），CLI 端到端为阶段一 DoD；④ H4：`_EQQUAL_TIER_OVERRIDE` 非 `balanced` 键一律空。决策记录见 §13.15（R1-1~R1-7）。
+- 行号引用说明（R1）：本文行号为写作时快照，**以符号名为准**；已修正的失效引用在各节就地注明。
 
 ---
 
@@ -39,6 +41,8 @@ v2 是在只审视 tune/multipass 两条轴时写出的，本轮把 `-rate-mode`
 
 ⇒ tier 与 `--codec` **正交**：codec 是 tier 的**输入**，tier 的每一项内涵（preset / lookahead / tune / multipass / aq / 质量锚点落到该 codec 的原生取值）都按 codec 实例化。
 
+> **R1 拍板（2026-10-17）**：两道自动判定（窗口钳制 / 标定指纹）对**全部八档一视同仁**——`balanced` 不再豁免（H1=读法 A，取代 v3 草稿里的「balanced 完全不变」）。连带：默认档先维持 `balanced`（阶段一时序，§6.2），但**旧 baseline 的「逐字节不变」不再成立，四道孪生门改为全量重录 + 人工审阅**（§7 / §11）。锚点/窗口/钳翻规则本身（§4.1/§4.4）不变。
+
 ---
 
 ## 2. 参数交互全景（本轮的核心分析）
@@ -47,9 +51,9 @@ v2 是在只审视 tune/multipass 两条轴时写出的，本轮把 `-rate-mode`
 
 | 入口 | 位置 | 语义 | 是否过等效表 |
 |---|---|---|---|
-| **字面量** `--crf` / `--cq` / `--qp` | hwaccel L3394 起的 `_resolve_quality_params` | 按**目标编码器原生刻度**直发 | **不过表**（convert_crf.py L323-324 明文：「用户显式给出的同族参数一律原样下发，不换算」） |
+| **字面量** `--crf` / `--cq` / `--qp` | `_resolve_quality_params`（行号为快照，以符号名为准） | 按**目标编码器原生刻度**直发 | **不过表**（`convert_crf.py` 契约句「同族参数一律原样下发，不换算」）——⚠ **R1：tier 上线后该契约在档内被接管**：值先归一到基准轴、过窗口、按档换算（§4.4），**对全档生效、含 `balanced`** |
 | **统一基准轴** `--crf-ref` / `--cq-ref` | L3545-3551 `ref_x264` | 先归一到 **libx264 CRF 轴**再 `from_x264_crf(codec, N)` | **过表**（`--cq-ref` 多一步 `to_x264_crf('h264_nvenc', N)`） |
-| **缺省** | `_default_quality_for()` L1571-1579 | `from_x264_crf(codec, DEFAULT_REF=21)` | 过表 |
+| **缺省** | `default_quality_for()`（旧名 `_default_quality_for`） | `from_x264_crf(codec, DEFAULT_REF)`；`DEFAULT_REF` = 默认档锚点：阶段一 `24`（balanced）→ 翻档后 `20`（quality），R1-7 | 过表 |
 
 ⇒ **tier 影响的不是"给不给值"，而是"同一个值在该组合下意味着什么画质"**。字面量入口虽然不过表，但用户的 CRF/CQ 直觉也是在 medium/p4 上建立的。
 
@@ -59,16 +63,17 @@ v2 是在只审视 tune/multipass 两条轴时写出的，本轮把 `-rate-mode`
 
 ```
 convert_crf.py
-  SIZE_MAP    L18   等体积（文件名 log-体积插值）
-  QUALITY_MAP L116  等质量（目标编码器「参数→VMAF」曲线上取等 VMAF 点后最小二乘）★默认
-  _ACTIVE_MAP L230  = {**SIZE_MAP, **QUALITY_MAP}，未覆盖编码器回退 SIZE_MAP
-hwaccel L1512 / cpu_v2 L1142 / sdr L484
+  SIZE_MAP      等体积（文件名 log-体积插值）
+  QUALITY_MAP   等质量（目标编码器「参数→VMAF」曲线上取等 VMAF 点后最小二乘）★默认
+  _ACTIVE_MAP   = {**SIZE_MAP, **QUALITY_MAP}，未覆盖编码器回退 SIZE_MAP
+  _EQQUAL_TIER_OVERRIDE  按档覆盖（R1-H4：非 balanced 键初始一律为空 = 未标定，见 §2.4）
+三脚本（hwaccel / cpu_v2 / sdr）
   _QP_AFFINE_QUALITY  另一张：constqp 轴用（跨仓契约 CR-4，与 VE 逐条相等）
 ```
 
-三者形态一致：`Dict[codec, (a, b, lo, hi)]`，`value = a·x264_crf + b` 夹 `[lo,hi]`，**基准轴恒为 libx264 CRF**。
+这些表形态一致：`Dict[codec, (a, b, lo, hi)]`，`value = a·x264_crf + b` 夹 `[lo,hi]`，**基准轴恒为 libx264 CRF**。
 
-**现成的"表随组合变"范式**（直接照抄，不要新发明）：`convert_crf.py` L224-226
+**现成的"表随组合变"范式**（直接照抄，不要新发明）：`convert_crf.py` 的 `_EQQUAL_SPEED_OVERRIDE`
 
 ```python
 _EQQUAL_SPEED_OVERRIDE = {
@@ -83,7 +88,7 @@ _EQQUAL_SPEED_OVERRIDE = {
 
 | 轴 | 现状位置 | 是否平移率失真曲线 | 有无实测 | tier 能否改 |
 |---|---|---|---|---|
-| **`-preset`** | `strategy_preset()` L1365-1388（hwaccel 惰性）/ `default_preset_for()` L4408-4413（cpu_v2、sdr 急切） | **是，最强** | calibrate_equal_quality.py L94-107 `BASE_LOCK` 明文「换挡会整体平移率失真曲线 ⇒ 等效点漂移」；hwaccel L1356-1357「svtav1 的等效关系是在 `-preset 8` 下标定的」 | **能，但必须按档重标全部受影响的行** |
+| **`-preset`** | `strategy_preset()`（hwaccel，惰性）/ `default_preset_for()`（hwaccel 亦调用；cpu_v2、sdr 在 main 中**急切填充** ⇒ **必须先取 `preset_explicit` 快照**，§6.2） | **是，最强** | `calibrate_equal_quality.py` 的 `BASE_LOCK` 明文「换挡会整体平移率失真曲线 ⇒ 等效点漂移」；`default_preset_for()` 注释「svtav1 的等效关系是在 `-preset 8` 下标定的」 | **能，但必须按档重标全部受影响的行** |
 | **`-lookahead`** | `apply_rc_control_args` hwaccel L3700-3716 / cpu_v2 L1559-1575 / sdr L1600-1611 | **是** | 标定 batch 未下发 lookahead（基准 = 不下发） | 同上 |
 | **`-tune`** | hwaccel L3734-3742 | **是**（`uhq` 自带 lookahead + temporal filter） | 只有「h264 传 uhq → rc=234」的负面实测；hevc/av1 的 uhq 收益**零实测** | 同上（**已拍板：阶段一不做 auto→uhq**） |
 | **`-aq`** | hwaccel L4467-4471 / sdr L1616-1623 | **是**（改量化分配） | **零实测** | 同上 |
@@ -100,6 +105,7 @@ _EQQUAL_SPEED_OVERRIDE = {
 CALIB_FINGERPRINT = {
     'balanced': {
         'preset':  {'libx264': 'medium', 'libx265': 'medium', 'libsvtav1': '8',
+                    'libvpx-vp9': 2, 'libaom-av1': 6, 'librav1e': '6（显式 -speed）',
                     '*_nvenc': 'p4', ...},
         'lookahead': None,          # 不下发
         'tune': None, 'multipass': 'auto', 'aq': False,
@@ -110,41 +116,42 @@ CALIB_FINGERPRINT = {
     'quality': {'source': '_EQQUAL_TIER_OVERRIDE["quality"]', 'calibrated': False, ...},
     ...
 }
-_EQQUAL_TIER_OVERRIDE: Dict[str, Dict[str, Tuple[float, float, int, int]]] = {}   # 缺 = 未标定
+_EQQUAL_TIER_OVERRIDE: Dict[str, Dict[str, Tuple[float, float, int, int]]] = {}   # 缺 = 未标定；R1-H4：非 balanced 键**初始必须为空**（speed/preset 不属于系数表）
 ```
 
-运行时判定：把**最终生效的组合**（tier 基底 + 显式覆盖后的结果）算成实际指纹，与本 tier 的登记指纹逐字段比对。
+运行时判定：把**最终生效的组合**算成实际指纹，与本 tier 的登记指纹逐字段比对。**M4（R1）**：指纹按「**最终生效编码器（含降级）** × 该 strategy」定义——降级后（如 `hevc_nvenc`→`libx265`）按落到的软编指纹比对，否则无 GPU 机器上每次运行都会误告警。
 
 - 一致 ⇒ `--crf-ref N` / `--cq-ref N` 的换算有标定保证，静默。
-- 不一致 ⇒ 概览 + `--dry-run` 打**固定文案**（三脚本逐字一致）：
-  `⚠ 当前组合偏离 --quality-tier <t> 的标定点（<差异项>）；--crf-ref/--cq-ref 的跨编码器等效值无标定保证`
+- 不一致 ⇒ **换算回退 `balanced` 表**（R1 定案：统一取 §5.3 的「回退 + 告警」，不再有第二种说法）+ 概览 / `--dry-run` 打**固定文案**（三脚本逐字一致）：
+  `⚠ 当前组合偏离 --quality-tier <t> 的标定点（<差异项>）；已回退 balanced 表，--crf-ref/--cq-ref 的跨编码器等效值无标定保证`
 - `--strict-calib`（新，默认关）⇒ 不一致时 `exit 2`，首行与上面同一句。
+
+**H4（R1）**：「是否已标定」**只由 `CALIB_FINGERPRINT` 判定**，不得用「`_EQQUAL_TIER_OVERRIDE` 键是否存在」判定；`balanced` 档 `source=None`（直接用 `QUALITY_MAP` 本体）即已标定。
 
 **这就是 tier 的"优先"落点**：不是靠互斥去禁止偏离，而是让偏离自动付出「失去标定保证」的代价。
 
 ### 2.5 硬约束（默认档改为 `quality` 之后的重新表述）
 
-默认档定为 `quality` 之后，原先那两条"不动"要重新划界——**能守住的守住，守不住的明确登记为跨仓契约变更**。
+默认档**最终**定为 `quality`（阶段一先维持 `balanced`，§12.5），并且 **R1 起窗口/钳制/锚点注入对全档生效（含 `balanced`，无豁免）**。原先那两条"不动"要重新划界——**能守住的守住，守不住的明确登记为契约变更**。
 
 **仍然写死（不因默认档改变而动摇）：**
 
-1. **只有 `libx264` 在所有档恒 `medium`。** 基准轴就是 libx264 CRF（`libx264: (1.0, 0.0, 0, 51)` 是单位元）。它一动，锚点本身漂移 ⇒ 9 行全部重标且跨档不可比。
-   ⇒ **这不是"所有 x26x 都不能动"**：`libx265` 不是基准轴，可以随档变化（`balanced medium` / `quality slow` / `archive slower` / `preview faster` / `draft,test veryfast`）。**更正上一版**：此前我把它写成"preview 的 x26x 只能写 medium"，把 libx265 也一并误伤了。
+1. ~~只有 `libx264` 在所有档恒 `medium`~~ —— **R1 作废（§13.2）**：`libx264` **跟随 tier**（用户 10-16 指出并采纳，取代早先的「硬冻结/有条件冻结」两种写法）。基准轴仍是 libx264 CRF（`(1.0, 0.0, 0, 51)` 单位元），但**每档的轴含义 = 该档 libx264 preset** ⇒ 每档一套 `QUALITY_MAP`（按档重标；`balanced`=medium 的既有行仍成立）。未标定档上 `--crf-ref` 的跨编码器换算不可信（概览/`--dry-run` 以指纹告警提示）。`libx265` 随档变化不受影响（`balanced medium` / `quality slow` / `archive slower` / …）。
 2. **`NVENC_TO_X264_PRESET` / `X264_TO_NVENC_PRESET` / `X264_TO_SVTAV1_PRESET` / `NVENC_TO_SVTAV1_PRESET` 的取值不动**（CR-1 的**映射表**部分不受影响）。
 3. **`_NVENC_DEFAULT_RC`（`-rc vbr`）不动**（CR-2）。
-4. **既有 `_v == 0` 无损守卫（L3455-3456 / L3481-3482）不动** —— `lossless` 档就是复用它，不新增一套无损路径（详见 §4.4）。
+4. **既有 `_v == 0` 无损守卫（`_resolve_quality_params` 顶部）不动** —— `lossless` 档复用它，不新增一套无损路径（§4.4）。**R1-M1**：任何来源（含窗口钳制）归一到 `0` 都必须走该哨兵；`lossless` 档不注入与 constqp 冲突的轴（lookahead/multipass 等），否则 `_ignore` 在 strict 下 `exit 2`。
 
 **守不住、必须登记为契约变更（已按你的选择接受）：**
 
 | 变更 | 原状 | 变更后 | 要对谁说 |
 |---|---|---|---|
-| 默认质量值 | `DEFAULT_REF = 21`（L388） | 默认档 `quality` 的锚点 **`20`** | README 默认列、`memory/project_rate_control_params.md` L334-356 |
-| 默认 preset | `p4` / `medium` / `8` | **`p6`** / libx264 `medium`（不变）/ **`slow`** / **`6`** | **跨仓契约 CR-1 的「默认档」条款**（2026-10-04 与 VE 约定 p4↔medium↔8）⇒ **需与 VE 同步重议** |
-| 默认 lookahead / tune / multipass / aq | 全不下发 | `250` / `uhq` / `fullres` / on | 同上 + README |
-| `memory` BASE_LOCK「默认路径永远裸 `-rc vbr -cq N -b:v 0 -preset p4`」 | 成立 | **失效**，须改写为「默认路径 = `--quality-tier quality` 的基底」 | `memory/project_rate_control_params.md`、`MEMORY.md` L203 |
-| 默认路径是否标定 | 标定（`QUALITY_MAP` 本体） | **未标定**（`quality` 档还没有自己的 `_EQQUAL_TIER_OVERRIDE`）⇒ 默认路径会一直挂着告警，直到 Part B 出数据 | Part A §2.4 / Part B §B4 |
+| 默认质量值 | `DEFAULT_REF = 21`（L388） | **R1 轨迹**：阶段一 = 默认档 `balanced` 的锚点 **`24`** ⇒ 翻档后 = `quality` 的锚点 **`20`**；README/memory 三态都写 | README 默认列、`memory/project_rate_control_params.md` |
+| 默认 preset | `p4` / `medium` / `8` | **翻档后**：`p5` / `slow`（libx264 随档）/ `5`；**阶段一默认 balanced ⇒ CR-1 默认条款不动** | **跨仓契约 CR-1 的「默认档」条款**（2026-10-04 与 VE 约定 p4↔medium↔8）⇒ **翻档前需与 VE 同步重议** |
+| 默认 lookahead / tune / multipass / aq | 全不下发 | **翻档后**：`250` / `uhq` / `fullres` / on（阶段一仍不下发） | 同上 + README |
+| `memory` BASE_LOCK「默认路径永远裸 `-rc vbr -cq N -b:v 0 -preset p4`」 | 成立 | **翻档后失效**，改写为「默认路径 = 默认档基底」；阶段一（balanced）仍裸 `-rc vbr -cq N -b:v 0 -preset p4`，但**质量锚点 24 + 全档钳制**（与 memory 旧文仍有差异，需同步） | `memory/project_rate_control_params.md`、`MEMORY.md` L203 |
+| 默认路径是否标定 | 标定（`QUALITY_MAP` 本体） | **阶段一（balanced）仍已标定**；**翻档后未标定**（`quality` 档还没有自己的 `_EQQUAL_TIER_OVERRIDE`）⇒ 默认路径挂告警，直到标定完成 | Part A §2.4 / Part B §B4 |
 
-> ⚠ 最后两行是这次选择的**真实代价**：默认路径会变成一个带着「未标定」告警的路径。这不是 bug 而是诚实——但必须让 README 与 help 提前说明，否则用户第一眼就会以为工具坏了。
+> ⚠ **R1 追补**：读法 A 下**阶段一也不是零行为变化**——`balanced` 自身会钳制、裸跑锚点 21→24；四份 golden 按「全量重录 + 人工审阅」处理（§7/§13.15 R1-1）。翻档后的「未标定默认路径」仍是真实代价，README 与 help 必须提前说明。
 
 ---
 
@@ -155,7 +162,7 @@ _EQQUAL_TIER_OVERRIDE: Dict[str, Dict[str, Tuple[float, float, int, int]]] = {} 
 | 你的写法 | 本仓写法 | 在本方案里的位置 |
 |---|---|---|
 | `-rate-mode` | `--rc-mode`（NVENC `-rc`：`constqp`/`vbr`/`cbr`，hwaccel L407 `_RC_MODES`） | §2.3「不碰 rc」+ §4.2「不进 tier」：constqp 与 vbr 已是两套独立的表 + 两套独立的互斥规则（L5852-5867），再叠一档只会炸复杂度 |
-| `-ref` | `--crf-ref` / `--cq-ref`（统一基准轴 CLI 入口，L3545-3551）+ `DEFAULT_REF`（L388 质量基准常数） | §2.1「三类质量入口」+ §4.4：它们是 tier 的**服务对象**（换算保证的来源），不是 tier 的成员轴；`DEFAULT_REF` 随默认档迁移为 20（§2.5） |
+| `-ref` | `--crf-ref` / `--cq-ref`（统一基准轴 CLI 入口，L3545-3551）+ `DEFAULT_REF`（质量基准常数） | §2.1「三类质量入口」+ §4.4：它们是 tier 的**服务对象**（换算保证的来源），不是 tier 的成员轴；**R1**：`DEFAULT_REF` 语义迁移为「默认档锚点」——阶段一 = `balanced` 的 `24`，翻档后 = `quality` 的 `20`（§2.5） |
 
 > 附注：本仓确实**没有** ffmpeg 的 `-refs`（DPB 参考帧数）下发。若以后要引入，它是第九条轴且必然破标定 ⇒ 建议走 `--extra-args`，不进 tier。
 
@@ -163,9 +170,9 @@ _EQQUAL_TIER_OVERRIDE: Dict[str, Dict[str, Tuple[float, float, int, int]]] = {} 
 
 ## 4. tier 设计
 
-### 4.1 八档定义
+### 4.1 八档定义（= 唯一权威 `TIER_PROFILES`）
 
-**八档**，`--quality-tier` 默认 **`quality`**（ = 你的「默认 ref 20」）。锚点与窗口**在整数轴 `[0,51]` 上完整覆盖、连续无缝、互不重叠**：
+**八档**，`--quality-tier` 默认 **`quality`**（最终态；阶段一先维持 `balanced`，见 §6.2/§12.5）。锚点与窗口**在整数轴 `[0,51]` 上完整覆盖、连续无缝、互不重叠**：
 
 ```
 [0,0] [1,12] [13,18] [19,22] [23,26] [27,32] [33,40] [41,51]
@@ -173,27 +180,29 @@ _EQQUAL_TIER_OVERRIDE: Dict[str, Dict[str, Tuple[float, float, int, int]]] = {} 
 ```
 
 > ✅ **完整覆盖是个好性质**：任意 `-crf/-cq` 整数值**必然属于且只属于一档** ⇒ 「该建议改用哪个档」的答案永远存在且唯一，`min/max` 钳制后不需要处理"无归属"分支，判定代码是纯查表。
-> ⚠ 也正因如此，**不存在"不指定档位"的第三种状态**了 —— 这就是 §12.5 那条选择的直接后果。
+> ⚠ 也正因如此，**不存在"不指定档位"的第三种状态**了 —— 这就是 §12.5 那条选择的直接后果；并且 **R1 起窗口/钳制/锚点注入对全档生效（含 `balanced`），无豁免**。
 
-| tier | 中文定位 | preset（NVENC / **libx264** / libx265 / svtav1） | lookahead | tune | multipass | aq | **`ref_crf`** | **`ref_window`** | 标定状态 |
+`preset` 列**就是 §13.10R 的矩阵**（= `Accessory/preset_matrix.xlsx`）——同一张表，任何改动必须三处同改。
+
+| tier | 中文定位 | preset（NVENC / libx264 / libx265 / svtav1 / vp9 / aom / rav1e） | lookahead | tune | multipass | aq | `ref_crf` | `ref_window` | 标定状态 |
 |---|---|---|---|---|---|---|---|---|---|
-| `lossless` | 无损母版 | `p7` / `medium` / `slower` / `4` | `250` | **`lossless`** | `fullres` | 见注 | **`0`** | **[0, 0]** | ❌ 未标定 |
-| `near-lossless` | 近无损母版 | `p7` / `medium` / `slower` / `4` | `250` | `uhq` | `fullres` | on | **`6`** | **[1, 12]** | ❌ 未标定 |
-| `archive` | 存档母版 | `p7` / `medium` / `slower` / `4` | `250` | `uhq` | `fullres` | on | **`16`** | **[13, 18]** | ❌ 未标定 |
-| **`quality`（默认）** | 高质量交付（分发母版） | **`p6`** / `medium` / **`slow`** / **`6`** | **`250`** | **`uhq`** | **`fullres`** | **on** | **`20`** | **[19, 22]** | ❌ **未标定** |
-| `balanced` | 均衡（**= 今天的行为，但不再是默认**） | `p4` / `medium` / `medium` / `8` | 不下发 | 不下发 | `auto` | off | `24` | **[23, 26]** | ✅ **已标定**（=今天的 QUALITY_MAP 本体） |
-| `preview` | 预览 / 审片 | `p2` / `medium` / `faster` / `12` | 不下发 | `ll` | `disabled` | off | `28` | **[27, 32]** | ❌ 未标定 |
-| `draft` | 草稿 / 粗剪 | `p1` / `medium` / `veryfast` / `13` | 不下发 | `ll` | `disabled` | off | `36` | **[33, 40]** | ❌ 未标定 |
-| `test` | 冒烟测试（只要能解码就行） | `p1` / `medium` / `veryfast` / `13` | 不下发 | `ll` | `disabled` | off | `45` | **[41, 51]** | ❌ 未标定 |
+| `lossless` | 无损母版 | `p7` / `veryslow` / `slower` / `0` / `0` / `0` / `0` | **不注入** | **不注入** | **不注入** | **不注入** | `0` | `[0, 0]` | ❌ 未标定 |
+| `near-lossless` | 近无损母版 | `p7` / `veryslow` / `slower` / `1` / `0` / `1` / `1` | `250` | `uhq` | `fullres` | on | `6` | `[1, 12]` | ❌ 未标定 |
+| `archive` | 存档母版 | `p6` / `slower` / `slower` / `3` / `0` / `2` / `2` | `250` | `uhq` | `fullres` | on | `16` | `[13, 18]` | ❌ 未标定 |
+| **`quality`（默认）** | 高质量交付（分发母版） | `p5` / `slow` / `slow` / `5` / `1` / `3` / `4` | `250` | `uhq` | `fullres` | on | `20` | `[19, 22]` | ❌ **未标定** |
+| `balanced` | 均衡（**= 今天的行为，但不再是默认**；无豁免） | `p4` / `medium` / `medium` / `8` / `2` / `6` / `6` | 不下发 | 不下发 | `auto` | off | `24` | `[23, 26]` | ✅ **已标定**（=今天的 QUALITY_MAP 本体） |
+| `preview` | 预览 / 审片 | `p3` / `fast` / `faster` / `9` / `5` / `7` / `7` | 不下发 | `ll` | `disabled` | off | `28` | `[27, 32]` | ❌ 未标定 |
+| `draft` | 草稿 / 粗剪 | `p2` / `veryfast` / `veryfast` / `11` / `6` / `8` / `8` | 不下发 | `ll` | `disabled` | off | `36` | `[33, 40]` | ❌ 未标定 |
+| `test` | 冒烟测试（只要能解码就行） | `p1` / `ultrafast` / `ultrafast` / `13` / `8` / `8` / `10` | 不下发 | `ll` | `disabled` | off | `45` | `[41, 51]` | ❌ 未标定 |
 
 注：
 
-- **`lossless` 档复用既有 `_v == 0` 无损守卫**（L3455-3456 / L3481-3482）⇒ 自动走 `-rc constqp -qp 0 -b:v 0`，**不需要 tier 去碰 `--rc-mode`**（守住 §2.5-3）。它的 `preset` 影响的是无损产物的**体积**而非画质；NVENC 上 `-tune lossless` 是原生取值。
-- **`libx264` 列恒 `medium`**（§2.5-1，基准轴）⇒ 对 libx264 而言八档**只有质量值不同**，策略完全相同。`libx265` 不是基准轴，可随档变化。
+- **`lossless` 档复用既有 `_v == 0` 无损守卫**（`_resolve_quality_params` 顶部）⇒ 自动走 `-rc constqp -qp 0 -b:v 0`，**不需要 tier 去碰 `--rc-mode`**（守住 §2.5-3）。⚠ **R1-M1**：质量轴旁路 ⇒ **凡与 constqp 冲突的轴一律不注入**（lookahead/multipass 走 `_ignore` 会在 `--fallback-policy strict` 下直接 `exit 2`）；且**任何来源（含窗口钳制）归一到 `0` 都必须复核 `_v == 0` 哨兵**，不允许「钳到 0 后当普通值下发」。`preset` 影响的是无损产物的**体积**而非画质；NVENC 上 `-tune lossless` 是原生取值。
+- **`libx264` 跟随 tier**（R1 定案，取代 v3 草稿「恒 medium」，§13.2/§13.10R）⇒ 每档一套标定表；`balanced`=medium 的既有行仍成立。
+- **`draft` 与 `test` 有策略层区分**（Q11 已拍板「区分」，R1 补全）：test 比 draft 再快一档 —— NVENC `p1` vs `p2`、libx264 `ultrafast` vs `veryfast`、libx265 `ultrafast` vs `veryfast`、svtav1 `13` vs `11`、rav1e `10` vs `8`、vp9 `8` vs `6`；**aom 例外**：因 `balanced=6` 冻结后快端只剩 `7/8` 两档，test 与 draft 并档为 `8`（§13.10R 注）。
 - `tune=ll` 与 `-tune lossless` 都是 NVENC 私有语义，**只有 NVENC 才下发**；降级到 CPU 策略时静默（不告警——否则每条降级策略刷一条）。
 - `uhq` 必须过 §4.3 的探测，且**只对 `hevc_nvenc` / `av1_nvenc`** 下发；`h264_nvenc` 落到 `hq`（= 不下发）。
-- **`draft` 与 `test` 目前策略完全相同、只差锚点** —— 是否需要给它们策略层区分（如 `test` 强制 `--threads 1` 或最短 preset）见 §12.6。
-- **`quality` 与 `archive` 的分化 = D1 + D2 同时用**（Q3 已定）：既拉锚点（20 vs 16），也拉 preset（`p6`/`slow`/`6` vs `p7`/`slower`/`4`）。svtav1 的 `6`/`4` 因此不再是"占位"，而是**已承诺档位取值**，必须在 Part B §B5 的 D2 bench 里验证（见 §12.2 Q3 行）。
+- **`quality` 与 `archive` 的分化 = D1 + D2 同时用**（Q3 已定）：既拉锚点（20 vs 16），也拉 preset（`p5`/`slow`/`5` vs `p6`/`slower`/`3`，libx264 `slow` vs `slower`，vp9 `1` vs `0`，aom `3` vs `2`，rav1e `4` vs `2`）。档位取值必须在 Part B §B5 的 D2 bench 里验证（§12.2 Q3 行）。
 
 ### 4.2 哪些轴进 tier、哪些不进
 
@@ -235,6 +244,12 @@ def _query_ffmpeg_enum(encoder: str, option: str) -> Optional[FrozenSet[str]]:
 - sdr 的 `_run_job_with_fallback` ladder（L4699-4776，构建在 L4713-4722）插一级「去 tune 重试」
 - cpu_v2 不需要（不派生 uhq）
 
+**R1 补充（M2/M3，tier 基底注入的三条硬规则）：**
+
+- **注入时机在 `apply_rc_control_args` 的 `if lookahead is not None` 判断之前**（lookahead 默认要注入 `250`——若等函数内部再补，会绕过「None ⇒ 不下发」的既有语义）。
+- **过滤按「最终生效编码器 × strategy」做**（不是按请求的 codec）：tier 注入的 NVENC 专属轴（tune/multipass/aq/lookahead）在 CPU 策略/降级策略上必须**静默不下发**（与 `tune` 同一原则），否则自动策略下逐策略刷告警、strict 下 `_ignore` 直接 `exit 2`。
+- **`'auto'` 值必须编码为 `None`**：`apply_rc_control_args(multipass=None)` 才触发既有 auto-fullres 规则；传字符串会得到非法的 `-multipass auto`。lookahead 的 `250`、tune 的 `ll/uhq` 等同理——只传数值/枚举，不传字符串哨兵。
+
 ### 4.4 质量锚点与质量窗口 —— 「内部协调配档」
 
 这是本轮相对 v2 的**结构性改动**：质量数值不再外置于 tier，而是 tier 的一等成员。
@@ -257,19 +272,19 @@ def resolve_quality_for_tier(codec, tier, *, crf=None, cq=None, qp=None,
    |---|---|---|
    | `--crf-ref N` | `N` | L3547 |
    | `--cq-ref N` | `to_x264_crf('h264_nvenc', N)` | L3550 |
-   | `--crf` / `--cq`（字面量） | `to_x264_crf(codec, N)` | `convert_crf.py:296` |
-   | `--qp N`（constqp） | `_QP_AFFINE_QUALITY` 的**反函数** `(N − b)/a` | 现只有正向 `to_constqp_qp`（L1164），反函数需孪生新增（纯代数） |
-   | 都没给 | tier 的 `ref_crf`；默认档是 `quality` ⇒ **`20`**（等价于 `--crf-ref 20`） | `DEFAULT_REF`(L388) 语义迁移为「默认档锚点」，见 §2.5 |
+   | `--crf`（字面量） | `to_x264_crf(codec, N)` | `convert_crf.py` 的 `to_x264_crf` |
+   | `--cq`（字面量） | `to_x264_crf(src, N)`，`src = src_codec if 支持cq(src_codec) else 'h264_nvenc'`（**R1-M6**：与 `_resolve_quality_params` 的 `_src` 降级换算同口径——`--codec libx264 --cq 23` 今天按 `h264_nvenc` 轴换算 ⇒ `-crf 18`，**不是** 23） | `_resolve_quality_params` 的 `_src` 解析 |
+   | `--qp N`（constqp） | `from_constqp_qp(src, N)` —— **R1-M8：三脚本既有该函数（纯代数反函数），无需新增** | `_QP_AFFINE_QUALITY` 反查 |
+   | 都没给 | 默认档的 `ref_crf`：**阶段一 = `balanced` ⇒ `24`；翻档后 = `quality` ⇒ `20`**（R1-7；等价于 `--crf-ref 24` / `--crf-ref 20`） | `DEFAULT_REF` 语义迁移为「默认档锚点」，见 §2.5 |
 
-2. **无损哨兵短路**：值为 `0` ⇒ **永不钳制、不换算**，交既有 `_v == 0` 守卫处理（L3455-3456 / L3481-3482 ⇒ `-rc constqp -qp 0 -b:v 0`）。`--quality-tier lossless`（锚点 0）正是走这条路，所以 **`lossless` 档不需要新代码**，也不需要 tier 去碰 `--rc-mode`。
+2. **无损哨兵短路**：值为 `0` ⇒ **永不钳制、不换算**，交既有 `_v == 0` 守卫处理（`_resolve_quality_params` 顶部 ⇒ `-rc constqp -qp 0 -b:v 0`）。`--quality-tier lossless`（锚点 0）正是走这条路，所以 **`lossless` 档不需要新代码**，也不需要 tier 去碰 `--rc-mode`。⚠ **R1-M1**：哨兵必须同时覆盖「**钳制到 0**」（如 lossless 窗外的 `--crf 5` 归一后被钳到 0）——不允许钳完当普通值下发；且 `lossless` 档**不注入**与 constqp 冲突的轴（lookahead/multipass 等，§4.1 注），否则 `_ignore` 在 strict 下 `exit 2`。
 3. **窗口钳制**：先 `ref_int = round(ref)`（`int (min(max(ref_int, lo), hi))`）。**四个闭区间严格不重叠** ⇒ 任意整数**最多属于一档**，于是：
    - 在窗内 ⇒ 原值通过，无告警；
    - 越界 ⇒ 钳到该侧的窗边界，打**固定告警**（三脚本逐字一致）；`--strict-quality` ⇒ 改 `exit 2`，首行同句；
-   - 告警的第③段要给出「该用哪个档」——直接线性扫 `TIER_PROFILES` 找窗内含 `ref_int` 的那档，**因为区间不重叠，答案是唯一的**；都不含（如 `ref > 32`）⇒ 提示不指定档位。
-   又因为八档完整覆盖 `[0,51]`，「都不包含」的分支**不存在**（上一版针对 `ref > 32` 的兜底可以删掉）。相比「允许重叠」，这里不需要任何仲裁规则。
+   - 告警的第③段要给出「该用哪个档」——直接线性扫 `TIER_PROFILES` 找窗内含 `ref_int` 的那档，**因为区间不重叠，答案是唯一的**；八档完整覆盖 `[0,51]` ⇒「都不包含」分支**不存在**（`ref > 32` 的兜底已删）。相比「允许重叠」，不需要任何仲裁规则。
 4. **落值**：`from_x264_crf(codec, ref, table=<tier 的活动表>)` ⇒ 该 codec 的原生取值，再交给 `_resolve_quality_params` 原有链路下发。
 
-**四个必须写进 README 与 verify 的样例**
+**五个必须写进 README 与 verify 的样例（R1 新增 `balanced` 行）**
 
 | 情形 | 归一到基准轴 | 窗口判定 | 结果 |
 |---|---|---|---|
@@ -277,20 +292,30 @@ def resolve_quality_for_tier(codec, tier, *, crf=None, cq=None, qp=None,
 | `--codec libx265 --quality-tier quality --crf-ref 26` | `26` | 越出 `[19, 22]` ⇒ 钳到 `22`（离 26 最近的窗边界） | 下发 `-crf 22`；告警建议「26 属于 `balanced` 的窗口，请改用 `--quality-tier balanced`」 |
 | `--codec libx265 --quality-tier preview --crf-ref 30` | `30` | `30 ∈ [27, 32]` ⇒ 通过 | 下发 `-crf 31`，**不告警**（负向用例：窗内的显式值不受打扰） |
 | `--codec libx265 --quality-tier archive --crf-ref 16` | `16` | `16 ∈ [13, 18]` ⇒ 通过 | 下发 `-crf 15`，不告警（正好是该档锚点） |
+| `--codec libx265 --quality-tier balanced --crf 50` | `to_x264_crf('libx265', 50) ≈ 47.7` → `48` | 越出 `[23, 26]` ⇒ 钳到 `26` | 下发 `-crf 26`；告警（**R1：`balanced` 不豁免**——CRF 48 落在 `test` 档） |
 
 `archive + --crf 50` 的告警文案（三脚本逐字一致）：
 `⚠ --quality-tier archive 的质量窗口为 CRF 13~18；--crf 50（基准轴 ≈47.7）已钳到 18（libx265 -crf 17）。CRF 48 落在 test 档（41~51），请改用 --quality-tier test`
 
-> ⚠ **基线含义已改（§12.5 已拍板走「默认档 = quality」）**：不再存在"不指定档位"的第三种状态 ⇒ 「默认 ≡ 今天的行为」这条不成立。**补偿做法**：把现有四份 baseline 整体转为 **`--quality-tier balanced` 的黄金文件**（旧 inventory 全部显式带上该参数），再另建一份新 default 基线。详见 §7。
+> ⚠ **基线含义已改（R1：H1=读法 A + §12.5「默认档最终 = `quality`」）**：不再存在"不指定档位"的第三种状态，`balanced` 也不再豁免窗口 ⇒ 「默认 ≡ 今天的行为」全面不成立。**R1 做法**：旧 inventory 显式钉上 `--quality-tier balanced`（把"旧默认"转成"balanced 档"用例）＋ **四份 golden 全量重录**（旧字节作废；重录 diff 必须逐条人工审阅）；新 default 基线在翻默认档时另建。详见 §7 与 §13.15（R1-1）。
 
 **⚠ 与既有契约的冲突（必须显式登记，不能悄悄做）**
 
-`convert_crf.py` L323-324 现在承诺：「用户显式给出的同族参数一律原样下发，不换算」。
-tier ≠ `balanced` 时这条**被 tier 接管**——用户显式给了值，但该值会被钳制并按该档的换算表重新配档。
-`balanced` 档**完全不变** ⇒ 不破任何既有断言、不破任何 baseline。
-这个「契约接管」要写进三份 help、README、`memory/project_rate_control_params.md`，否则下一轮审查会当成 bug。
+`convert_crf.py` 的契约句现在承诺：「用户显式给出的同族参数一律原样下发，不换算」。
+**R1（读法 A）起这条被 tier 全档接管** —— **含 `balanced`**：显式值先归一到基准轴、过窗口、再按该档的活动表换算回目标编码器（会破旧 baseline，已按「全量重录」登记，§7）。
+这个「契约接管」要写进三份 help、README、`memory/project_rate_control_params.md`，否则下一轮审查会当成 bug；实现时同步把契约句改写为「tier 协调前不换算」（§9）。
 
 **概览展示**：`质量: crf-ref 18（钳自 --crf 50）`；三脚本同措辞（进 `verify_overview_lockstep.py`）。
+
+#### 4.4.1 HDR 域 × tier 的复合规则（R1-M5）
+
+`convert_sdr_to_hdr.py` 有独立的 HDR 等质量覆盖表（`set_quality_domain('hdr')`）。tier 与其复合时：
+
+1. **归一**用**该域活动表**的反函数（HDR 域时用 HDR 行；用现成的 `row_limits()` / `forward()` / `inverse()` API，**不要元组手工解包**）；
+2. **窗口判定**仍按统一基准轴（libx264 CRF）的 §4.1 窗口——HDR 覆盖表只改「轴 ↔ 原生值」的换算，不改变锚点/窗口语义；
+3. **落值**经该域表（`from_x264_crf` 的 HDR 版）。
+
+**范围边界**：HDR 行的**标定不在本方案**（属 SDR2HDR 工作流；「VMAF 在 SDR2HDR 管线不可标定」的结论见 `Plan/Handoff_VMAF在SDR2HDR管线不可标定_VU→eqq标定_20261015.md`）；tier × HDR 实测单独立项（§13.14 ⑤）。
 
 ---
 
@@ -323,7 +348,7 @@ tier ≠ `balanced` 时这条**被 tier 接管**——用户显式给了值，�
 | `--nvenc-tune uhq` + `h264_nvenc` | hwaccel L5843-5849（`return 2`）/ cpu_v2 L4560-4564（`raise ValueError` → L4712-4714 转 `return 2`） | exit 2 |
 | 同上，**sdr 缺失** | sdr 全文无此检查（只有策略内 `_ignore` 告警 L1640-1645） | ← 本期补，且与另两个同首行 |
 
-> 附带修一处现成不一致：hwaccel 用 `CODEC_ALIASES` 归一化（L5845）而 cpu_v2 直接比字符串（L4561）⇒ 别名（如 `h264nvenc`）在两脚本行为不同。统一到 hwaccel 的归一化版本，新补的 sdr 也用它。
+> 附带清理一处**风格**不一致（R1 更正：**并非行为 bug**）：hwaccel 用 `CODEC_ALIASES` 归一化（L5845），cpu_v2 同样走 `normalize_codec_name`（等价）；统一到 hwaccel 的写法，新补的 sdr 也用它。
 
 ### 5.3 两个 strict 开关，并随 `--fallback-policy strict` 一并生效
 
@@ -334,14 +359,14 @@ tier ≠ `balanced` 时这条**被 tier 接管**——用户显式给了值，�
 
 - 触发时 `exit 2`，首行与对应告警**逐字相同**（hwaccel / sdr 一致）。可以同时给两个。
 - **并入 `--fallback-policy strict`**：该值隐含同时打开上面两个开关。这样既保留了「两个开关」的细粒度（可以只要 `--strict-quality`、不要 `--strict-calib`），又不必让 strict 用户再记两个新名字。
-  - **零回归保证**：两个新开关默认关；而 `--fallback-policy strict` 的既有用法默认走 `balanced` 档 ⇒ 窗口全轴 + 已标定 ⇒ 两道判定都不触发 ⇒ 行为与今天逐字相同。
+  - **R1 更正（读法 A）**：两个新开关默认关；但**不存在「旧用法逐字不变」**——`--fallback-policy strict` 隐含打开两道判定后，今天合法的 `--codec libx265 --crf 20`（归一 ≈20.3，越出 `[23,26]`）会直接 `exit 2`，`--crf 50` 之类同理。旧 baseline 已按此语义**全量重录**（§7）；help/README 与 `--strict-quality` 文案同步说明。
 - **cpu_v2 例外**：cpu_v2 没有 `--fallback-policy`（L867 / L1287 / L1495），也不提供这两个开关——cpu_v2 是 hwaccel 的 CPU 简板，不必强行对称 ⇒ cpu_v2 里两道判定**恒为告警**，永远不升级为 `exit 2`。登记为第 5 项有意不对称（§8-5）。
 
 ---
 
 ## 6. 逐文件实施清单
 
-### 6.1 阶段零：先修既有 bug（与 tier 正交，零字节影响，建议单发 commit）
+### 6.1 阶段零：先修既有 bug（与 tier 正交，零字节影响）—— **✅ 已完成（994bee1，2026-10-16）**
 
 | # | 文件:行 | 内容 |
 |---|---|---|
@@ -351,63 +376,70 @@ tier ≠ `balanced` 时这条**被 tier 接管**——用户显式给了值，�
 | Z4 | `README.md` L394 | 「语义同 `vidcrop_hwaccel.py`」→ `vidcrop_cpu_v2.py`（hwaccel 表里自称同 hwaccel 的复制残留） |
 | Z5 | `README.md` L88-93 | 功能矩阵补 `--nvenc-tune` / `--nvenc-multipass` 行（加 tier 后更必要） |
 
-### 6.15 阶段零点五：本地 CPU 的 D2 预跑（**立刻开始，可与阶段一并行**）
+> 阶段零已完成：Z1（hwaccel 两处 `try/except ValueError`）、Z2（sdr 补 `uhq`+`h264_nvenc` 硬报错）、Z3~Z5（README 三处）。行进记录见 §12.7。
+
+### 6.15 阶段零点五：本地 CPU 的 D2 预跑 —— **✅ 已完成（证据见 §12.7）**
 
 你的 Q3 回答要求「保持 D1+D2，且立刻把 svtav1 / x265 的 D2 部分先在本地跑一轮实测」。这一小步**不依赖任何 tier 代码**（纯 ffmpeg A/B），所以它**不用等阶段一**，现在就能开跑：
 
 | 组合 | A 侧 | B 侧 | 在哪跑 |
 |---|---|---|---|
 | x265 | `libx265 -preset slow` | `libx265 -preset slower` | 本机 |
-| svtav1 | `libsvtav1 -preset 6` | `libsvtav1 -preset 4` | 本机 |
+| svtav1 | `libsvtav1 -preset 6` | `libsvtav1 -preset 4` | 本机（**R1 注**：权威档值对已改为 `5`↔`3`，原理证据复用；CPU 环按新对重跑） |
 
 - 素材与口径**直接沿用 Part B §B2**（17 条 eqq 池、锚点 18/21/24/27/30、`n_subsample=1`、720p prep）⇒ 结果与后续三环可直接拼接，不用重跑。
 - 指标：**等 VMAF 码率比** + **Δ耗时**（定义见 Part B §B3）。
 - 产物先落 `Accessory/calib/eqq_evidence/q3_bench/cpu_early/`，回归后并入 Part B §B6 的正式目录。
 - **它的唯一目的是给 §12.3 的 Q3=D1+D2 决策兜底**：若判定 D2 不划算，回退动作只是改 `TIER_PROFILES` 常量，不动任何代码（这是当初选「留在常量层」的原因）。
+- **R1 结论（已完成）**：D2 原理成立 —— svtav1 `6→4` **+19.6%** 码率收益、**1.68×** CPU；x265 `slow→slower` **+10.5%**、**4.67×** CPU（详见 §12.7/§13.11）。Q3=D1+D2 保留；CPU 环按 §13.10R 的终值对（svtav1 `5↔3`）复核。
 
-### 6.2 阶段一：**把编码全部做完**（Q6：先完成编码，标定后置）
+### 6.2 阶段一：**把编码全部做完**（Q6：先完成编码，标定后置；R1：与 harness 标定可并行）
+
+> **R1 时序（H3）**：标定不再等阶段一——harness 的 `--preset-override` **已落地**（2026-10-17）⇒ CPU→T4→L40 标定环即可开跑（§6.3~6.6）；阶段一的 CLI 实现与之并行，**CLI 端到端（dry-run/告警/窗口/指纹）是阶段一的 DoD**，不是标定的前置条件。
 
 标定点一律先空着由数据结构自带「未标定」，不在这一阶段做任何实测。
 
 | 文件 | 改动 |
 |---|---|
-| `convert_crf.py` | 新增 `_EQQUAL_TIER_OVERRIDE`（照抄 `_EQQUAL_SPEED_OVERRIDE` 范式，L224-226）+ `set_quality_tier()` + `get_quality_map()` 按 tier 查、缺则回退 + 回调告知；新增 `CALIB_FINGERPRINT` 常量。**初值全空** ⇒ 非 balanced 自动落到"未标定回退"，不靠人记 |
-| `vidcrop_hwaccel.py` | ① 新增 `--quality-tier`（`default='balanced'`，choices 用独立常量）+ `--strict-quality` / `--strict-calib`，并让 `--fallback-policy strict` 隐含打开后两者（§5.3）；② `TIER_PROFILES` 常量表（含 `ref_crf` / `ref_window`，§4.1）；③ **preset 已是惰性**（L5938-5940 注释：`args.preset` 保持 `None`）⇒ 只需把 `strategy_preset()`（L1365-1388）里的默认改为 tier 感知；④ lookahead 默认值插在 `apply_rc_control_args` 的 `if lookahead is not None`（L3700）**之前**；⑤ tune/multipass/aq 按 tier 基底；⑥ `_tune_tries`（L5103-5107 旁）；⑦ **质量锚点/窗口**：给 `_resolve_quality_params`（L3394 起）加 `tier: str = 'balanced'` 参数并在**函数顶部**做 §4.4 的四步流程——它是唯一同时知道 codec、tier 与三类质量入口的地方；**constqp 反函数也在本阶段做**（Q6），放在 `_QP_AFFINE_QUALITY`（L1512）旁边，并与正向 `to_constqp_qp` 做往返一致性断言；⑧ 概览 L6147-6157 补 `tier=` / `质量:` / `tune=` / `multipass=` / `AQ`（**向 sdr L4337 的措辞看齐**）+ 窗口告警 + 指纹告警 |
-| `vidcrop_cpu_v2.py` | 同上，但：① **必须先在 `main()` 里捕获 `preset_explicit = args.preset is not None` 快照**（L4408-4413 是急切填充，填完就分不出显式与否）——这是 hwaccel 不需要、cpu_v2/sdr 必需的关键一步；② **不加 `--nvenc-aq`**；③ **auto/tier 不派生 `uhq`**（§8-2）；④ 无 `_tune_tries`；⑤ **不提供 `--strict-quality` / `--strict-calib`，也无 `--fallback-policy`**（§8-5）⇒ 两道判定恒为告警 |
-| `convert_sdr_to_hdr.py` | 同上（同样需要 `preset_explicit` 快照，L3882-3884；另有 dataclass 默认 L2281 需一并处理）；ladder L4713-4722 插「去 tune 重试」一级 + 同步更新 docstring L4702-4708 的阶梯编号 |
-| 三份 help / README / `memory/project_rate_control_params.md` | 写清：tier = 策略基底 × 质量锚点/窗口 × 标定指纹，**codec 是输入不是成员**（§4.2）；质量数值**在档内**（§4.4）以及「契约接管」那一条；`libx264` 恒 medium（§2.5）；非 balanced 未标定（§2.4）；cpu_v2 四条有意不对称（§8） |
+| `convert_crf.py` | 新增 `_EQQUAL_TIER_OVERRIDE`（照抄 `_EQQUAL_SPEED_OVERRIDE` 范式；**R1-H4：非 `balanced` 键一律空 dict**——speed/preset 值属于 `TIER_PROFILES`/§13.10R，不进系数表）+ `set_quality_tier()` + `get_quality_map()`（按 tier 查、缺则回退 `QUALITY_MAP` 本体）+ 回调告知；新增 `CALIB_FINGERPRINT`（**M4**：按「最终生效编码器（含降级）× strategy」定义）。**初值全空** ⇒ 非 balanced 自动落"未标定回退"，不靠人记 |
+| `vidcrop_hwaccel.py` | ① 新增 `--quality-tier`（`default='balanced'`，choices 用独立常量）+ `--strict-quality` / `--strict-calib`，并让 `--fallback-policy strict` 隐含打开后两者（§5.3）；② `TIER_PROFILES` 常量表（含 `ref_crf` / `ref_window`；**preset 列 = §13.10R**，§4.1）；③ **preset 已是惰性**（`args.preset` 保持 `None`）⇒ 只需把 `strategy_preset()` 里的默认改为 tier 感知；④ lookahead 默认值插在 `apply_rc_control_args` 的 `if lookahead is not None` **之前**（**M2**：过滤按「最终生效编码器 × strategy」，aq/multipass/lookahead/tune 一并纳入）；⑤ tune/multipass/aq 按 tier 基底（**M3**：`'auto'` 必须编码为 `None`）；⑥ `_tune_tries = [派生值, None]`（仅派生值启用）；⑦ **质量锚点/窗口**：给 `_resolve_quality_params` 加 `tier: str = 'balanced'` 参数并在**函数顶部**做 §4.4 的四步流程（**M1**：钳到 0 也走无损哨兵；**M6**：`--cq` 按 `_src` 口径归一；**M8**：`--qp` 用既有 `from_constqp_qp`，**无需新反函数**）；⑧ 概览补 `tier=` / `质量:` / `tune=` / `multipass=` / `AQ`（向 sdr 措辞看齐）+ 窗口告警 + 指纹告警 |
+| `vidcrop_cpu_v2.py` | 同上，但：① **必须先在 `main()` 里捕获 `preset_explicit = args.preset is not None` 快照**（急切填充后分不出显式与否）——hwaccel 不需要、cpu_v2/sdr 必需；② **不加 `--nvenc-aq`**；③ **auto/tier 不派生 `uhq`**（§8-2）；④ 无 `_tune_tries`；⑤ **不提供 `--strict-quality` / `--strict-calib`，也无 `--fallback-policy`**（§8-5）⇒ 两道判定恒为告警 |
+| `convert_sdr_to_hdr.py` | 同上（同样需要 `preset_explicit` 快照；另有 dataclass 默认需一并处理）；ladder 插「去 tune 重试」一级 + 同步更新 docstring 的阶梯编号 |
+| 三份 help / README / `memory/project_rate_control_params.md` | 写清：tier = 策略基底 × 质量锚点/窗口 × 标定指纹，**codec 是输入不是成员**（§4.2）；质量数值**在档内**（§4.4）以及「契约接管（**全档，含 balanced**）」那一条；默认质量值轨迹 **`21 → 24`（阶段一）→ `20`（翻档）**（R1-7）；非 balanced 未标定（§2.4）；cpu_v2 四条有意不对称（§8） |
 
-**阶段一的额外任务（默认档改成 `quality` 之后新增）：**
+**阶段一的额外任务（R1 重排）：**
 
-- **baseline 迁移**：把现有四份 `Accessory/test/baseline/*.txt` 与 `dump_cmd_*.sh` 里的默认调用**全部显式加上 `--quality-tier balanced`** ⇒ 旧文件成为 `balanced` 档的黄金文件；再**另建一份 default（=`quality`）新基线**。这一步不改语义，只把"旧默认"钉成"balanced 档"（详见 §7）。
-- **`DEFAULT_REF` 语义迁移**（§2.5）：常量保留为单一来源（L388），取值改为引用默认档锚点 `TIER_PROFILES[DEFAULT_TIER]['ref_crf']`（=20），不要两处写死。
+- **baseline 改造（读法 A）**：旧 inventory（`dump_cmd_*.sh`）里的默认调用**全部显式钉上 `--quality-tier balanced`**（把"旧默认"转成"balanced 档"用例，避免翻默认档时二次漂移）＋ **四份 golden 全量重录**（旧字节作废：balanced 现在也钳制、裸跑锚点 21→24）；重录 diff 逐条人工审阅后提交；翻默认档时另建 default（=`quality`）新基线（§7）。
+- **`DEFAULT_REF` 语义迁移**（§2.5 / R1-7）：常量保留为单一来源，取值改为引用默认档锚点 `TIER_PROFILES[DEFAULT_TIER]['ref_crf']`（阶段一 = `balanced` 的 **24**；翻档后 = `quality` 的 **20**），不要两处写死。
 
-**阶段一的完成判据**：
-1. 迁移后的四道孪生门**逐 token 全绿**（旧字节作为 `balanced` 档被完整保留）；
-2. 新建的 default 基线与 `--dry-run` 人工核对一致；
-3. 八档均可 `--dry-run` 核对；§4.4 四个样例全部成立；
-4. `lossless` 档确认落到 `-rc constqp -qp 0 -b:v 0`（复用既有守卫，无新增路径）。
+**阶段一的完成判据（R1 重写）：**
+1. 重录后的四道孪生门**逐 token 全绿**（新 goldens = 阶段一语义下的平衡档黄金文件；重录 diff 有人工审阅记录）；
+2. 默认路径 `--dry-run` 与 §4.1/§4.4 表格人工核对一致（含 `balanced` 钳制样例）；
+3. 八档均可 `--dry-run` 核对；§4.4 样例表（五个）全部成立；
+4. `lossless` 档确认落到 `-rc constqp -qp 0 -b:v 0`（复用既有守卫；**钳到 0 的路径也走哨兵**，M1）；
+5. `TIER_PROFILES` 结构自检（八档覆盖 `[0,51]` + 互斥 + preset 合法性）在 `verify_quality_mapping.py` 通过。
 
 > 阶段一之后 `_EQQUAL_TIER_OVERRIDE` 仍全空 ⇒ 非 balanced 档全部处于「未标定」告警状态。**这是预期状态，不是缺陷**——没有实测数据之前，宁可显式告知也不假装标定过。
 
-### 6.3～6.6 后续阶段：先出方案，再按 **CPU → T4 → L40** 循序渐进实测补标定（Q6 / Q7）
+### 6.3～6.6 标定环（R1 重排：**harness 先行，与阶段一并行**）：按 **CPU → T4 → L40** 循序渐进实测补标定（Q7）
 
-严格按「软→硬」推进：每一环都复用上一环确认过的素材池、锚点与口径，只有**被测编码器 / 机器**在变，这样能把手滑/口径漂移隔离出来。
+严格按「软→硬」推进：每一环都复用上一环确认过的素材池、锚点与口径，只有**被测编码器 / 机器**在变，这样能把手滑/口径漂移隔离出来。**R1 起主测走 harness**（`Accessory/probe/calibrate_equal_quality.py`），不依赖生产 CLI（H3）；生产 CLI 的端到端验证是阶段一的 DoD。
 
-| 阶段 | 内容 | 依赖上一阶段的什么 |
+| 阶段 | 内容 | 前置 / 依赖（R1 更新） |
 |---|---|---|
-| **阶段二** | **把《`--quality-tier` 全流程实测方案》落盘为独立文档**（先立方案再动手）——内容即本文档的 **Part B**，目标路径 `Plan/VidUtils_quality-tier全流程实测方案_v1_20261015.md` | — |
-| **阶段三** | **CPU 环**（本机可做，无需 GPU）：libx265 / libvpx-vp9 / libaom-av1 / libsvtav1 / librav1e 的 `quality` / `archive` / `preview` 三档实测 | 阶段二方案；验证 harness 与产物格式 |
-| **阶段四** | **T4 环**：`h264_nvenc` / `hevc_nvenc` 三档实测 | 阶段三的 harness + 产物格式已定型 |
-| **阶段五** | **L40 环**：`av1_nvenc` 三档实测（`av1` 走 `--expect-av1` fail-fast；注意 Turing 代无 AV1 编码单元，`Accessory/probe/verify_nvenc_quality_gpu.py:27` 已记此约束） | 阶段四的 NVENC 流程已跑通 |
+| **阶段二（已落盘）** | 《`--quality-tier` 全流程实测方案》已落盘为独立文档：`Plan/VidUtils_quality-tier全流程实测方案_v1_20261015.md`（= Part B） | — |
+| **阶段三** | **CPU 环**（本机可做，无需 GPU）：`libx264` / `libx265` / `libvpx-vp9` / `libaom-av1` / `libsvtav1` / `librav1e` 各档实测（`quality`/`archive` 优先）；per-tier `_EQQUAL_TIER_OVERRIDE` 落表 | **✅ `--preset-override` 已落地（2026-10-17，R1 第一块砖）；`--tag` 已有** |
+| **阶段四** | **T4 环**：`h264_nvenc` / `hevc_nvenc` 各档实测 + `p5/p6/p7` 可用性 + `_NVENC_PRESET_RETRY` 触发率 | 阶段三的 harness 与产物格式定型 |
+| **阶段五** | **L40 环**：`av1_nvenc` 实测（`av1` 走 `--expect-av1` fail-fast；注意 Turing 代无 AV1 编码单元，`Accessory/probe/verify_nvenc_quality_gpu.py` 已记此约束） | 阶段四的 NVENC 流程已跑通 |
 
 每一环的共同要求：
 
-- harness `Accessory/probe/calibrate_equal_quality.py` 加 `--preset-override`（替换 `BASE_LOCK` L94-107 里的 medium/8）+ `--tag <tier>`；产物落 `Accessory/calib/eqq_evidence/<tier>_*/`。
-- 门禁先过 **LOO**（`loo_equal_quality.py` L45-48：软编 ≤5.9、rav1e ≤7.5；`GATE_ANCHORS=(0,27)` L57），**不要**只看 `verify_equal_quality.py` 的 `TOL_VMAF=1.0`（L31）——README L55-60 自己写明它是 in-sample 回归门，「不能为表值背书」。
-- **NVENC 环必须同步重标 `_QP_AFFINE_QUALITY`**（hwaccel L1512 / cpu_v2 L1142 / sdr L484）——它是 CR-4 跨仓契约、⑨ 组会断言逐条相等，只改 QUALITY_MAP 不改它会红。
-- 每落一档或一个编码器，填 `_EQQUAL_TIER_OVERRIDE[tier]` + 翻 `CALIB_FINGERPRINT[tier]['calibrated']` + 写 `evidence` ⇒ 对应告警自动消失。换 ffmpeg 构建/驱动须重标（`convert_crf.py` L200/L214 的指纹已如此要求）。
-- **本机无法验 NVENC**：`verify_equal_quality.py` L43-47 在无 GPU 机器上 NVENC 三档全 SKIP ⇒ 阶段四/五必须在有卡机器上补跑，不能靠本机 CI 假装通过。
+- harness `Accessory/probe/calibrate_equal_quality.py` 的 `--preset-override` ✅ **已落地**（2026-10-17；替换 `BASE_LOCK` 里的 medium/8，按 §13.10R 的档值传入）+ `--tag <tier>`（已有）；产物落 `Accessory/calib/eqq_evidence/<tier>_*/`（§B6）。**本环现已解锁，可直接开跑**。
+- 门禁先过 **LOO**（`loo_equal_quality.py`：软编 ≤5.9、rav1e ≤7.5；`GATE_ANCHORS=(0,27)`），**不要**只看 `verify_equal_quality.py` 的 `TOL_VMAF=1.0`——README 自己写明它是 in-sample 回归门，「不能为表值背书」。
+- **锚点扩展（R1-M7）**：`ANCHOR_CRFS=[18,21,24,27,30]` 只覆盖中段；`draft(36)/test(45)`、`near-lossless(6)/lossless(0)` 需扩锚（建议 +`[0,6,33,39,45]`），否则这些档**要么不标定（打「未标定」）、要么明确 LOO 放宽**——二选一写进报告，不默认。
+- **NVENC 环必须同步重标 `_QP_AFFINE_QUALITY`**——CR-4 跨仓契约，⑨ 组断言逐条相等，只改 `QUALITY_MAP` 不改它会红。
+- 每落一档或一个编码器，填 `_EQQUAL_TIER_OVERRIDE[tier]` + 翻 `CALIB_FINGERPRINT[tier]['calibrated']`（**按生效编码器 × strategy，M4**）+ 写 `evidence` ⇒ 对应告警自动消失。换 ffmpeg 构建/驱动须重标。
+- **本机无法验 NVENC**：`verify_equal_quality.py` 在无 GPU 机器上 NVENC 三档全 SKIP ⇒ 阶段四/五必须在有卡机器上补跑，不能靠本机 CI 假装通过。
 
 ---
 
@@ -415,37 +447,37 @@ tier ≠ `balanced` 时这条**被 tier 接管**——用户显式给了值，�
 
 | 测试 | 改动 |
 |---|---|
-| **四道孪生门**（`dump_cmd_default.sh` / `dump_filter_chains.sh` / `dump_enc_options.sh` / `dump_cmd_full.sh`） | **默认档改为 `quality` 后旧 baseline 不能直接沿用**：把旧 inventory 里的默认调用**全部显式加 `--quality-tier balanced`** ⇒ 旧字节成为 `balanced` 档的黄金文件、旧 baseline **一行不改仍全绿**；另建一份 default(=`quality`) 新基线。**这两份一起构成阶段一的总闸** |
-| 同上 | 新增 `--quality-tier lossless` 一格：确认落到 `-rc constqp -qp 0 -b:v 0`，且不经过窗口钳制 |
-| `Accessory/test/baseline/enc_before.txt` L12 | **不许变**（唯一活的 NVENC 格）。cpu_v2 不派生 uhq + balanced 逐字相同 ⇒ 自动守住 |
-| `verify_quality_mapping.py` | **新增窗口钳制组**：`archive` + `--crf 50`（libx265）→ 下发 `-crf 17` 且带告警；`preview` + `--crf-ref 30` → **通过且不告警**（负向用例：窗内的显式值不受打扰）；`--qp 0` 无损哨兵**不被钳**；constqp 反函数与正向 `to_constqp_qp` 往返一致；八档 `ref_crf` 在无质量参数时正确注入；**新增对 `TIER_PROFILES` 的结构自检**：八档区间完整覆盖 `[0,51]` 且互不相交（改表红线由机器把守） |
+| **四道孪生门**（`dump_cmd_default.sh` / `dump_filter_chains.sh` / `dump_enc_options.sh` / `dump_cmd_full.sh`） | **R1（读法 A）**：旧 baseline 的「一行不改」不再成立。做法：旧 inventory 里的默认调用**全部显式加 `--quality-tier balanced`**（钉档、防翻默认档二次漂移）；**四份 golden 全量重录**，重录 diff 逐条人工审阅后提交；翻默认档时（§12.5 第二步）另建 default 新基线。**这两份一起构成阶段一的总闸** |
+| 同上 | 新增 `--quality-tier lossless` 一格：确认落到 `-rc constqp -qp 0 -b:v 0`；新增 `--quality-tier lossless --crf 5` 一格（**R1-M1**：归一后钳到 0，也必须走哨兵、不得当普通值下发） |
+| `Accessory/test/baseline/enc_before.txt` L12 | **R1：到期重录**（唯一活的 NVENC 格；`-cq 20` 归一 ≈16.05，越出 balanced 窗 `[23,26]` ⇒ 会钳到 23 并在 §4.4 语义下带走告警）。**重录 diff 必须逐条人工审阅**；cpu_v2 不派生 uhq 的承诺不变（那是另一维度） |
+| `verify_quality_mapping.py` | **新增窗口钳制组**：`archive` + `--crf 50`（libx265）→ 下发 `-crf 17` 且带告警；**`balanced` + `--crf 50` → 钳到 `-crf 26` 且带告警（R1：balanced 不豁免）**；`preview` + `--crf-ref 30` → **通过且不告警**（负向用例：窗内的显式值不受打扰）；`--qp 0` 无损哨兵**不被钳**、**M1**：钳到 0 走哨兵；**M6**：`--codec libx264 --cq 23` 与降级换算同口径；**M8**：`from_constqp_qp` 与 `to_constqp_qp` 往返一致；八档 `ref_crf` 在无质量参数时正确注入；**新增对 `TIER_PROFILES` 的结构自检**：八档区间完整覆盖 `[0,51]` 且互不相交（改表红线由机器把守） |
 | `verify_cli_parsing.py` | `--quality-tier bogus` 被 choices 拒绝；`--quality-tier archive --crf 50` 走真 CLI subprocess，断言 rc 与**报错/告警首行**三脚本逐字相等；`--strict-quality`（以及隐含打开它的 `--fallback-policy strict`）下同一组合 exit 2 |
-| `verify_rc_lookahead.py` ⑩ F（L311-336） | 现有「默认不下发 `-tune`/`-multipass`」一条改为断言 `tier=balanced`；新增：各档 preset/lookahead/tune/multipass/aq 基底值；显式覆盖 tier 的行为；`preview` 在非 NVENC 上静默不告警；cpu_v2 的 `quality` 档**不下发 tune**（有意不对称，负向对照） |
+| `verify_rc_lookahead.py` ⑩ F | 现有「默认不下发 `-tune`/`-multipass`」一条改为断言 `tier=balanced`；新增：各档 preset/lookahead/tune/multipass/aq 基底值（preset 列 = §13.10R）；显式覆盖 tier 的行为；`preview` 在非 NVENC 上静默不告警；cpu_v2 的 `quality` 档**不下发 tune**（有意不对称，负向对照） |
 | `verify_rc_lookahead.py` ⑩ E（L303-309） | 现有 hwaccel aq；补 sdr；cpu_v2 断言「无该参数、不进命令」 |
 | `verify_overview_lockstep.py` | `fields()`+`field_diff()` 比概览字段**序列**（顺序算差异）⇒ tier 行 + 指纹告警文案三脚本必须逐字一致、非 NVENC 不出现。沿用其已有 `--selftest`（4 格：判词装置正/负/空）给新行加负向格 |
 | `verify_equal_quality.py` | 不碰 `-tune`，只吃 QUALITY_MAP ⇒ tier 一旦改变活动表，这里是回归面。**注意 L43-47 NVENC 三档在本机（无 GPU）全 SKIP** ⇒ 本机跑不出 GPU 侧的回归，阶段四（T4）/ 阶段五（L40）必须在有卡机器上补跑 |
 | `check_readme_refs.sh` | 新增任何 verify/test 文件必须同步 README（漏登 exit 1，空集 exit 2） |
 | `Plan/ffmpeg_nvenc_knowledge.md` §5.2 | 「默认路径保持裸 `-rc vbr -cq N -b:v 0 -preset p4`」改写为 tier × 默认矩阵，并写明 QUALITY_MAP 的标定点 = `balanced` |
-| `memory/project_rate_control_params.md` + `MEMORY.md` L203 | L203 现在写着「不引入 `-tune hq`/`-multipass fullres」⇒ 必须同步 |
+| `memory/project_rate_control_params.md` + `MEMORY.md` L203 | L203 现在写着「不引入 `-tune hq`/`-multipass fullres」⇒ 必须同步；**默认质量值轨迹 `21 → 24（阶段一）→ 20（翻档）`（R1-7）** 一并写入 |
 
 > **关于 SABOTAGE**：v2 §11 的 DoD 写「⑩ F 组含 SABOTAGE 负向对照」，但 verify 目录**没有** SABOTAGE 机制（只有 `dump_cmd_full.sh:65` 有）。本版改为沿用 `verify_overview_lockstep.py` 已有的 `--selftest` 形态，成本更低且已有先例。
 
 ---
 
-## 8. 不对称登记（6 项：前 5 项**有意**保留，第 6 项是要修的 bug；全部写进 `apply_rc_control_args` 常量区注释 + README 新小节 + 同一条 memory）
+## 8. 不对称登记（6 项：前 5 项**有意**保留；第 6 项 **已由阶段零 Z1 修复**（994bee1）；全部写进 `apply_rc_control_args` 常量区注释 + README 新小节 + 同一条 memory）
 
 1. **cpu_v2 不收 `--nvenc-aq`** — README L92 v2 列保持 ❌。理由：纯 CPU 孪生脚本，该轴只在 `--codec *_nvenc` 透传路上有意义。需要的人走 `--extra-args -- -spatial-aq 1 -temporal-aq 1`。
-2. **cpu_v2 的 tier 不派生 `uhq`** — 理由不是"无探测"（它有），而是**无 fallback ladder**（L867/L1287/L1495）⇒ 派生值踩雷只能硬失败；且保住 `enc_before.txt` L12。措辞沿用 `--scale-algo cuda-*` 的那套（README L1562「v2 **拒绝** cuda-*，这是有意的两脚本不对称」+ cpu_v2 L2837-2844「这份串**故意不列 cuda**」）。
+2. **cpu_v2 的 tier 不派生 `uhq`** — 理由不是"无探测"（它有），而是**无 fallback ladder**（L867/L1287/L1495）⇒ 派生值踩雷只能硬失败。措辞沿用 `--scale-algo cuda-*` 的那套（README L1562「v2 **拒绝** cuda-*，这是有意的两脚本不对称」+ cpu_v2 L2837-2844「这份串**故意不列 cuda**」）。
 3. **hwaccel 的 `--nvenc-aq` 走策略层（L4467）、不走 `apply_rc_control_args`**（sdr 走后者，签名有 `aq`）— 历史成因，tier 的 aq 项需两个不同插点，登记防下一轮审查报"漏移植"。
-4. **libx264 在所有档恒 `medium`**（§2.5）— 这是"基准轴不动"的硬约束，不是遗漏。
+4. **libx264 跟随 tier**（R1 定案，§13.2）— 不再是「恒 `medium`」；每档一套标定表（按档重标），`balanced`=medium 的既有行仍成立。登记为**有意成本**而非遗漏。
 5. **cpu_v2 不提供 `--strict-quality` / `--strict-calib`，也没有 `--fallback-policy`**（§5.3）⇒ 它的两道 tier 判定**恒为告警**，永不升级为 `exit 2`。理由：cpu_v2 是 hwaccel 的 CPU 简板，不是它的镜像，不必强行对称（与既有的「cpu_v2 没有 fallback ladder」同源）。
-6. ⚠ **非有意**：hwaccel 的 `build_ffmpeg_cmd` 裸调导致 `--fallback-policy strict` 下 traceback，而 sdr 的 `build_plan` 已有 try/except（L4726-4733）、cpu_v2 无 strict 分支 ⇒ 三向不一致。登记在此以便将来审查时一眼看出「这是待修 bug、不是设计差异」；阶段零 Z1 修掉。
+6. ⚠ **非有意**：hwaccel 的 `build_ffmpeg_cmd` 裸调导致 `--fallback-policy strict` 下 traceback，而 sdr 的 `build_plan` 已有 try/except（L4726-4733）、cpu_v2 无 strict 分支 ⇒ 三向不一致。**已由阶段零 Z1 修复（994bee1）**，保留登记供审查对照。
 
 ---
 
 ## 9. 明确不改
 
-`DEFAULT_REF` 作为**常量名与单一来源**保留（L388），但取值随默认档迁移为 20（不再写死 21）；`NVENC_TO_X264_PRESET` / `X264_TO_NVENC_PRESET` / `X264_TO_SVTAV1_PRESET` / `NVENC_TO_SVTAV1_PRESET` 的取值（CR-1）；`_NVENC_DEFAULT_RC`（`-rc vbr`，CR-2）；`SIZE_MAP` / `QUALITY_MAP` 的现有行（非 balanced 档只**新增** `_EQQUAL_TIER_OVERRIDE`，不覆盖）；`_QP_AFFINE_QUALITY` 的现有值（要到阶段四 / 阶段五的 NVENC 环才按档重标）；`_NVENC_TUNE_VALUES` / `_NVENC_MULTIPASS_VALUES` / `_NVENC_UHQ_CODECS` 本身（**只新建 `__CHOICES` 派生常量**，§0-5）；现有五条互斥规则（§5.2）；`--rc-mode` / `--bitrate` 不进 tier（§4.2）；**`balanced` 档下 `convert_crf.py` L323-324「显式值原样下发不换算」的契约一字不改**（§4.4）——这正是把旧 baseline 钉成 `balanced` 档能保住旧字节的根本原因；既有 `_v == 0` 无损守卫不改（`lossless` 档复用它）。
+`DEFAULT_REF` 作为**常量名与单一来源**保留，取值随默认档迁移（阶段一 `24` → 翻档后 `20`；不再写死 21，**R1-7**）；`NVENC_TO_X264_PRESET` / `X264_TO_NVENC_PRESET` / `X264_TO_SVTAV1_PRESET` / `NVENC_TO_SVTAV1_PRESET` 的取值（CR-1）；`_NVENC_DEFAULT_RC`（`-rc vbr`，CR-2）；`SIZE_MAP` / `QUALITY_MAP` 的现有行（非 balanced 档只**新增** `_EQQUAL_TIER_OVERRIDE`，不覆盖）；`_QP_AFFINE_QUALITY` 的现有值（要到阶段四 / 阶段五的 NVENC 环才按档重标）；`_NVENC_TUNE_VALUES` / `_NVENC_MULTIPASS_VALUES` / `_NVENC_UHQ_CODECS` 本身（**只新建 `__CHOICES` 派生常量**，§0-5）；现有五条互斥规则（§5.2）；`--rc-mode` / `--bitrate` 不进 tier（§4.2）；**R1 改写两处**：① `convert_crf.py` 的「显式值原样下发不换算」契约**在档内被接管（全档，含 `balanced`）**（§4.4）——实现时同步改写为「tier 协调前不换算」，旧 baseline 已改为全量重录；② `_EQQUAL_TIER_OVERRIDE` 非 balanced 键**初始必须为空**（H4）。既有 `_v == 0` 无损守卫不改（`lossless` 档复用它；**M1**：钳到 0 也走它）。
 
 ---
 
@@ -456,26 +488,29 @@ tier ≠ `balanced` 时这条**被 tier 接管**——用户显式给了值，�
 | `uhq` 在 hevc/av1 上的收益**零实测** | 阶段一不做 `auto→uhq`，只在 `quality`/`archive` 里；`--strict-calib` 让用户显式承担未标定；要到阶段四（T4）/ 阶段五（L40）实测出数据后，才决定是否把某档提升为默认 |
 | 旧驱动不认 `uhq`（rc≠0） | 探测（§4.3）+ `_tune_tries` 参数级降档，仅 tier 派生值启用 |
 | 4K 下 `uhq` 显存/耗时 | 概览 + help 提示；`--nvenc-tune hq` 是本档内的回退开关 |
-| cpu_v2 无兜底却拿到激进组合 | 有意不对称 8-2 + 阶段一的 `preset_explicit` 快照保证纯默认路径不变 |
-| 重标定工作量爆炸（9 行 × 3 档 × GPU/CPU） | §2.5 硬约束把 libx264 钉死 ⇒ 少一个大头；`_EQQUAL_TIER_OVERRIDE` 缺值 ⇒ 自动回退 balanced 表并告警，未标定由数据结构自带，允许分档、分编码器逐步落地 |
-| `--quality-tier balanced` 破坏既有基线 | 四道孪生门 + `enc_before.txt` 守着；这是唯一必须全绿的硬门 |
+| cpu_v2 无兜底却拿到激进组合 | 有意不对称 8-2 + `preset_explicit` 快照保证「用户显式给的 preset/轴」不被 tier 覆盖（**R1 注意**：裸跑**质量锚点** 21→24 属既定变更，不在该快照的保证范围） |
+| 重标定工作量爆炸（多编码器 × 8 档 × GPU/CPU；**R1：libx264 也随档 ⇒ 加一列**） | `_EQQUAL_TIER_OVERRIDE` 缺值 ⇒ 自动回退 balanced 表并告警，未标定由数据结构自带，允许分档、分编码器逐步落地（balanced 已标定 = 安全网） |
+| `--quality-tier balanced` 破坏既有基线 | **R1 已接受此破坏**：改为「旧 inventory 钉档 + 四份 golden 全量重录 + 人工审阅 diff」（§7/§11）；重录后四道门必须全绿 |
 | **钳制让用户困惑**（"我明明给了 50"） | 告警必须写出「钳到多少 + 目标编码器实际下发多少 + 想低质量该用哪个档」三段信息，不能只说"已钳制"；概览与 `--dry-run` 同文案 |
-| **契约接管**（§4.4）被当成 bug 报回来 | 三份 help 第一句就写「非 balanced 档会对显式质量值做钳制与按档换算」；README 参数表 + memory 同步；`balanced` 档完全不变 ⇒ 老用户不指定档位时零感知 |
+| **契约接管**（§4.4）被当成 bug 报回来 | 三份 help 第一句就写「**全档**（含 `balanced`）会对显式质量值做钳制与按档换算；默认质量值轨迹 `21 → 24 → 20`」；README 参数表 + memory 同步；**R1 起不存在"零感知"路径**（已登记为主动接受的代价） |
 | constqp 反函数引错刻度（`_QP_AFFINE_QUALITY` vs `_QP_SCALE`×3） | 正向函数在哪就用哪张表的反函数（`quality` 口径用仿射、`size` 口径用 ×3）；往返一致性进 `verify_quality_mapping.py` |
-| **跨仓契约 CR-1 的「默认档」条款被改**（p4→p6 / medium→slow / 8→6） | Video_Enhancement 侧已按 p4↔medium↔8 对齐，**必须与 VE 同步重议**；VE 未确认前两仓默认命令会不一致。建议**分两步提交**：先只加 tier 能力（默认仍 `balanced`），VE 确认后再翻默认值 |
-| **默认路径变成未标定**（`quality` 档还没有 `_EQQUAL_TIER_OVERRIDE`）⇒ 默认跑起来就带告警 | 这是诚实的代价（§2.4 / Part B §B4），不是 bug；但必须在三份 help 与 README 首屏讲清，否则用户会以为工具坏了；§B4 完成后告警自动消失 |
+| **跨仓契约 CR-1 的「默认档」条款被改**（**翻档后** p4→p5 / medium→slow / 8→5；libx264 亦随档） | Video_Enhancement 侧已按 p4↔medium↔8 对齐，**必须与 VE 同步重议**（R1 时序：§13.15 R1-3）。**分两步提交**：阶段一先只加 tier 能力（默认仍 `balanced`，CR-1 默认条款不动），VE 确认后再翻默认值 |
+| **翻档后默认路径变成未标定**（`quality` 档还没有 `_EQQUAL_TIER_OVERRIDE`）⇒ 默认跑起来就带告警（阶段一 default=balanced 已标定，无此问题） | 这是诚实的代价（§2.4 / Part B §B4），不是 bug；但必须在三份 help 与 README 首屏讲清，否则用户会以为工具坏了；§B4 完成后告警自动消失 |
 | **八档 × (8~9 编码器) 标定工作量爆炸** | `_EQQUAL_TIER_OVERRIDE` 缺键即自动回退 `balanced` 表 ⇒ 允许分档、分编码器逐步落地；`lossless`/`near-lossless`/`draft`/`test` 四档**优先级最低**，且它们的 LOO 门禁应单独放宽（超低画质区 VMAF 反查条件数本来就差，见 §B7「LOO 超门禁禁止落表」） |
 | 日后改表把区间改成有缝或有重叠 | `verify_quality_mapping.py` 的结构自检（覆盖性 + 互斥性）直接对 `TIER_PROFILES` 断言 |
+| **极限档锚点超出 B2 锚点区**（R1-M7） | `draft`36 / `test`45 / `near-lossless`6 / `lossless`0 在 `[18,30]` 之外 ⇒ 先定扩锚（建议 +`0/6/33/39/45`）；若不扩，则这四档「不标定、LOO 放宽」并写入报告（§6.3~6.6 / Part B B2） |
+| **`TIER_PROFILES` 单源漂移**（代码常量 ↔ §4.1/§13.10R ↔ `preset_matrix.xlsx` 三处不一致） | `verify_quality_mapping.py` 结构自检 + 「改表三处同改」流程约束（§13.10R）；R1 已据此驳回四处旧值 |
+| **HDR 域 × tier 复合未做实测** | R1 已明确复合规则（§4.4.1）与**范围边界**：HDR 行标定不在本方案（属 SDR2HDR 工作流，见 Handoff 文档 + Part B 顶部范围声明） |
 
 ---
 
 ## 11. DoD
 
-- 旧四份 baseline 迁移成 `--quality-tier balanced` 的黄金文件后**一行 diff 都没有**；新建的 default(=`quality`) 基线可用；
-- 八档的 `--dry-run` 可按 §4.1 表格人工核对；非 balanced 且未标定时，三脚本打出**逐字一致**的告警；
-- §4.4 的四个样例（archive+crf50 钳制、quality+crf-ref26 钳制、balanced+crf50 一字不改、preview+crf-ref24 落重叠区不告警）在 `verify_quality_mapping.py` / `verify_cli_parsing.py` 里双向成立；`--qp 0` 无损哨兵不被钳；
+- 四份 baseline：旧 inventory 显式钉 `--quality-tier balanced`，**golden 全量重录 + diff 人工审阅通过**（R1 读法 A；不再要求旧字节 diff 为零）；翻默认档后 default 新基线另建可用；
+- 八档的 `--dry-run` 可按 §4.1 表格人工核对（preset 列 = §13.10R）；非 balanced 且未标定时，三脚本打出**逐字一致**的告警；
+- §4.4 的五个样例（archive+crf50 钳制、quality+crf-ref26 钳制、**balanced+crf50 钳制〔R1 新增〕**、preview+crf-ref30 通过、archive+crf-ref16 通过）在 `verify_quality_mapping.py` / `verify_cli_parsing.py` 里双向成立；`--qp 0` 与「钳到 0」都走无损哨兵（M1）；`--cq` 归一与 `_src` 同口径（M6）；`from_constqp_qp` 往返一致（M8）；
 - `--strict-quality` 在窗口越界时、`--strict-calib` 在标定失配时各自 exit 2，首行与对应告警同句；`--fallback-policy strict` 隐含同时打开两者；cpu_v2 无此三开关，恒为告警；
-- 现有五条互斥规则 + Z1~Z5 全部就位；README / `Plan/ffmpeg_nvenc_knowledge.md` / `memory/` 三处描述与代码一致。
+- 现有五条互斥规则 + Z1~Z5 全部就位（**Z 已完成，994bee1**）；`TIER_PROFILES` 结构自检通过；`_EQQUAL_TIER_OVERRIDE` 非 balanced 键为空、`CALIB_FINGERPRINT` 按生效编码器 × strategy（M4）；README / `Plan/ffmpeg_nvenc_knowledge.md` / `memory/` 三处描述与代码一致（含默认质量值轨迹 21→24→20）。
 
 ---
 
@@ -489,20 +524,20 @@ Q1~Q10 **全部已拍板**（12.1 / 12.2 / 12.3），12.5 的阻塞项也已拍�
 |---|---|---|
 | Q1 | **八档锚点（终值）**：`lossless 0` / `near-lossless 6` / `archive 16` / **`quality 20`（默认档）** / `balanced 24` / `preview 28` / `draft 36` / `test 45`。修订原因：原 `balanced` 锚点 21 落在 `quality` 窗口 (14,24) 内 ⇒ 语义自相矛盾；本次一并补齐高端（无损/近无损）与低端（draft/test） | §4.1 |
 | Q2 | **八档窗口（终值）**：`[0,0]` / `[1,12]` / **`[13,18]`** / `[19,22]` / `[23,26]` / `[27,32]` / `[33,40]` / `[41,51]` —— 在整数轴 `[0,51]` 上**完整覆盖、无缝、互不重叠**。判窗前 `round` 成整数 ⇒ 任意整数**必然属于且只属于一档**，「该改用哪个档」恒有唯一答案，且不需要"无归属"兜底分支 | §4.1 / §4.4 |
-| Q1b | **`--crf-ref` 默认 21 → 20**，对应默认档 `quality` | §4.1 |
-| Q4 | svtav1 preset 沿用占位 `12` / `6` / `4` | §4.1 |
-| Q5 | `preview` 的 NVENC preset 取 **`p2`**（不是 `p1`） | §4.1 |
+| Q1b | **`--crf-ref` 默认随默认档锚点（R1-7）**：阶段一 = `balanced` 的 **`24`**（旧 21 的直接后果，已接受）→ 翻档后 = `quality` 的 **`20`** | §4.1 / §12.5 |
+| Q4 | svtav1 preset 终值 = §13.10R（`13/11/9/8/5/3/1/0`；**R1 取代占位 `12/6/4`**） | §4.1 / §13.10R |
+| Q5 | `preview` 的 NVENC preset —— **被 R1 矩阵取代**：`preview=p3`、`draft=p2`、`test=p1`（八档化后的完整梯） | §13.10R |
 
 ### 12.2 已拍板 —— 设计与分期（Q6 ~ Q10）
 
 | # | 结论 | 落点 |
 |---|---|---|
-| Q6 | **先把编码全部做完，实测标定后置**；constqp 反函数（纯代数）也在阶段一做，并与正向 `to_constqp_qp` 做往返一致性断言 | §6.2 |
+| Q6 | **先把编码全部做完，实测标定后置**（**R1-H3：与 harness 标定可并行**）；**M8 更正：反函数已存在**（`from_constqp_qp`，三脚本），阶段一只加与其往返一致性断言 | §6.2 |
 | Q7 | **先软后硬**，严格按 **CPU → T4 → L40** 循序渐进；每一环只换「被测编码器 / 机器」，素材池、锚点、口径全部沿用上一环 ⇒ 把手滑与口径漂移隔离出来 | §6.3~6.6 |
 | Q8 | **`--strict-*` 并入 `--fallback-policy strict`**（该值隐含打开两者）；cpu_v2 是 hwaccel 的 CPU 简板，**不提供这两个开关、也没有 `--fallback-policy`** ⇒ 它的两道判定恒为告警 | §5.3 / §8-5 |
 | Q9 | **拆成两个开关**：`--strict-quality`（窗口越界）/ `--strict-calib`（标定失配），各自默认关，可单独给 | §5.3 |
 | Q10 | **`--threads` 与 tier 无关，不进 tier** | §4.2 |
-| **Q3-落地** | **保持 D1+D2**（不退回只靠 D1），并且**立刻在本机先跑一轮 CPU 侧 D2 实测**（x265 `slow`↔`slower`、svtav1 `6`↔`4`）。回退路径留在常量层：若判定 D2 不划算，只改 `TIER_PROFILES`，不动代码 | §6.15 / §12.3 |
+| **Q3-落地** | **保持 D1+D2**（不退回只靠 D1），并且**已在本机先跑一轮 CPU 侧 D2 实测**（x265 `slow`↔`slower`、svtav1 `6`↔`4`；**R1 注**：权威档值对 svtav1 为 `5`↔`3`，CPU 环按新对复核）。回退路径留在常量层：若判定 D2 不划算，只改 `TIER_PROFILES`，不动代码 | §6.15 / §12.3 |
 
 ### 12.3 仍未决 —— Q3：`quality` 与 `archive` 究竟靠什么区分
 
@@ -526,7 +561,7 @@ python3 vidcrop_hwaccel.py src.mp4 dst.mp4 --codec hevc_nvenc --quality-tier <qu
 | 代号 | 它决定的东西 | 打个比方 | 在本命令里对应 | quality | archive |
 |---|---|---|---|---|---|
 | **D1 质量锚点** | **画质买在哪个价位**：沿率失真曲线选一个点 | 「我要 95 分还是 98 分的画质」——直接决定花多少码率 | `-cq N`，由 `from_x264_crf(codec, ref)` 算出 | `ref=20` → `-cq 24.4` | `ref=16` → `-cq 20.0` |
-| **D2 preset** | **为逼近这个点肯花多少搜索代价**：压缩效率 ↔ 速度 | 「同样的 95 分，用 10 分钟慢慢压还是 1 分钟快速压」——同价位换更好的性价比 | `-preset P` | `p6` | `p7` |
+| **D2 preset** | **为逼近这个点肯花多少搜索代价**：压缩效率 ↔ 速度 | 「同样的 95 分，用 10 分钟慢慢压还是 1 分钟快速压」——同价位换更好的性价比 | `-preset P` | `p5` | `p6` |
 | **D3 编码选项语义** | **产物本身的性质**：位深 / 帧结构 / 是否无损 | 「要不要 10bit」「要不要 B 帧」「是不是无损」——不是"好多少"，是"是什么东西" | `-pix-fmt` / `-bf` / `-qp 0` 之类 | 不动 | 不动（候选：强制 10bit / 禁 B 帧 / 无损子档） |
 
 按本仓 `QUALITY_MAP`（`convert_crf.py:116`）实算的锚点落值（取八档中的四个代表点），可用于人工核对 `--dry-run`：
@@ -549,18 +584,17 @@ python3 vidcrop_hwaccel.py src.mp4 dst.mp4 --codec hevc_nvenc --quality-tier <qu
 | 标定成本 | **零** | 最贵：所有受影响编码器行都要按档重标 | 重标 + 新增行为面 + 新增互斥面 |
 | 是否引入新失败面 | 无 | 有（换 preset + 已有 `_NVENC_PRESET_RETRY` 兜底） | 有，且与 §2.5「不动 rc」潜在冲突 |
 
-**✅ Q3 已拍板：采用 D1 + D2 同时分化** —— `quality` / `archive` 既拉锚点（20 vs 16，差 4 档），也拉 preset（`p6`/`slow`/`6` vs `p7`/`slower`/`4`）。
-代价与连带：①两档各要一套 `_EQQUAL_TIER_OVERRIDE`（D2 移动了率失真曲线，不能共用 `balanced` 的表）；②原来 svtav1 的 `6`/`4` 不再是"可选占位"，而是**已承诺的档位取值**，必须进 Part B 的 D2 bench 验证；③若 §B5 bench 判定 D2 收益不划算，则退回只靠 D1 —— 这条回退路径要在实现里留成常量改动而非代码改动。
+**✅ Q3 已拍板：采用 D1 + D2 同时分化** —— `quality` / `archive` 既拉锚点（20 vs 16，差 4 档），也拉 preset（`p5`/`slow`/`5` vs `p6`/`slower`/`3`；libx264 `slow` vs `slower`；vp9 `1` vs `0`；aom `3` vs `2`；rav1e `4` vs `2`，R1 终值见 §13.10R）。
+代价与连带：①两档各要一套 `_EQQUAL_TIER_OVERRIDE`（D2 移动了率失真曲线，不能共用 `balanced` 的表）；②svtav1 的 `5`/`3`（R1 终值）不是"可选占位"，而是**已承诺的档位取值**，必须进 Part B 的 D2 bench 验证；③若 §B5 bench 判定 D2 收益不划算，则退回只靠 D1 —— 这条回退路径要在实现里留成常量改动而非代码改动。
 
 ~~推荐：现阶段只承诺 D1~~（已被上述决定取代，保留此句仅说明决策变更轨迹。）
 
 > ⚠ **更正（你指出的那一条）**：我在上一版把 `_NVENC_PRESET_RETRY = {'p5':'p4','p6':'p4','p7':'p4'}`（hwaccel L451-455）当作「p6/p7 已知偶发初始化失败」的**反面证据**，这是**过度解读**，已撤回。
 > 该常量的真实来源是注释自己写的「**[借鉴1]** …对照 Video_Enhancement 的 SDK 路径——`InitializeEncoder` 返回 code=8（驱动不认该 preset）时降到 p4 重试一次」，并且**本仓实测过的只有一句**：「**p4 是实测在 T4 / 旧驱动上被接受的安全档**」。全仓另有检索（Plan / memory）**没有任何 p5/p6/p7 失败率的实测记录**。
 > ⇒ 正确表述是：**p6/p7 的可靠性未知**，它是一条从 VE 借来的防御性兜底，不是本仓验证过的失败率。它既不能当作「p6/p7 不稳」的证据，也不能当作「p6/p7 稳定」的证据 —— **必须靠 Part B 实测量化**（见 Part B §5 的 Q3 专项 bench，把 `_NVENC_PRESET_RETRY` 触发率直接作为测量项）。
-### 12.4 你此前说过随后会给的更详细要求
+### 12.4 历史残留（R1 清理）
 
-- 档位命名已定：`preview` / `balanced` / `quality` / `archive`（4 档，精简版）。
-- 其余更细的要求（如每档在特定 codec 上的完整内涵表、是否为 `archive` 引入无损子档等）请直接补在本节，我按它更新 §4.1 / §4.2 / §12.3。
+- 原「档位命名已定：`preview` / `balanced` / `quality` / `archive`（4 档，精简版）」**作废**——已扩为八档（§4.1），本节不再承载需求；更细的要求已并入 §13 各节与 §12.6。
 
 ### 12.5 ✅ 已拍板 —— 「默认档 = `quality`」（选 2，含扩到八档）
 
@@ -569,44 +603,51 @@ python3 vidcrop_hwaccel.py src.mp4 dst.mp4 --codec hevc_nvenc --quality-tier <qu
 1. **旧的守基线负向用例失效**：`--quality-tier balanced --crf 50` 从「一字不改」变成「被钳到 `-crf 26`」。`balanced` 不再等价于"不指定档位"。
 2. **默认档 = `quality`**（20 正是 `quality` 的锚点）⇒ **默认行为整体改变**，连带以下契约要重议：
 
+> **R1 追补（2026-10-17）**：H1 拍板**读法 A** —— `balanced` 不再豁免窗口/钳制/锚点注入（`--quality-tier balanced --crf 50` → `-crf 26`），也不再等价于"不指定档位"；旧 baseline 按「钉档 + 全量重录」处理（§7）。下列两条后果**全量成立、无例外**；并且**阶段一（默认仍 balanced）也不是零行为变化**。
+
 | 受影响项 | 现状 | 默认档改成 `quality` 后 |
 |---|---|---|
-| `--crf-ref` / `DEFAULT_REF` 默认质量 | `21`（L388、L1571-1579） | `20` |
-| 默认 preset | `p4` / `medium` / `8`（CR-1 跨仓契约） | `p6` / `slow` / `6` ⇒ **CR-1 作废** |
-| 默认 lookahead / tune / multipass / aq | 全不下发 | `250` / `uhq` / `fullres` / on |
-| 四道孪生门 baseline（`dump_cmd_*.sh` + `Accessory/test/baseline/*.txt`） | 全绿 | **全部要重刷**（含 `enc_before.txt` 全部 12 行） |
-| `memory` BASE_LOCK「默认路径永远裸 `-rc vbr -cq N -b:v 0 -preset p4`」 | 成立 | 不成立，且**默认路径会变成未标定**（`quality` 档没有自己的 `_EQQUAL_TIER_OVERRIDE`） |
-| §2.5 硬约束、§9「明确不改」 | 有效 | 需重写 |
+| `--crf-ref` / `DEFAULT_REF` 默认质量 | `21`（`DEFAULT_REF` 常量；`default_quality_for()`） | **R1 轨迹**：阶段一 **`24`**（`balanced` 锚点）→ 翻档后 **`20`** |
+| 默认 preset | `p4` / `medium` / `8`（CR-1 跨仓契约） | **翻档后**：`p5` / `slow`（libx264 随档）/ `5` ⇒ **CR-1 需与 VE 重议**（阶段一默认仍 balanced，**CR-1 默认条款不动**） |
+| 默认 lookahead / tune / multipass / aq | 全不下发 | **翻档后**：`250` / `uhq` / `fullres` / on（阶段一仍不下发） |
+| 四道孪生门 baseline（`dump_cmd_*.sh` + `Accessory/test/baseline/*.txt`） | 全绿 | **R1：全量重录**（旧字节作废——即使阶段一，balanced 也钳制、裸跑锚点 21→24；含 `enc_before.txt`） |
+| `memory` BASE_LOCK「默认路径永远裸 `-rc vbr -cq N -b:v 0 -preset p4`」 | 成立 | 阶段一仍裸 `-rc vbr -cq N -b:v 0 -preset p4` 但**锚点 24 + 全档钳制**；**翻档后**失效且**默认路径变成未标定**（`quality` 档没有自己的 `_EQQUAL_TIER_OVERRIDE`）⇒ 两处都要改写 |
+| §2.5 硬约束、§9「明确不改」 | 有效 | **R1 已就地重写**（§2.5 / §9） |
 
-**你的选择**：选 2（按字面执行）+ 扩到八档（`lossless` / `near-lossless` / `draft` / `test`）+ `archive` 区间收窄为 `[13,18]`（锚点 16 不变）。
+**你的选择**：选 2（按字面执行）+ 扩到八档（`lossless` / `near-lossless` / `draft` / `test`）+ `archive` 区间收窄为 `[13,18]`（锚点 16 不变）。**R1 追补**：读法 A（钳制/锚点对全档生效、含 `balanced`），旧 baseline 按「钉档 + 全量重录」处理。
 
 **已接受的连带改动**（已分别登记进 §2.5 契约变更表、§6.2 额外任务、§7 门禁改造、§10 风险）：
 
-1. 默认 preset `p4/medium/8` → `p6` / libx264 `medium`（不变）/ `slow` / `6` ⇒ **跨仓 CR-1 的「默认档」条款需与 VE 重议**。
-2. 默认 lookahead / tune / multipass / aq 由「全不下发」变为 `250` / `uhq` / `fullres` / on。
-3. `DEFAULT_REF` 21 → 20（保留常量名与单一来源，改为引用 `TIER_PROFILES[DEFAULT_TIER]['ref_crf']`）。
-4. 四份 baseline 与 `dump_cmd_*.sh` 需**迁移**：旧 inventory 显式加 `--quality-tier balanced` ⇒ 旧字节转为 `balanced` 档黄金文件；另建 default 新基线。
-5. `memory` BASE_LOCK 与 `MEMORY.md` L203 需改写。
-6. **默认路径将长期带「未标定」告警**，直到 Part B §B4 补上 `quality` 档的 `_EQQUAL_TIER_OVERRIDE`。
+1. **翻档后**默认 preset `p4/medium/8` → `p5` / libx264 `slow`（随档）/ `slow` / `5` ⇒ **跨仓 CR-1 的「默认档」条款需与 VE 重议**（阶段一不动）。
+2. **翻档后**默认 lookahead / tune / multipass / aq 由「全不下发」变为 `250` / `uhq` / `fullres` / on。
+3. `DEFAULT_REF` 轨迹 21 → **24（阶段一）** → 20（保留常量名与单一来源，改为引用 `TIER_PROFILES[DEFAULT_TIER]['ref_crf']`）。
+4. 四份 baseline 与 `dump_cmd_*.sh` 需**迁移**：旧 inventory 显式钉 `--quality-tier balanced` ＋ **golden 全量重录**（R1 修订：不再是"旧字节保留"）；另建 default 新基线。
+5. `memory` BASE_LOCK 与 `MEMORY.md` L203 需改写（含三态轨迹）。
+6. **翻档后**默认路径将长期带「未标定」告警，直到 Part B §B4 补上 `quality` 档的 `_EQQUAL_TIER_OVERRIDE`（阶段一 balanced 已标定，无此问题）。
 
-**强烈建议的提交切分**（来自 §10 风险）：先提「tier 能力 + 默认仍 `balanced`」（零行为变化、四门全绿），再单独提「翻默认档为 `quality`」。这样一旦 VE 对 CR-1 有异议、或默认路径未标定的告警反馈不好，可单独回退第二个提交而不影响 tier 能力本身。
+**强烈建议的提交切分**（来自 §10 风险）：先提「tier 能力 + 默认仍 `balanced`」（**R1 更正：不再声称零行为变化**——balanced 自身也钳制、裸跑锚点 21→24，四门 golden 随之全量重录；但**默认 preset 与 CR-1 条款不变**，翻档风险仍可独立回退），再单独提「翻默认档为 `quality`」。这样一旦 VE 对 CR-1 有异议、或默认路径未标定的告警反馈不好，可单独回退第二个提交而不影响 tier 能力本身。
 
 ### 12.6 待确认（新增三条）
 
 | # | 问题 | 为什么重要 | 我的倾向 |
 |---|---|---|---|
-| **Q11** | `draft` 与 `test` 要不要策略层区分？ | 不区分的话这两档就是同一策略的两个质量点，命名显冗余 | **已拍板（2026-10-16）：区分。** 依据用户提出的 `Accessory/preset_matrix.xlsx`，两档分到不同 preset（test=ultrafast/13/10/8/p1，draft=veryfast/11/8/6/p2）。该矩阵的完整评估与修正见 §13 |
-| **Q12** | **CR-1「默认档」条款**是否现在就与 Video_Enhancement 同步重议？ | 不同步 ⇒ 两仓默认命令不一致 | **已拍板（2026-10-15）：延后到本方案完整编码并经全流程实测之后再议如何迁移给 VE 侧。** 期间按「先提 tier 能力、默认仍 `balanced`」的提交切分执行，本仓不先翻默认档，避免 VE 侧拿到一个没有实测背书的变更 |
-| **Q13** | `lossless` / `near-lossless` / `draft` / `test` 这四档**阶段一要不要一起实现**？ | 它们只是常量表条目，实现成本极低；标定成本才是大头 | 倾向**一起实现**（表项而已），但明确它们**不进阶段三优先标定队列**，LOO 门禁单独放宽（§10） |
+| **Q11** | `draft` 与 `test` 要不要策略层区分？ | 不区分的话这两档就是同一策略的两个质量点，命名显冗余 | **已拍板（2026-10-16）：区分。** 依据用户提出的 `Accessory/preset_matrix.xlsx`，两档分到不同 preset（test=ultrafast/13/10/8/p1，draft=veryfast/11/8/6/p2）。**R1 落全**：libx265 的 test 由 `veryfast` 改为 `ultrafast`（旧稿该格未落实 Q11）；aom 因 `balanced=6` 冻结而 test/draft 并档为 `8`（§13.10R 注） |
+| **Q12** | **CR-1「默认档」条款**是否现在就与 Video_Enhancement 同步重议？ | 不同步 ⇒ 两仓默认命令不一致 | **已拍板（2026-10-15）：延后到本方案完整编码并经全流程实测之后再议如何迁移给 VE 侧。** 期间按「先提 tier 能力、默认仍 `balanced`」的提交切分执行，本仓不先翻默认档，避免 VE 侧拿到一个没有实测背书的变更。**R1 注**：阶段一并非零行为变化（balanced 自身钳制 + 锚点 24 + golden 重录），但这不动 CR-1 默认 preset 条款；翻档动作仍后置 |
+| **Q13** | `lossless` / `near-lossless` / `draft` / `test` 这四档**阶段一要不要一起实现**？ | 它们只是常量表条目，实现成本极低；标定成本才是大头 | 倾向**一起实现**（表项而已），但明确它们**不进阶段三优先标定队列**，LOO 门禁单独放宽（§10）。**R1 已落**：八档全部进 §4.1/§13.10R |
 
-### 12.7 实施进度台账（2026-10-15 / 16 更新）
+### 12.7 实施进度台账（**R1 合并版**，2026-10-17；§13.14 的进度表已并入本表）
 
 | 阶段 | 状态 | 产出 / 结论 |
 |---|---|---|
-| 阶段零（Z1~Z5） | ✅ 完成 | hwaccel 两处 `build_ffmpeg_cmd` 补 `try/except ValueError`；sdr 补 `uhq`+`h264_nvenc` 硬报错；README 三处文档 bug。四道孪生门 HEAD vs 工作区**逐字节相同** |
-| 阶段零点五（D2 预跑） | ✅ 完成 | 17 条真实 eqq 池。**画质**：svtav1 6→4 码率收益 **+19.6%**、x265 slow→slower **+10.5%**，均远超 3% 门槛。**耗时**（空载复测，以 CPU 时间比为判据）：svtav1 **1.68×**、x265 **4.67×**，均超 1.5× 阈值。结论：**D1+D2 分化成立**，但 x265 的 `archive` 档用 `slower` 性价比差（每 1% 码率收益要付 35% CPU），且该比值**本机特有**（无 AVX2） |
-| 阶段一（tier 编码实现） | ⬜ 未开始 | 待 Q11/Q13 拍板后动工 |
-| 阶段二~五（CPU→T4→L40 实测补标定） | ⬜ 未开始 | — |
+| 阶段零（Z1~Z5） | ✅ 完成（994bee1） | hwaccel 两处 `build_ffmpeg_cmd` 补 `try/except ValueError`；sdr 补 `uhq`+`h264_nvenc` 硬报错；README 三处文档 bug。四道孪生门 HEAD vs 工作区**逐字节相同** |
+| 阶段零点五（D2 预跑） | ✅ 完成 | 17 条真实 eqq 池。**画质**：svtav1 6→4 码率收益 **+19.6%**、x265 slow→slower **+10.5%**，均远超 3% 门槛。**耗时**（空载复测，以 CPU 时间比为判据）：svtav1 **1.68×**、x265 **4.67×**，均超 1.5× 阈值。结论：**D1+D2 分化成立**，但 x265 的 `archive` 档用 `slower` 性价比差（每 1% 码率收益要付 35% CPU），且该比值**本机特有**（无 AVX2）。**R1 注**：权威档值对 svtav1=`5↔3`、x265=`slow↔slower`；CPU 环按终值复核 |
+| aom / vp9 恒等 effort 探针 | ✅ 完成 | `aom_effort_probe`：balanced 冻结 **6**（6≡8；4 过慢）；`vp9_effort_probe`：balanced **2**（BASE_LOCK 甜点；负值无增益）。R1 已据此定 §13.10R（vp9 慢端 `1/0/0/0`、aom 快端 `8/8/7`） |
+| `bench_preset_ab.py` 并发守卫 | ✅ 完成 | 默认 ≤ 逻辑核数/2（`--jobs` 仍可显式覆盖）；防超订污染 |
+| 阶段一（tier 编码实现） | 🟡 进行中（R1 起可动工） | 实现清单 §6.2；DoD §11；harness 标定可并行 |
+| harness `--preset-override` | ✅ 完成（2026-10-17） | R1 第一块砖：`_lock_for` 统一替换速度轴（libx264/x265/svtav1/NVENC=-preset、vp9/aom=-cpu-used）；自测 +4 例（§6.3~6.6） |
+| 阶段三（CPU 环标定） | ⬜ 未开始 | 走 harness；per-tier `_EQQUAL_TIER_OVERRIDE` 落表 |
+| 阶段四（T4）/ 阶段五（L40） | ⬜ 未开始（本机无 GPU） | NVENC 可用性 + `_NVENC_PRESET_RETRY` 触发率（红线 1%）+ `_QP_AFFINE_QUALITY` 重标 |
+| 翻默认档（第二步） | ⬜ 待 VE 同步 | CR-1 重议后执行（§12.5 提交切分） |
 
 **阶段零点五的关键方法学结论（可复用）**：
 
@@ -628,6 +669,7 @@ python3 vidcrop_hwaccel.py src.mp4 dst.mp4 --codec hevc_nvenc --quality-tier <qu
 >    在全仓引用次数为 **0**，是死代码；svtav1 的 preset 是常量 `DEFAULT_PRESET_SVTAV1='8'`，
 >    仓库早在 V9 就把它冻结了（`vidcrop_hwaccel.py:1354-1357` 注释解释了原因）。
 >    **真正按核数自适应的只有 libaom-av1。**
+> 3. **R1（2026-10-17）**：§13.10 升格为**唯一权威 `TIER_PROFILES` preset 表**（下文 §13.10R 改定，取代 §4.1/§12.3.2 的旧值；与 `preset_matrix.xlsx` 同步）。用户拍板：libx265 test=`ultrafast`、vp9 慢端 `1/0/0/0`、aom 快端 `8/8/7`。决策记录见 §13.15。
 
 用户提出 `Accessory/preset_matrix.xlsx`：8 档 × 8 编码器的 preset 矩阵，用于回答 Q11
 （`draft` / `test` 是否要策略层区分）。逐行核对仓库现状与 ffmpeg 现实后，结论：
@@ -741,7 +783,7 @@ cpu-used=8 → 607,995 字节      ← +19.5%
 默认值相同（1）、量程不同（vp9 多一段负值区）。矩阵里 vp9 行的取值与 aom 对齐，
 但实现时要注意 vp9 可用负值换取更高质量的档位（若将来要开 near-lossless/lossless 档）。
 
-**待办**：先确定并文档化 aom 当年的标定 cpu-used，再决定冻结到哪个常量。
+**R1 已决**：标定口径 = `BASE_LOCK` 的 **`cpu-used 6`**（探针：6≡8、4 对 balanced 过慢）⇒ aom 的 `balanced` 冻结为 **6**（§13.10R）；`auto_effort()` 的按核漂移随之消除。
 
 各编码器速度轴的 ffmpeg 实测量程（本机）：
 
@@ -769,14 +811,13 @@ cpu-used=8 → 607,995 字节      ← +19.5%
   质量轴被旁路，preset 只影响速度 ⇒ `lossless=placebo` 纯亏耗时。
 - 仓库自己也把 placebo 当作不优于 veryslow：`X264_TO_NVENC_PRESET` 把两者同等压到 p7。
 
-⇒ **修正：删掉 placebo，x264/x265 的 lossless 与 near-lossless 都用 `slower`。**
+⇒ **修正：删掉 placebo；libx265 的 lossless 与 near-lossless 用 `slower`；libx264 维持 `veryslow`**（R1 对齐 §13.10R：lossless 路径质量轴被旁路，preset 只影响速度/体积，x264 不必再降一档）。
 
 ### 13.7 NVENC 两处问题
 
-1. **near-lossless 与 lossless 都填 p7** ⇒ 两档在 NVENC 上策略完全相同。且 NVENC 的
-   lossless 本质靠 `-qp 0`（仓库已有守卫改写为 `-rc constqp -qp 0 -b:v 0`）而非 preset。
-2. **archive/near-lossless/lossless 用 p6/p7**，与 `_NVENC_PRESET_RETRY = {'p5':'p4','p6':'p4','p7':'p4'}`
-   暴露的已知初始化失败风险相冲（该风险本身尚未在本仓定量验证，见 §12.3.2 的更正）。
+1. **near-lossless 与 lossless 都填 p7** ⇒ 两档在 NVENC 上策略完全相同。**R1 保留此并档**：`p1~p7` 七档对八规则必有一处并档，并档点选在 near-lossless/lossless（两者由质量轴区分：`-cq` vs `-qp 0`）；且 NVENC 的 lossless 本质靠 `-qp 0`（仓库已有守卫改写为 `-rc constqp -qp 0 -b:v 0`）而非 preset。
+2. **archive/near-lossless/lossless 用 p6/p7（R1 终值）**，与 `_NVENC_PRESET_RETRY = {'p5':'p4','p6':'p4','p7':'p4'}`
+   的防御性兜底重叠——该风险尚未在本仓定量验证 ⇒ **T4 环直接测触发率（红线 1%，§B5.4）**，超限走常量层回退。
 
 ### 13.8 NVENC 三行本机无法验证
 
@@ -790,35 +831,35 @@ cpu-used=8 → 607,995 字节      ← +19.5%
 `ref_crf` / `ref_window`。**后两者是本方案的核心**（质量数值进档 + 窗口钳制），
 矩阵完全没有涉及。preset 矩阵只是 D2 轴，不能直接当 `TIER_PROFILES` 用。
 
-### 13.10 修正矩阵（建议采纳）
+（**R1**：六轴已全部并入 §4.1 的 `TIER_PROFILES` 表——本节的批评对 §4.1 生效时已消除；本节作为设计依据保留。）
+
+### 13.10 修正矩阵 —— **R1 定案（= 唯一权威 `TIER_PROFILES` preset 列）**
+
+> **R1（2026-10-17）**：下表即 §4.1 `preset` 列与 `Accessory/preset_matrix.xlsx` 的**同一张表**。
+> 四源冲突（§4.1 旧值 / §12.3.2 / 本节旧稿 / §13.14 正文）从此以**本表**为准；来源与理由见下与 §13.15。
 
 | 编码器 | 轴 | test | draft | preview | balanced | quality | archive | near-lossless | lossless |
 |---|---|---|---|---|---|---|---|---|---|
 | libx264 | preset | ultrafast | veryfast | fast | **medium** | slow | slower | veryslow | veryslow |
-| libx265 | preset | veryfast | veryfast | **faster** | **medium** | slow | slower | **slower** | **slower** |
-| libsvtav1 | preset | 13 | 11 | 9 | **8** | 5 | 3 | 1 | 0 |
-| libvpx-vp9 | cpu-used | 8 | 6 | 5 | **恒等值（待定，§13.4，已拍板=2）** | 3 | 2 | 1 | 0 |
-| librav1e | speed | 10 | 8 | 7 | **6（显式 -speed 6，与 native 逐字节相同，零回归）** | 4 | 2 | 1 | 0 |
-| libaom-av1 | cpu-used | 8 | 6 | 5 | **恒等值（待定，§13.4）** | 3 | 2 | 1 | 0 |
-| h264_nvenc | preset | p1 | p2 | p3 | **p4** | p5 | p6 | p7 | p7 |
-| hevc_nvenc | preset | p1 | p2 | p3 | **p4** | p5 | p6 | p7 | p7 |
-| av1_nvenc | preset | p1 | p2 | p3 | **p4** | p5 | p6 | p7 | p7 |
+| libx265 | preset | **ultrafast** | veryfast | **faster** | **medium** | slow | slower | **slower** | **slower** |
+| libsvtav1 | preset | 13 | 11 | 9 | **8** | **5** | **3** | 1 | 0 |
+| libvpx-vp9 | cpu-used | 8 | 6 | 5 | **2（探针冻结）** | **1** | **0** | **0** | **0** |
+| librav1e | speed | 10 | 8 | 7 | **6（显式 -speed 6，与 native 逐字节相同）** | 4 | 2 | 1 | 0 |
+| libaom-av1 | cpu-used | **8** | **8** | **7** | **6（探针冻结，BASE_LOCK 口径）** | 3 | 2 | 1 | 0 |
+| h264_nvenc | preset | p1 | p2 | p3 | **p4** | **p5** | **p6** | p7 | p7 |
+| hevc_nvenc | preset | p1 | p2 | p3 | **p4** | **p5** | **p6** | p7 | p7 |
+| av1_nvenc | preset | p1 | p2 | p3 | **p4** | **p5** | **p6** | p7 | p7 |
 
-相对原矩阵的改动与理由：
+相对本节旧稿（10-16 版）的 **R1 改动与理由**：
 
-- **libx264 跟随 tier**（§13.2）：用户指出 medium 锁只是标定便利，生产应按档选 preset。
-  test/draft/preview 用 ultrafast/veryfast/fast，quality/archive 用 slow/slower，
-  near-lossless/lossless 用 veryslow。
-- **libx265**：preview `fast`→`faster`（两者是 x265 的不同 preset）；near-lossless 与
-  lossless 由 veryslow/placebo 统一改为 **slower**（§13.6 placebo 无意义；且 lossless 路径
-  质量轴被旁路，preset 只影响速度，slower 已足够）。
-- **libsvtav1 balanced = 8**（用户原稿为 7）：实测证据支持 8，见 §13.3.1。
-- **libvpx-vp9 补齐**（§13.4）：结构照搬 aom，但注意 vp9 的 `-cpu-used` 允许负值。
-- **librav1e preview 6→7、balanced 改显式 `-speed 6`**（§13.10.1，2026-10-16 用户修正）：
-  native（不下发）与显式 `-speed 6` 输出逐字节相同，故 balanced 保持「已标定、零成本、
-  零回归」；原 preview=6 与 native 重合、两档无差异，故 preview 上移为 7。
-  其余档的 speed 需各自配 `_EQQUAL_TIER_OVERRIDE[tier]['librav1e']` 行。
-- **libaom-av1 / libvpx-vp9 的 balanced 由具体数字改为「恒等值（待定）」**：先冻结再定值（§13.4）；vp9 已拍板 `2`（§13.14 探针），aom 待定。
+- **NVENC quality/archive = p5/p6**（旧稿已是 ⇒ 保留；驳回 §4.1 草稿的 p6/p7）：与「D2 只差一档」的设计（x265 slow→slower、libx264 slow→slower 均一档）一致；`p5/p6/p7` 可用性 + `_NVENC_PRESET_RETRY` 触发率由 T4 环实测量化（§B5.4，红线 1%），超限走常量层回退。
+- **libsvtav1 quality/archive = 5/3**（旧稿已是 ⇒ 保留；驳回 §4.1 草稿的 6/4）：与矩阵自 `faf74a4` 起一致，比 6/4 更激进（更优压缩）。
+- **libx265 test = `ultrafast`**（**R1 修**：旧稿 test 与 draft 同为 veryfast，是全表唯一未落实 Q11 的格子）——test 与 libx264 对齐取 ultrafast，draft 保持 veryfast。
+- **libvpx-vp9 慢端修正（R1）**：`balanced=2`（探针/BASE_LOCK）冻结后，旧稿 `quality=3 / archive=2` 与 balanced **倒挂（3 > 2 = 更快）且 archive = balanced**（复制了 rav1e 被修正过的「两档同 effort」问题）⇒ 改为 `quality=1 / archive=0 / near=0 / lossless=0`（更慢 = 更优压缩）；**不采用负值**——探针里 `-4` 未显示超出 0 的增益。
+- **libaom-av1 balanced = 6 冻结 + 快端修正（R1）**：探针结论「保留 6」（6≡8、4 对 balanced 过慢；BASE_LOCK 即 6，`QUALITY_MAP` 在该口径下标定）。因 `balanced=6` 上移，旧稿快端 8/6/5 会倒挂 ⇒ 改为 `test=8 / draft=8 / preview=7`（0~8 量程内 6 之上只剩两档，test/draft 并档）；慢端 3/2/1/0 保持。
+- **libx264 跟随 tier**（§13.2）；**librav1e** balanced=显式 `-speed 6`（§13.10.1）；**x265 near/lossless = slower**（§13.6）；**x264 near/lossless = veryslow**（保留矩阵值；§13.6 文字已同步）。
+
+**待 T4 / CPU 环复核的清单（R1 后仍开放）**：NVENC `p5/p6/p7` 可用性与 `_NVENC_PRESET_RETRY` 触发率（T4）；aom `quality=3/archive=2` 相对探针建议 `archive=4` 的取舍（CPU 环）；x265 `test=ultrafast` 的输出可用性（冒烟档，CPU 环抽查）；vp9 慢端 `0` 与负值的进一步对比（可选）。
 
 #### 13.10.1 rav1e 的 per-tier speed 需要各自一行表
 
@@ -848,7 +889,7 @@ _EQQUAL_TIER_OVERRIDE = {
 
 **未标定警示**：除 `balanced` 外，所有档的 preset 取值均**未标定**。上线前须按
 `Accessory/probe/calibrate_equal_quality.py --preset-override <值> --tag <tier>`
-（替换 `BASE_LOCK` L94-107 的 medium）逐档重标，并过 LOO 门禁。
+（替换 `BASE_LOCK` 的 medium/8；**该参数已落地，2026-10-17**）逐档重标，并过 LOO 门禁。
 
 ### 13.11 两台无 AVX2 主机的 x265 D2 复测（2026-10-16）
 
@@ -874,12 +915,11 @@ _EQQUAL_TIER_OVERRIDE = {
 1. **并发按机器规模收缩**：他机 4C/8T，若沿用基线机的并发 8 会严重超订——他们先以并发 8
    开跑 13 分钟后**主动中止废弃**，改并发 2 重跑。这是正确的（`bench_preset_ab.py` 的
    `--max-load` 守卫此时也能拦，但它的判据是开测前负载，拦不住运行中超订）。
-   ⇒ **待办**：给 `bench_preset_ab.py` 加一个「并发数不得超过逻辑核数/2」的默认上限。
+   ⇒ **✅ 已完成**：`bench_preset_ab.py` 的并发守卫（默认 ≤ 逻辑核数/2，`--jobs` 可显式覆盖；§12.7）。
 2. **`Elapsed` 解析 bug 他机也修了一份**：说明这个坑（`/usr/bin/time -v` 标签含冒号）确实
    容易复发。本仓 `bench_preset_ab.py` 的 `parse_time_file` 已带警告注释。
 
-**仍缺**：**支持 AVX2 的主机**数据。这是判 「4.6× 是 SIMD 惩罚还是 preset 固有代价」的
-唯一手段，也是定 `libx265` archive 档 preset 终值的前提。
+**R1 更新**：AVX2 主机数据已补齐（§13.12）；`libx265` archive 档终值已定为 `slower`（§13.10R），CPU 环标定只需验证其 VMAF 差异在预期范围内。
 
 ### 13.12 支持 AVX2 的主机 x265 D2 复测（2026-10-16）
 
@@ -902,120 +942,54 @@ _EQQUAL_TIER_OVERRIDE = {
 - 预设比值（去 AVX2）:**4.8917×**
 - 相对自动 ΔCPU%（slow）：+20.33%，（slower）：+22.60%
 
-**结论**：在支持 AVX2 的主机上，x265 `slower`/`slow` 的 CPU 时间比约为 **4.8×**，略高于无 AVX2 机器的 4.55~4.67×。这表明 AVX2 对此 preset pair 的影响复杂（可能基线 auto 也有变化），但仍可视为稳健属性；仍需更多数据以定 archive 档 preset 终值。
+**结论**：在支持 AVX2 的主机上，x265 `slower`/`slow` 的 CPU 时间比约为 **4.8×**，略高于无 AVX2 机器的 4.55~4.67×。这表明 AVX2 对此 preset pair 的影响复杂（可能基线 auto 也有变化），但仍可视为稳健属性。**R1 已定 `archive` 档 libx265 = `slower`**（§13.10R）；CPU 环标定验证与 `balanced` 的 VMAF 差异即可。
 
 
-### 13.13 仍待输入
+### 13.13 仍待输入（**R1 更新**）
 
-1. **libaom-av1 / libvpx-vp9 的恒等 effort 值定到几** —— 先冻结（§13.4），再定值。
-   前置待办：查清 `QUALITY_MAP['libaom-av1']` 当年是在哪个 `-cpu-used` 下标定的
-   （`convert_crf.py:34` 的注释没记，而 svtav1 记了「preset 8 锁定」）。
-2. **NVENC 三行的量程与 p6/p7 可用性** —— 需在带 GPU 的机器上核（本机 ffmpeg 无 NVENC 构建）。
-3. **`bench_preset_ab.py` 加「并发 ≤ 逻辑核数/2」默认上限**（§13.12 他机教训）。
-4. **libx264/rav1e 的 per-tier 标定排期** —— §13.2 与 §13.10.1 的设计已定，但每档一套表
-   意味着 8 档 × 9 编码器的标定量，需排进阶段二~五。
+1. ~~libaom-av1 / libvpx-vp9 的恒等 effort 值定到几~~ —— **已定（R1）**：aom `balanced=6`（探针：6≡8、4 过慢，BASE_LOCK 口径即 6）、vp9 `balanced=2`（探针/BASE_LOCK）；快端/慢端终值见 §13.10R。「`QUALITY_MAP['libaom-av1']` 当年 cpu-used」的文档缺口已由 BASE_LOCK=6 口径登记补齐。
+2. **NVENC 三行的量程与 `p5/p6/p7` 可用性** —— 需在带 GPU 的机器上核（本机 ffmpeg 无 NVENC 构建）；含 `_NVENC_PRESET_RETRY` 触发率（红线 1%）。
+3. ~~`bench_preset_ab.py` 加「并发 ≤ 逻辑核数/2」默认上限~~ —— ✅ 已完成（§12.7）。
+4. **per-tier 标定排期** —— 8 档 × 9 编码器；R1 起改走 harness（`--preset-override` ✅ 已落地），CPU 环可先行（§6.3~6.6）。
 
-### 13.14 质量‑tier 方案的专项测试计划
+### 13.14 专项测试计划（**R1 压缩版**；判据与细节归 Part B，进度归 §12.7）
 
-为验证和落实 `--quality-tier` 八档方案，需分阶段（CPU → T4 → L40）完成以下专项测试。每项测试均应在空载机器上进行，以 CPU 时间为主要耗时判据，并采用 VMAF（或 SSIM）作为画质等价度量（阈值 ≥ 93 VMAF 或 ≥ 0.98 SSIM 视为等价）。
+> **R1（2026-10-17）**：本节旧稿（`≥93 VMAF / ≥0.98 SSIM` 判据、「遍历 preset 找等价 preset」误述、重复的注意事项段、与 §12.7 重复的进度表）已按审核意见压缩为下述任务清单；判据、阈值、口径一律以 Part B 为准。原任务 1（aom/vp9 恒等值）已由探针完成、原任务 3（并发守卫）已完成——现状统一见 §12.7。
 
-**1. libaom‑av1 / libvpx‑vp9 恒等 effort 值定级**
-   - 目标：确定每个 tier（test/draft/preview/balanced/quality/archive/near‑lossless/lossless）对应的 `-cpu-used` 取值，使其在同等画质下与 balanced tier 的基准（preset 8）等价。
-   - 方法：
-     a. 在 CPU 机器（如本机 Xeon Platinum 8255）上，固定 CRF（例如 24），使用 libaom‑av1（或 libvpx‑vp9）在不同 `-cpu-used`（0~8）下编码同一素材（选取 10s 代表性切片）。
-     b. 采用 `ffmpeg -v libvmaf` 计算 VMAF 与 balanced tier（preset 8）的输出；寻找 VMAF ≥ 93 的 `-cpu-used` 作为该 tier 的恒等值。
-     c. 对 libvpx‑vp9 同理，但注意其 `-cpu-used` 允许负值（-8~8），负值表示更慢；在同等画质下寻找最接近 0 的取值（或根据实际需求）。
-     d. 记录结果填入 `QUALITY_MAP` 与 `SIZE_MAP`（若需要），并更新 `convert_crf.py` 中的注释。
-   - 分阶段：先在 CPU 上完成定级；若后期有 T4/L40 可用，可在 GPU 上使用对应的 NVENC（若 applicable）或保持 CPU 基线（因 aom/vp9 纯 CPU）。
-   - 产出：更新 `Plan/` 中的矩阵（§13.10）中 libaom‑av1 与 libvpx‑vp9 的 balanced 列从 “恒等值（待定）” 替换为具体数字。
+**① CPU 环标定（可立即开始）**：`calibrate_equal_quality.py` 的 `--preset-override` ✅ **已落地**（2026-10-17）→ 按 §13.10R 档值对 `libx264` / `libx265` / `libvpx-vp9` / `libaom-av1` / `libsvtav1` / `librav1e` 逐档跑标定，过 LOO（软编 ≤5.9、rav1e ≤7.5、`GATE_ANCHORS=(0,27)`）后填 `_EQQUAL_TIER_OVERRIDE[tier]`。**M7**：`draft(36)/test(45)/near-lossless(6)/lossless(0)` 需先扩锚（建议 +`0/6/33/39/45`）或明确 LOO 放宽——二选一写进报告。
 
-**2. NVENC 三行（h264_nvenc, hevc_nvenc, av1_nvenc）的量程与 p6/p7 可用性核验**
-   - 目标：在支持 NVENC 的 GPU（T4 或 L40）上测试 preset 取值范围，确认 p6、p7 是否可用（即不导致编码失败或画质异常）。
-   - 方法：
-     a. 准备一组多样化素材（分辨率 720p~4K，帧率 24~60fps）。
-     b. 对每个编码器，遍历 preset p1~p7（或 p1~p7 根据官方文件），记录返回码、输出文件大小、以及 VMAF 与基准（CPU libx264 medium 同 CRF）的画质。
-     c. 确定每个编码器的实际可用 preset 范围（例如 h264_nvenc 官方 p1~p7 均可用，但 p6/p7 在低延迟场景可能受限）。
-     d. 若发现 p6/p7 在某些素材下不可用（返回非零或 VMAF 骨折），则在矩阵中做相应标注或调整。
-   - 分阶段：先在 T4（若可用）完成基线测试；再在 L40 上确认是否有提升（更高帧率或更低延迟）。
-   - 产出：更新矩阵中 h264_nvenc/hevc_nvenc/av1_nvenc 的 preset 列（目前为 p1~p7），如有受限则相应调整（例如 p6 仅在特定条件下可用）。
+**② T4 环**：NVENC `h264_nvenc` / `hevc_nvenc` 各档量程 + `p5/p6/p7` 可用性 + `_NVENC_PRESET_RETRY` 触发率（红线 1%）+ `_QP_AFFINE_QUALITY` 同步重标（CR-4，⑨ 组逐条断言）。产出：矩阵 NVENC 行经实测核准（不可用则走常量层回退）。
 
-**3. `bench_preset_ab.py` 加「并发 ≤ 逻辑核数/2」默认上限**
-   - 目标：防止测试时因并发过高导致系统超订（如前他机教训），在脚本中增加一个守卫：默认最大并发数不得超过逻辑核数的半数（向下取整），但仍可通过 `--max-load` 或手动 `--jobs` 覆盖（仅在明确知道机器空载时）。
-   - 方法：
-     a. 在 `bench_preset_ab.py` 中读取 `os.cpu_count()`（或 `psutil.cpu_count(logical=True)`），计算上限 `max_jobs = cpu_count // 2`。
-     b. 若用户未通过 `--jobs` 显式指定，则使用此上限；若指定则取用户值与上限的最小值（以防超订）。
-     c. 在日志中输出所采用的并发数与上限。
-     d. 加入单元测试（或至少在脚本头部加注释）说明理由。
-   - 分阶段：此项为代码改动，不依赖硬件，可在任何机器上完成；完成后提交 PR。
-   - 产出：更新 `Accessory/probe/bench_preset_ab.py`（或脚本所在路径），并在提交说明中注明防超订。
+**③ L40 环**：`av1_nvenc` 同上（`av1` 走 `--expect-av1` fail-fast；Turing 代无 AV1 编码单元）。
 
-**4. libx264/rav1e 的 per‑tier 标定排期**
-   - 目标：为每个 tier（test/draft/preview/balanced/quality/archive/near‑lossless/lossless）生成各自的 `_EQQUAL_TIER_OVERRIDE` 条目（针对 libx264 的 preset、librav1e 的 speed），使得在未标定的 tier 时可回退 balanced 表并告警（已在 §13.2 中实现）。
-   - 方法：
-     a. 使用现有工具 `Accessory/probe/calibrate_equal_quality.py`（或类似），为每个编码器分别跑：
-        - 对 libx264：固定 CRF（如 24），遍历所有 preset（ultrafast~veryslow），计算 VMAF 与基准（libx264 medium 同 CRF）的画质；找出与目标 tier 的画质等价的 preset（即 VMAF ≥ 93）。
-        - 对 librav1e：固定 CRF，遍历 speed 0~10，同上寻找等价 speed。
-     b. 将结果写为 Python 元组 `(offset, scale, shift, max)` 格式（参看 `convert_crf.py` 中的 `QUALITY_MAP` 条目），存入 `_EQQUAL_TIER_OVERRIDE[tier][编码器]` 字典。
-     c. 对于已标定的 balanced tier（libx264 medium、librav1e native），其值应与现有 `QUALITY_MAP` 一致，作为止验。
-     d. 实施排期：建议按编码器逐个完成，每个编码器占用约 2‑4 小时（取决于素材数量与并发数）。可先在 CPU 上完成，后期若有 T4/L40 可用，可考虑使用对应的硬件加速器（如 NVENC）做交叉验证（非必需）。
-   - 分阶段：先在 CPU 机器上完成所有编码器的 per‑tier 标定；若后期有 GPU 可用，可做交叉核验（如使用 NVENC 的输出作为参考基线，但主要标定仍以 CPU 为准）。
-   - 产出：更新 `vidcrop_hwaccel.py`（或其他放置 `_EQQUAL_TIER_OVERRIDE` 的文件）中的字典；并在 `Plan/` 中的矩阵（§13.10）更新对应列的取值（例如 libx264 的 test/draft/preview 等列将从 “ ultrafast/veryfast/fast” 更新为测得的等价 preset；librav1e 的速度列同样更新）。
 
-**测试进度与里程碑（2026-10-16 最终状态，§13.14 CPU 阶段已完成，T4/L40 待执行）**
+**④ D1/D2/tune 归因 bench**：主方案 Part B §B5。**阈值裁决（R1）**：画质 3% / 耗时 1.5×（CPU 时间比）/ `_NVENC_PRESET_RETRY` 触发率红线 1%。
 
-| 阶段 | 任务 / 编码器 | 现状（2026-10-16） | 产出 / 结论 | 阻塞 / 待办 |
-|---|---|---|---|---|
-| **CPU 基线（✅ 已完结）** | 1. aom/vp9 恒等 effort（探针） | ✅ 完成（`calib-aom` 19m53s、`calib-vp9` 29s、多次通知确认） | `aom_effort_probe/report.txt`（`balanced=6`、`archive` 建议 `4`）；`vp9_effort_probe/report_vp9_effort_probe.txt`（`balanced=2`、`archive` 建议 `4`、`preview`/`draft` 可 `0`/`-4`）；`preset_matrix.xlsx` 已同步（`librav1e` `preview=7`、`balanced=6` 显式 `-speed 6`，零回归；标题行已重建） | 无 |
-| **CPU 基线（✅ 已完结）** | 2. NVENC 三行（p6/p7 可用性） | ⬜ **SKIP（本机无 `hevc_nvenc` 构建）** | 待 T4（阶段四）/ L40（阶段五）阶段补跑（`verify_nvenc_quality_gpu.py` 已记 Turing 无 AV1 编码单元）；`preset_matrix` 已同步 NVENC 行（`p4`/`p6`/`p7`） | 依赖有 GPU 机器 |
-| **CPU 基线（✅ 已完结）** | 3. `bench_preset_ab.py` 并发守卫 | ✅ 完成（代码已改，语法验证通过，`default=None` → `≤ cpu_count//2`） | 代码 diff `Accessory/probe/bench_preset_ab.py` L192-206；防超订守卫已启用（§12.3 他机教训修复） | 无 |
-| **CPU 基线（✅ 已完结）** | 4. libx264/rav1e per-tier 标定排期 | ✅ 方案已文档化（`Plan/_cpu_phase_status_20261016.md` §13.2 / §13.10.1 修正矩阵）；**实际全量标定待 T4/L40 资源排期** | 排期表（8 档 × 2 编码器 = 16 条 `_EQQUAL_TIER_OVERRIDE` 条目）已定义；标定命令模板已就位（`calibrate_equal_quality.py --preset-override <档值> --tag <tier>`）；`_EQQUAL_TIER_OVERRIDE` 已填充矩阵值（`balanced` 确认、`archive` 建议值填入注释、其余档位留空待标定）；阶段一编码实现被用户明确指示延后 | 每档 30~60 分钟；需空载机器 |
-| **阶段一编码实现** | `TIER_PROFILES` + `_EQQUAL_TIER_OVERRIDE` 完整填充 + 四道孪生门 + 基线迁移 | ⬜ **被用户明确指示延后**（§12.5 已拍板：先提 tier 能力、默认仍 `balanced`，再翻默认档为 `quality`；依赖阶段一~二标定数据） | 阶段一后非 `balanced` 档全部处于「未标定」告警状态（预期，不是缺陷）；默认路径长期带告警直到 `quality` 档标定完成 | 依赖阶段一~二标定完成（T4/L40 数据 + CPU 环全档标定） |
-| **阶段二（T4 验证）** | NVENC 三行量程 + `quality`/`archive` 档交叉核验 | ⬜ **未开始**（本机无 GPU 构建 `hevc_nvenc`） | 使用 T4 上 NVENC 输出作为参考基线，验证 aom/vp9 恒等值与 CPU 基线画质等价性（可选）；同步重标 `_QP_AFFINE_QUALITY`（CR-4 跨仓契约）；记录 `_NVENC_PRESET_RETRY` 触发率（§12.3.2 已更正：该常量为防御性兜底，非本仓实测） | 需 T4 机器 |
-| **阶段三（L40 验证）** | `av1_nvenc` 三档 + 全档 LOO 门禁 | ⬜ **未开始**（`av1` 走 `--expect-av1` fail-fast；Turing 无 AV1 编码单元） | 补充 `av1_nvenc` 在 L40 上的可用性与画质数据；若 NVENC 与 CPU 基线差异超门禁，则 NVENC 条目需独立标定 | 需 L40 机器 |
+> 进度表已并入 §12.7（R1 合并）；aom/vp9 探针、并发守卫、libx264/rav1e 排期的现状见该表。
 
-**待执行的具体任务清单（按优先级，全部在 T4/L40 阶段或阶段一之后执行）：**
+**⑤ HDR 域 × tier**：**不在本方案范围**（Part B 顶部范围声明 + `Plan/Handoff_VMAF在SDR2HDR管线不可标定_VU→eqq标定_20261015.md`）；tier × HDR 复合规则见主方案 §4.4.1，单独立项。
 
-1. **T4 阶段（阶段一验证，优先级最高，依赖 GPU）：**
-   - NVENC 三行（`h264_nvenc`、`hevc_nvenc`、`av1_nvenc` 各三档 `quality`/`archive`/`preview`）的实际可用 preset 核验（`p1`~`p7`），记录 `_NVENC_PRESET_RETRY` 触发率（§12.3.2 已更正：该常量为从 VE 借来的防御性兜底，非本仓实测过的失败率）。
-   - 同步重标 `_QP_AFFINE_QUALITY`（hwaccel L1512 / cpu_v2 L1142 / sdr L484）——CR-4 跨仓契约，⑨ 组断言逐条相等。
-   - 使用 NVENC 输出作为参考基线，交叉核验 CPU 侧 aom/vp9 的恒等值在 GPU 路径下是否保持画质等价（可选，非必需）。
+> **R1 作废声明**：原「阶段一编码实现被延后、依赖 1~4 完成」与「零回归保证（默认行为逐字节相同）」两条条款**作废**——H3：阶段一与标定并行（§6.2）；H1=读法 A：不存在零行为变化路径（§5.3/§12.5）。
 
-2. **L40 阶段（阶段二验证，优先级次之）：**
-   - `av1_nvenc` 的 `-preset` 可用性与画质验证（`av1` 走 `--expect-av1` fail-fast；若不可编则 `exit 2` 并记录，不假装通过）。
-   - 补充 `av1_nvenc` 在 L40 上的 `_QP_AFFINE_QUALITY` 条目（若与 CPU 基线差异显著，则需独立标定）。
+**注意事项（唯一一份，R1 去重）**：
 
-3. **CPU 阶段补充（可在任意空载 CPU 机器并行执行，不依赖 GPU）：**
-   - `libx264` / `librav1e` 的 per-tier 标定（§6.2 阶段一额外任务、§13.2 设计已定：每档一套表）。每档用 `calibrate_equal_quality.py --preset-override <该档 preset> --tag <tier>`，产物入 `_EQQUAL_TIER_OVERRIDE[tier]`。估计每档 30~60 分钟，建议分批夜间执行。
-   - `libx265` 的 `archive` 档 `preset` 终值验证：三机复测（无 AVX2 ×2、AVX2 ×1）的 CPU 比约 4.6~4.8×（§13.12），`archive` 档的 `slower` 取值已在常量层确定，需在标定中验证其与 `balanced` `medium` 的 VMAF 差异是否在预期范围内（应反映 `slower` 的搜索增益）。
-   - `libsvtav1` 的 `balanced` 维持 `8`（§13.3.1 实测：auto 字节数与 preset 8 完全相等，preset 7 小 ~15%），`archive` 档 `3`、`quality` 档 `6` 的取值已在常量层承诺，需标定验证。
-   - `libvpx-vp9` 的 `balanced` 恒等值定到 `2`（§13.4 已拍板：先冻结再定值），`archive` 档 `4`、`preview` 档 `5`、`draft` 档 `6`、`test` 档 `8` 的取值已在矩阵中确定，需在标定中验证（注意 `-cpu-used` 允许负值 `-8~8`，负值表示更慢、更高质量）。
+- 全部在**空载**机器上跑（负载 < 核数 10%）；耗时判据用 **CPU(user+sys) 时间**，墙钟仅辅助。
+- 判据用 **LOO + 等 VMAF 码率比**；**不要**用 in-sample 的 `verify_equal_quality.py` 门（不能为表值背书）。
+- 每档标定命令 = `calibrate_equal_quality.py --preset-override <§13.10R 档值> --tag <tier>`；产物含机器/驱动/ffmpeg 指纹（Part B §B6）。
+- `lossless` / `near-lossless` / `draft` / `test` 四档优先级最低、LOO 单独放宽；超门禁保持未标定（Part B §B7）。
+- `_NVENC_PRESET_RETRY` 触发率必须实测记录（不假设为零）；本机无 GPU ⇒ 阶段四/五在有卡机器补跑。
+- `_EQQUAL_TIER_OVERRIDE` 缺键 ⇒ 自动回退 `balanced` 表并告警，允许逐步落地（§2.4 / §10）。
 
-4. **阶段一编码实现（被延后，依赖步骤 1~3 完成）：**
-   - 仅在 `_EQQUAL_TIER_OVERRIDE` 的非 `balanced` 档全部填入真实 `(a,b,lo,hi)` 且 `CALIB_FINGERPRINT` 的 `calibrated` 全为 `True` 之后启动。
-   - 代码改动：`TIER_PROFILES` 填充（§6.2 已列清单）、`DEFAULT_REF` 语义迁移（L388 引用 `TIER_PROFILES['quality']['ref_crf']` = 20）、四份 baseline 迁移（旧 inventory 显式加 `--quality-tier balanced` ⇒ 旧字节转为 `balanced` 档黄金文件；另建 default 新基线）、`memory` 同步、README 更新。
-   - 零回归保证：默认档仍为 `balanced`（不翻），两道判定（`--strict-quality` / `--strict-calib`）默认关，默认行为与今天逐字节相同（§5.3、§2.5 契约变更表已同步）。
+---
 
-5. **阶段一完成后：翻默认档为 `quality`（第二步提交，依赖 VE 同步确认）：**
-   - 仅在 VE 确认 CR-1「默认档」条款（`p6`/`slow`/`6` 替代 `p4`/`medium`/`8`）并同步修改 `Video_Enhancement` 侧的 `BASE_LOCK` 与 `TIER_PROFILES` 后执行（§12.5 已拍板：延后重议）。
-   - 此时默认路径将长期带「未标定」告警（`quality` 档的 `_EQQUAL_TIER_OVERRIDE` 仍为空），直到本阶段的标定数据填入（§2.4、§10 风险「默认路径变成未标定」已同步到三份 help 与 README 首屏）。
+## 13.15 R1 审核决策记录（2026-10-17）
 
-**注意事项（已在状态文档同步）：**
-- 所有测试均应在空载机器上进行（`uptime` 负载应远低于核数的 10%）；若负载超限则推迟测试（§10 风险、§13.12 他机教训）。
-- 耗时判据必须使用 CPU 时间（`user + sys`），而非墙钟，以避免被调度扭曲（§10 风险、§13.12 方法学结论 1）。
-- 每项测试完成后，应记录原始日志、（可选）压缩的中间文件以及最终得到的参数表，以便后复现（§13.14 测试要求）。
-- 本机无法验证 NVENC：`verify_equal_quality.py` 在无 GPU 机器上 NVENC 三档全 SKIP（L43-47）；阶段四/五必须在有卡机器上补跑（§13.8、§10 风险）。
-- `lossless` / `near-lossless` / `draft` / `test` 四档的标定优先级最低，其 LOO 门禁应单独放宽（超低画质区 VMAF 反查条件数本来就差，§13.10 风险表）；若 LOO 超门禁，则该档保持未标定，不强制落表（§B7「LOO 超门禁禁止落表」）。
-- `archive` 档的 `libx265` `preset` 取 `slower`（§13.6 修正：`placebo` 无意义，`slower` 已足够）；若后续 D2 bench 判定 `slower` 对 `archive` 档的画质收益不划算，则回退到只靠 D1（锚点 16）的分化方案（§12.3 已拍板：回退路径留在常量层，不动代码）。
-- `_EQQUAL_TIER_OVERRIDE` 的缺键机制：非 `balanced` 档的缺值 ⇒ 自动回退 `balanced` 的 `QUALITY_MAP` 并打告警（§2.4 指纹制）；这允许逐步落地，不必一次性标定全部 8 档 × 9 编码器（§10 风险「标定工作量爆炸」的缓解方案）。
-- `librav1e` 的 `balanced` 为显式 `-speed 6`（与 native 逐字节相同、零回归；§13.10.1 注记已同步到 `_EQQUAL_TIER_OVERRIDE` L247 注释）；其余档的 `speed` 需各自配表行（§13.10.1 已同步到状态文档与 `Plan/` 矩阵 §13.10 修正矩阵）。
-- `libaom-av1` / `libvpx-vp9` 的 `balanced` 恒等值已在状态文档与矩阵 §13.4 中登记（`cpu-used 2` / `恒等值（待定，已拍板=2）`）；完整标定值（含各档的 `(a,b,lo,hi)`）需 §B4 三环主测后填入 `_EQQUAL_TIER_OVERRIDE`（§13.4 已拍板：先冻结再定值）。
-- `_NVENC_PRESET_RETRY` 的触发率应在阶段二/三的 NVENC 测试中直接记录（§13.7、§13.8、§12.3.2 已更正：该常量为从 VE 借来的防御性兜底，不是本仓实测过的失败率）；阶段二报告应包含该触发率统计（而非假设为零）。
-- `preset_ab_report.xlsx` 与 `bench_preset_ab.py` 已在状态文档中登记（§6.15 阶段零点五 D2 预跑）；阶段三的 CPU 环应复用相同素材池与锚点（§B2），并在报告中注明「本机无 AVX2」或「本机 AVX2 启用」的环境指纹（§13.12 三机对比已同步到 `memory/project_gate_running_gotchas.md` 与状态文档 §13.7 / §13.12）。
-- `memory/project_rate_control_params.md` 与 `MEMORY.md` L203 的 BASE_LOCK 语义已在状态文档中同步（§2.5 契约变更表、§12.5 已拍板）；阶段一完成后需同步更新 `memory` 文件（将「默认路径 = `balanced`」改为「默认路径 = `quality` 的基底」），并注明「`quality` 档未标定告警」的预期状态（§2.4、§5.3、§10 风险已同步到三份 help 与 README 首屏）。
-
-**注意事项**
-   - 所有测试均应在空载机器上进行，建议使用 `uptime` 检查负载；若负载超过核数的 10%，则推迟测试。
-   - 耗时判据必须使用 CPU 时间（user+sys），而非墙钟，以避免被调度扭曲。
-   - 画质度量推荐使用 VMAF 4.0（模型 `vmaf_v0.6.1.pkl`）或 SSIM；若工具不可用，可临时使用 PSNR 但需注意其对感知质量的敏感度较低。
-   - 每项测试完成后，应记录原始日志、（可选）压缩的中间文件（如 YUV 原始帧）以及最终得到的参数表，以便后复现。
-
+| # | 决策 | 内容 | 依据 |
+|---|---|---|---|
+| R1-1 | **H1 = 读法 A** | 窗口/钳制/锚点注入对**全档**生效（含 `balanced`）；旧 baseline 改为「钉档 + 全量重录 + 人工审阅」；`convert_crf.py` 契约句在实现时改写 | 用户拍板（2026-10-17） |
+| R1-2 | **H2 = 唯一权威表** | `TIER_PROFILES` preset 列 = §13.10R = `Accessory/preset_matrix.xlsx`；§4.1/§12.3.2/§13.14 旧值全部作废 | 用户拍板「同意」 |
+| R1-3 | **H3 = 时序重排** | harness 标定先行（`--preset-override` ✅ 已落地）→ 与阶段一 CLI 并行；CLI 端到端（dry-run/告警/窗口/指纹）为阶段一 DoD | 用户拍板 |
+| R1-4 | **H4 = 占位清理** | `_EQQUAL_TIER_OVERRIDE` 非 `balanced` 键一律空 dict；「已标定」只由 `CALIB_FINGERPRINT` 判定（M4：按生效编码器 × strategy） | 用户拍板 |
+| R1-5 | **M1~M9 条文** | M1→§4.1 注/§4.4 步2；M2/M3→§4.3；M4→§2.4；M5→§4.4.1；M6/M8→§4.4 步1；M7→§6.3~6.6；M9→§4.4 样例表/§11 | 用户拍板 |
+| R1-6 | **文档卫生** | 行号→符号（文首注）；§12.7 与 §13.14 台账合并；残留清理（§12.4 等）；「slsx」拼写在实际实现提交中处理 | 用户拍板 |
+| R1-7 | **默认路径轨迹** | 裸跑默认质量值：`21` → **`24`**（阶段一，默认档 `balanced` 锚点）→ **`20`**（翻档后）；三态写进 README/help/memory | R1-1 × Q12 的直接推论 |

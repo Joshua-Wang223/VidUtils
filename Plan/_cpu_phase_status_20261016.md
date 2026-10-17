@@ -1,13 +1,15 @@
-# §13.14 CPU 阶段专项测试计划 — 执行状态（2026-10-16 更新）
+# §13.14 CPU 阶段专项测试计划 — 执行状态（2026-10-16；**R1 更新 2026-10-17**）
 
-依据 Plan/VidUtils_质量参数统一_quality-tier方案_v3_20261015.md §13.14，CPU 阶段分 4 项任务：
+依据 Plan/VidUtils_质量参数统一_quality-tier方案_v3_20261015.md §13.14（**R1 压缩版**）。⚠ **进度以主方案 §12.7（R1 合并台账）为准**，此表仅为 CPU 阶段细目。
+
+> **R1（2026-10-17）**：任务 1 探针已完成（结论见下行）；任务 3 已完成；任务 2/4 的执行方式改走 harness（`--preset-override` ✅ 已落地），且与阶段一 CLI 的时序被重排为并行（H3）。
 
 | # | 任务 | 状态 | 产出 / 结论 | 阻塞 / 备注 |
 |---|---|---|---|---|
-| 1 | **aom / vp9 恒等 effort 定级** | ⬜ 运行中（背景 agent `calib-aom`, `calib-vp9`） | 探针输出将落 `Accessory/calib/eqq_evidence/q3_bench/` 下的 `aom_effort_probe/` / `vp9_effort_probe/` | 无 GPU，不影响 |
+| 1 | **aom / vp9 恒等 effort 定级** | ✅ 完成（2026-10-16/17） | 探针报告：`Accessory/calib/eqq_evidence/q3_bench/aom_effort_probe/`、`vp9_effort_probe/`。**R1 定案**：aom `balanced=6` 冻结（6≡8、4 对 balanced 过慢；BASE_LOCK 口径）、vp9 `balanced=2` 冻结（负值无增益）；快/慢端终值见主方案 §13.10R，xlsx 已同步 | 无 |
 | 2 | **NVENC 三行量程与 p6/p7 可用性** | ⬜ **SKIP（本机无 GPU）** | 需在 T4 / L40 阶段补跑（`verify_nvenc_quality_gpu.py` 已记约束） | 依赖 GPU 机器 |
 | 3 | **bench_preset_ab.py 并发守卫** | ✅ 完成（代码已改，默认 ≤ 逻辑核/2） | 代码 diff 在 `Accessory/probe/bench_preset_ab.py` L192-206 | 无 |
-| 4 | **libx264 / rav1e per-tier 标定排期** | ✅ 方案已文档化（见下）；**实际全量标定待 T4/L40 资源排期** | 排期表（8 档 × 2 编码器 = 16 条 `_EQQUAL_TIER_OVERRIDE` 条目）已定义；标定命令模板已就位 | 每档需 `calibrate_equal_quality.py --preset-override <档值> --tag <tier>` 跑 3 素材 × 5 锚点，预计每档 30~60 分钟 |
+| 4 | **libx264 / rav1e per-tier 标定排期** | ✅ 方案已文档化（见下）；**全量标定：CPU 环可本机先行（空载窗口），T4/L40 待资源排期** | 排期表（8 档 × 2 编码器 = 16 条 `_EQQUAL_TIER_OVERRIDE` 条目）已定义；标定命令模板已就位（`--preset-override` ✅ 已落地） | 每档跑 3 素材 × 5 锚点，预计每档 30~60 分钟 |
 
 ---
 
@@ -85,12 +87,11 @@ calibrate_equal_quality.py \
 | `draft` | veryfast | — |
 | `test` | ultrafast | — |
 
-**librav1e**：每档一套 `-speed`（`native` / 0~10）。排期表：
+**librav1e**：每档一套 `-speed`（native / 0~10）。**R1 档值（= §13.10R）**：test=10 / draft=8 / preview=7 / balanced=**6（显式 `-speed 6`，与 native 逐字节相同）** / quality=4 / archive=2 / near=1 / lossless=0：
 
 | tier | speed | 说明 |
 |---|---|---|
-| `lossless` | native（或 0，待定） | 质量轴被旁路，速度无意义 |
-| ... | ... | 每档需独立 `_EQQUAL_TIER_OVERRIDE` 行 |
+| 全部八档 | 10 / 8 / 7 / 6 / 4 / 2 / 1 / 0 | 每档需独立 `_EQQUAL_TIER_OVERRIDE` **系数行**（speed 值本身不进系数表——它是 `TIER_PROFILES` 的职责） |
 
 **待办（实际执行）**：
 1. 对每档运行 `calibrate_equal_quality.py --preset-override <档值> --tag <tier>`，产物入 `_EQQUAL_TIER_OVERRIDE[tier]`。
@@ -99,9 +100,11 @@ calibrate_equal_quality.py \
 
 ---
 
-## 当前阻塞与后续步骤
-- **无阻塞项可执行**：任务 3（代码）已完成；任务 1、2 的探针数据在背景收集；任务 4 的方案已文档化，但**全量标定需在有充足 CPU 时间（空载、无争用）的条件下逐档执行**，预计每档 30~60 分钟，全部 16 档约 8~16 小时，建议分批在夜间空载时执行。
-- **下一步建议**：
-  1. 检查 `calib-aom` 与 `calib-vp9` 背景 agent 的输出文件（预计在 `Accessory/calib/eqq_evidence/q3_bench/` 下出现 `aom_effort_probe/`、`vp9_effort_probe/` 目录），确认数据完整后读取并整理成 JSON 报告。
-  2. 根据探针结果确定 aom / vp9 的恒等值，并在 `BASE_LOCK` / `TIER_PROFILES` 中固定（不依赖 `auto_effort()` 变值）。
-  3. 在 T4 / L40 阶段补做 NVENC 三行量程核验与 `quality` / `archive` 档的完整标定（任务 2 + 任务 4 实际执行）。
+## 当前阻塞与后续步骤（R1 更新）
+- **状态以主方案 §12.7（R1 合并台账）为准**；本文件不再单独维护进度。
+- 任务 1/3 已完成；任务 2 待有卡机器；任务 4 的档值已定（§13.10R），**执行前置（`--preset-override`）✅ 已落地**。
+- **下一步（按序）**：
+  1. ~~`Accessory/probe/calibrate_equal_quality.py` 落 `--preset-override`~~ ✅ 已完成（2026-10-17；`_lock_for` 统一替换速度轴 + 自测 4 例）。
+  2. 启动 CPU 环：§13.10R 档值 × 六编码器逐档标定（LOO 软编 ≤5.9 / rav1e ≤7.5），产物落 `Accessory/calib/eqq_evidence/<tier>_cpu/`；§B2 的锚点扩展（+0/6/33/39/45）先决。
+  3. 主方案阶段一 CLI 实现与 CPU 环**并行**（H3）；其 DoD 见主方案 §11。
+  4. T4 / L40 阶段补 NVENC 量程核验、`p5/p6/p7` 触发率（红线 1%）与 `_QP_AFFINE_QUALITY` 重标（任务 2 + Part B §B5）。

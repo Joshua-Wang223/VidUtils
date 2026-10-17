@@ -392,7 +392,8 @@ X264_TO_NVENC_PRESET = {
 # 统一质量基准（libx264 CRF 轴）。未给质量参数时按它换算到目标编码器的原生刻度，
 # 保证软编/硬编的**默认视觉质量一致**（V7）：此前 DEFAULT_CRF=21（基准轴）与
 # DEFAULT_CQ=23（CQ 轴，≡ crf 18）并不等效 ⇒ 硬编默认比软编过配 3 档。
-# 换算结果：libx264→21 / libx265→24 / h264_nvenc→26 / hevc_nvenc→28。
+# 换算结果（R1 锚点 24，quality 口径）：libx264→24 / libx265→24 /
+# h264_nvenc→29 / hevc_nvenc→29。
 # 默认质量值（统一基准轴 libx264 CRF）。R1 起语义迁移为「**默认档锚点**」
 # （Plan v3 §2.5 / §6.2：「DEFAULT_REF 常量保留为单一来源，取值改为引用
 # TIER_PROFILES[DEFAULT_TIER]['ref_crf']，不要两处写死」）：
@@ -3586,8 +3587,9 @@ def _resolve_quality_params(
     ⚠ **但别把它一律叫"真无损"**：T4 实测 **NVENC 的 `-rc constqp -qp 0` 不是逐位无损**
     （43417/43448 帧不同），只是最高质量档；本机实测 **libx265 / libx264 的 `-crf 0`
     才是逐位无损**（framemd5 0/50 帧不同）。见 memory/project_rate_control_params.md。
-    非 0 换算的结果**统一钳到 ≥1**：`--cq 4 --codec libx264` 以前会算出 `-crf 0`
-    （真无损、文件巨大），现在得到 `-crf 1`。
+    非 0 换算的结果不再直接下发：R1 起先经档窗口钳制（读法 A，全档生效）——
+    例如 `--cq 4 --codec libx264` 在默认档 balanced 下被钳到 `-crf 23`（并告警）；
+    钳后为 0 时按步骤 2b 走无损哨兵。
 
     Args:
         codec: 实际要用的编码器
@@ -3673,7 +3675,11 @@ def _resolve_quality_params(
             _clamped, _is_clamped = clamp_ref_to_tier(tier, _ref_t)
             if _is_clamped:
                 # 固定告警（三脚本逐字一致）；--strict-quality ⇒ exit 2，首行同句。
-                _nat = from_x264_crf(codec, _clamped)
+                # VAAPI 族在下方「只认 -qp」分支里是**基准轴值直取**（不走等效
+                # 表——表里那行是 CQ 轴口径的偏移行），故告警里的原生值也用
+                # 钳后的基准轴值本身，与真正下发的 -qp 一致。
+                _nat = (_clamped if encoder_supports_qp(codec)
+                        else from_x264_crf(codec, _clamped))
                 _nat_i = (0 if _clamped == 0 else
                           max(1, int(round(_nat)))
                           if _nat is not None else _clamped)

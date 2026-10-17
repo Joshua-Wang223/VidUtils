@@ -169,11 +169,19 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 # 只在"给的是 --cq 但落到 CPU 软编"这一条路径上使用；参数字面量本身不换算。
 try:
     from convert_crf import (SIZE_MAP, QUALITY_MAP, convert_quality, from_x264_crf,
-                             to_x264_crf, get_quality_mode, get_quality_map, set_quality_mode)
+                             to_x264_crf, get_quality_mode, get_quality_map, set_quality_mode,
+                             TIER_PROFILES, QUALITY_TIERS, DEFAULT_QUALITY_TIER,
+                             set_quality_tier, get_quality_tier, tier_anchor, tier_preset,
+                             tier_window, tier_suggest_for, tier_calib_notice,
+                             tier_is_calibrated, clamp_ref_to_tier)
 except ImportError:                       # 从其他工作目录启动时 sys.path 未必含本脚本所在目录
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from convert_crf import (SIZE_MAP, QUALITY_MAP, convert_quality, from_x264_crf,
-                             to_x264_crf, get_quality_mode, get_quality_map, set_quality_mode)
+                             to_x264_crf, get_quality_mode, get_quality_map, set_quality_mode,
+                             TIER_PROFILES, QUALITY_TIERS, DEFAULT_QUALITY_TIER,
+                             set_quality_tier, get_quality_tier, tier_anchor, tier_preset,
+                             tier_window, tier_suggest_for, tier_calib_notice,
+                             tier_is_calibrated, clamp_ref_to_tier)
 
 VIDEO_EXTS = {
     ".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv",
@@ -848,8 +856,12 @@ _HW_ENCODERS = {
 # 统一质量基准（libx264 CRF 轴）。未给质量参数时按它换算到目标编码器的原生刻度，
 # 保证软编/硬编的**默认视觉质量一致**（V7）：此前 DEFAULT_CRF=21（基准轴）与
 # DEFAULT_CQ=23（CQ 轴，≡ crf 18）并不等效 ⇒ 硬编默认比软编过配 3 档。
-# 换算结果：libx264→21 / libx265→24 / h264_nvenc→26 / hevc_nvenc→28。
-DEFAULT_REF = 21
+# 换算结果（R1 锚点 24，quality 口径）：libx264→24 / libx265→24 /
+# h264_nvenc→29 / hevc_nvenc→29。
+# R1 起语义迁移为「**默认档锚点**」（Plan v3 §2.5 / §6.2：「DEFAULT_REF 常量保留为
+# 单一来源，取值改为引用 TIER_PROFILES[DEFAULT_TIER]['ref_crf']，不要两处写死」）：
+# 阶段一默认档 = balanced ⇒ 24；翻档后 DEFAULT_QUALITY_TIER 改 'quality' ⇒ 自动 20。
+DEFAULT_REF = tier_anchor(DEFAULT_QUALITY_TIER)
 
 # 默认视频编码器。--codec 的 argparse 默认值与 --codec auto 的解析结果都用它，
 # 保证 "不指定" 和 "auto" 落到同一个编码器。
@@ -956,13 +968,21 @@ def auto_effort(cpu_count: Optional[int] = None) -> Tuple[int, int]:
     return 8, 10
 
 
-def default_preset_for(codec: str) -> str:
+def default_preset_for(codec: str, tier: Optional[str] = None) -> str:
     """按编码器类型给出默认预设：GPU 硬件编码器 p4，libsvtav1 固定 8，其余 medium。
 
     libsvtav1 的默认档**不再随核数漂移**（V9）：SIZE_MAP 里 svtav1 的等效关系是在
     `-preset 8` 下标定的，若默认档随 `auto_effort()` 变（16 核会给 7），等效点就会漂。
+
+    **R1**：`tier` 给出时**先查 TIER_PROFILES 的档值**（§4.1 = §13.10R，唯一权威）；
+    表里缺该 codec 才落回下面的旧默认。balanced 档值与旧默认逐项相等
+    （p4 / medium / 8），所以默认档行为除「锚点 21→24」外零变化。
     """
     c = codec.lower()
+    if tier is not None:
+        _tp = tier_preset(tier, c)
+        if _tp is not None:
+            return _tp
     if c == "libsvtav1":
         return DEFAULT_PRESET_SVTAV1
     return DEFAULT_PRESET_GPU if c in CQ_SUPPORTED_CODECS else DEFAULT_PRESET_CPU
@@ -981,12 +1001,19 @@ def normalize_codec_name(codec: str) -> str:
     return normalized
 
 
-def normalize_preset(preset: str, target_codec: str) -> str:
+def normalize_preset(preset: str, target_codec: str, quiet: bool = False) -> str:
     """在 NVENC (p1~p7) 与 libx264 风格 (ultrafast~veryslow) 之间自动双向映射。
 
     libsvtav1 另走一套：它的 -preset 是 0~13 的整数，名字类取值一律先换算成
     整数再下发，否则 ffmpeg 解析失败（"Unable to parse option value"）。
+
+    quiet=True 时不打印换算提示：调用方用"默认档位"（而非用户显式给的 --preset）
+    触发换算时，提示里的 `--preset xxx` 会让用户困惑（他从没写过这个值）。
     """
+    def _note(msg: str) -> None:
+        if not quiet:
+            print(msg)
+
     if target_codec == "libsvtav1":
         p = preset.strip().lower()
         if p.lstrip("-").isdigit():
@@ -994,9 +1021,9 @@ def normalize_preset(preset: str, target_codec: str) -> str:
             return str(max(0, min(13, int(p))))
         mapped = NVENC_TO_SVTAV1_PRESET.get(p) or X264_TO_SVTAV1_PRESET.get(p)
         if mapped is not None:
-            print(f"  提示：--preset '{preset}' 已映射为 '{mapped}' (libsvtav1 使用 0~13 整数 preset)。")
+            _note(f"  提示：--preset '{preset}' 已映射为 '{mapped}' (libsvtav1 使用 0~13 整数 preset)。")
             return str(mapped)
-        print(f"  提示：--preset '{preset}' 在 {target_codec} 下无对应，"
+        _note(f"  提示：--preset '{preset}' 在 {target_codec} 下无对应，"
               f"使用默认 '{DEFAULT_PRESET_SVTAV1}'。")
         return DEFAULT_PRESET_SVTAV1
 
@@ -1007,9 +1034,9 @@ def normalize_preset(preset: str, target_codec: str) -> str:
         # libx264 preset -> NVENC preset
         if preset in X264_TO_NVENC_PRESET:
             mapped = X264_TO_NVENC_PRESET[preset]
-            print(f"  提示：--preset '{preset}' 已映射为 '{mapped}' ({target_codec} 使用 NVENC 风格 preset)。")
+            _note(f"  提示：--preset '{preset}' 已映射为 '{mapped}' ({target_codec} 使用 NVENC 风格 preset)。")
             return mapped
-        print(f"  提示：--preset '{preset}' 在 {target_codec} 下无对应，"
+        _note(f"  提示：--preset '{preset}' 在 {target_codec} 下无对应，"
               f"使用默认 '{DEFAULT_PRESET_GPU}'。")
         return DEFAULT_PRESET_GPU
 
@@ -1018,11 +1045,48 @@ def normalize_preset(preset: str, target_codec: str) -> str:
     if target_codec in ("libx264", "libx265") or target_codec in _QSV_CODECS:
         if preset.startswith("p") and preset[1:].isdigit():
             mapped = NVENC_TO_X264_PRESET.get(preset, DEFAULT_PRESET_CPU)
-            print(f"  提示：--preset '{preset}' 已映射为 '{mapped}' ({target_codec} 使用 libx264 风格 preset)。")
+            _note(f"  提示：--preset '{preset}' 已映射为 '{mapped}' ({target_codec} 使用 libx264 风格 preset)。")
             return mapped
         return preset
 
     return preset
+
+
+def tier_deviation_diff(tier: str, codec: str, user_preset: Optional[str],
+                        user_lookahead: Optional[int], user_tune: Optional[str],
+                        user_multipass: Optional[str]) -> Optional[str]:
+    """组合相对该档标定点的差异项（§2.4 指纹；阶段一覆盖显式覆盖的基底轴）。
+
+    只在**生效编码器为 NVENC** 时评估三个 NVENC 轴（CPU 编码器的标定口径是
+    BASE_LOCK，不含它们；tier 对 CPU 编码器也静默跳过注入，用户显式给的值不构成
+    「偏离标定点」）。`--preset` 恒评估（换算到生效编码器后与档值比较）。
+    返回形如 ``--preset slow ≠ 档值 medium`` 的串；无差异返回 None。
+
+    与 vidcrop_hwaccel.py 的同名函数相比**少 --nvenc-aq 一项**（本脚本不收该轴，
+    §8-1）——登记在 §8 的有意不对称。
+    """
+    prof = TIER_PROFILES.get(str(tier)) or {}
+    diffs: List[str] = []
+    if user_preset:
+        _base = tier_preset(tier, codec)
+        if _base is not None:
+            _eff = normalize_preset(user_preset, codec, quiet=True)
+            if _eff != _base:
+                diffs.append(f'--preset {user_preset} ≠ 档值 {_base}')
+    if codec in NVENC_CODECS:
+        _t_la = prof.get('lookahead')
+        if user_lookahead is not None and user_lookahead != _t_la:
+            diffs.append(f'--lookahead {user_lookahead} ≠ '
+                         f'档值 {"不下发" if _t_la is None else _t_la}')
+        _t_tune = prof.get('tune')
+        if user_tune is not None and user_tune != _t_tune:
+            diffs.append(f'--nvenc-tune {user_tune} ≠ '
+                         f'档值 {"不下发" if _t_tune is None else _t_tune}')
+        _t_mp = prof.get('multipass')
+        if user_multipass is not None and user_multipass != _t_mp:
+            diffs.append(f'--nvenc-multipass {user_multipass} ≠ '
+                         f'档值 {"不下发" if _t_mp is None else _t_mp}')
+    return '；'.join(diffs) if diffs else None
 
 
 def encoder_supports_cq(codec: str) -> bool:
@@ -1277,6 +1341,7 @@ def _resolve_quality_params(
     cq_ref: Optional[int] = None,
     qp: Optional[int] = None,
     rc_mode: str = "auto",
+    tier: Optional[str] = None,
 ) -> Tuple[Optional[int], Optional[int], Optional[int]]:
     """
     根据编码器类型确定最终 **(crf, cq, qp)** 三元组，处理参数不匹配、映射与边界。
@@ -1285,6 +1350,11 @@ def _resolve_quality_params(
       · 本脚本是纯 CPU 路径，没有逐策略降级，故不需要 `src_codec` 参数 ——
         `--cq` / `--qp` 的量纲一律按默认硬件编码器 h264_nvenc 解释；
       · 没有 `--fallback-policy`，故没有 strict 分支。
+
+    **R1（§4.4 四步流程）**：所有质量输入先归一到统一基准轴，再被 `--quality-tier`
+    的窗口钳制（**全档生效**，含默认档 balanced，R1 读法 A）；完全未给质量参数时
+    注入默认档锚点（= DEFAULT_REF）。本脚本无 --fallback-policy ⇒ 两道 tier 判定
+    **恒为告警**，永不 exit 2（§8-5）。
 
     三种取值方式（由调用方保证互斥，混用会被拒绝执行）：
       1. --crf / --cq：字面量原样下发——CPU 编码器用 --crf，硬件编码器用 --cq；
@@ -1303,11 +1373,114 @@ def _resolve_quality_params(
     ⚠ **但别把它一律叫"真无损"**：本机实测 **libx265 的 `-crf 0`（+lossless=1）与
     libx264 的 `-crf 0` 是逐位无损**（framemd5 0/50 帧不同）；而 T4 实测
     **NVENC 的 `-rc constqp -qp 0` 不是**（43417/43448 帧不同）。
-    非 0 换算的结果**统一钳到 ≥1**：`--cq 4 --codec libx264` 以前会算出 `-crf 0`
-    （真无损、文件巨大），现在得到 `-crf 1`。
+    非 0 换算的结果不再直接下发：R1 起先经档窗口钳制（读法 A，全档生效）——
+    例如 `--cq 4 --codec libx264` 在默认档 balanced 下被钳到 `-crf 23`（并告警）；
+    钳后为 0 时按步骤 2b 走无损哨兵。
     """
     # 本脚本没有"用户原本请求的硬件编码器"这一层，量纲一律按 h264_nvenc 解释。
     _src = "h264_nvenc"
+
+    # ── [TIER] §4.4 四步流程（R1）：归一到统一基准轴 → 0 哨兵 → 窗口钳制 → 落值 ──
+    # 全档生效（含 balanced，R1 读法 A）：显式质量值先归一到 libx264 CRF 基准轴，
+    # 再被本档窗口约束；**落值**沿用下方「方式 2」既有路径 —— 把结果表达成
+    # crf_ref 即可，不重复实现换算。0 是哨兵：永不钳制/换算（M1：任何来源归一到
+    # 0 —— 含窗口钳制 —— 都必须走既有 `_v == 0` 守卫，不得当普通值下发）。
+    # 本脚本无 --fallback-policy ⇒ 两道 tier 判定**恒为告警**，不升级为 exit 2（§8-5）。
+    if tier is None:
+        tier = get_quality_tier()
+    _tier_hint_mute = False
+    _prof = TIER_PROFILES.get(str(tier))
+    if _prof is not None:
+        _chan = ('crf' if user_crf is not None else
+                 'cq' if user_cq is not None else
+                 'qp' if qp is not None else
+                 'crf-ref' if crf_ref is not None else
+                 'cq-ref' if cq_ref is not None else None)
+        _raw_zero = False
+        if _chan is None:
+            _ref_t = float(tier_anchor(tier))         # 锚点注入（无用户输入）
+            _label = f'--quality-tier {tier} 锚点'
+            _tier_hint_mute = True
+        else:
+            _raw_val = {'crf': user_crf, 'cq': user_cq, 'qp': qp,
+                        'crf-ref': crf_ref, 'cq-ref': cq_ref}[_chan]
+            _raw_zero = (_raw_val == 0)
+            if _chan == 'crf':
+                _r0 = to_x264_crf(codec, user_crf)
+                _ref_t = float(user_crf) if _r0 is None else float(_r0)
+                _label = f'--crf {user_crf}'
+            elif _chan == 'cq':
+                _r0 = to_x264_crf(_src, user_cq)      # M6：与 _src 降级换算同口径
+                _ref_t = float(user_cq) if _r0 is None else float(_r0)
+                _label = f'--cq {user_cq}'
+            elif _chan == 'qp':
+                _ref_t = float(from_constqp_qp(_src, qp))   # M8：既有纯代数反函数
+                _label = f'--qp {qp}'
+            elif _chan == 'crf-ref':
+                _ref_t = float(crf_ref)
+                _label = f'--crf-ref {crf_ref}'
+            else:                                      # cq-ref
+                _r0 = to_x264_crf('h264_nvenc', cq_ref)
+                _ref_t = float(cq_ref) if _r0 is None else float(_r0)
+                _label = f'--cq-ref {cq_ref}'
+
+        if _raw_zero:
+            # 步骤 2a：**原始 0** 短路（M1）。用户明确请求无损 ⇒ 永不钳制、
+            # 不换算、不进窗口；保留原输入通道（提示语只说用户实际写过的那条）。
+            user_crf = user_cq = qp = crf_ref = cq_ref = None
+            if _chan == 'cq':
+                user_cq = 0
+            elif _chan == 'qp':
+                qp = 0
+            elif _chan == 'crf-ref':
+                crf_ref = 0
+            elif _chan == 'cq-ref':
+                cq_ref = 0
+            else:
+                user_crf = 0
+        else:
+            # 步骤 3：窗口钳制（闭区间，八档完整覆盖 [0,51] 且互不重叠 ⇒ 唯一归属）
+            _r_int = int(round(_ref_t))
+            _w_lo, _w_hi = tier_window(tier)
+            _clamped, _is_clamped = clamp_ref_to_tier(tier, _ref_t)
+            if _is_clamped:
+                # 固定告警（三脚本逐字一致）；本脚本无 strict ⇒ 恒为告警（§8-5）。
+                # VAAPI 族在下方「只认 -qp」分支里是**基准轴值直取**（不走等效
+                # 表——表里那行是 CQ 轴口径的偏移行），故告警里的原生值也用
+                # 钳后的基准轴值本身，与真正下发的 -qp 一致。
+                _nat = (_clamped if encoder_supports_qp(codec)
+                        else from_x264_crf(codec, _clamped))
+                _nat_i = (0 if _clamped == 0 else
+                          max(1, int(round(_nat)))
+                          if _nat is not None else _clamped)
+                _flag = ('-cq' if encoder_supports_cq(codec) else
+                         '-qp' if encoder_supports_qp(codec) else '-crf')
+                _sug = tier_suggest_for(_r_int)
+                _sug_txt = ''
+                if _sug is not None and _sug != str(tier):
+                    _s_lo, _s_hi = TIER_PROFILES[_sug]['ref_window']
+                    _sug_txt = (f'。CRF {_r_int} 落在 {_sug} 档（{_s_lo}~{_s_hi}），'
+                                f'请改用 --quality-tier {_sug}')
+                _msg = (f'⚠ --quality-tier {tier} 的质量窗口为 CRF {_w_lo}~{_w_hi}；'
+                        f'{_label}（基准轴 ≈{_ref_t:.1f}）已钳到 {_clamped}'
+                        f'（{codec} {_flag} {_nat_i}）{_sug_txt}')
+                print(_msg)
+            if _clamped == 0:
+                # 步骤 2b：**最终**基准轴值为 0 ⇒ 无损哨兵（M1：含"钳制到 0"，
+                # 也含归一后本身为 0 的情形——如表内钳制把 --cq 4 反解成 0.0）。
+                # 不允许钳完当普通值下发。按目标能力选通道：原通道未必是该编码器
+                # 认的 0 档通道（如 --crf 落到 NVENC 时必须改走 -cq 0 → constqp）。
+                user_crf = user_cq = qp = crf_ref = cq_ref = None
+                if encoder_supports_cq(codec):
+                    user_cq = 0
+                elif encoder_supports_qp(codec):
+                    qp = 0
+                else:
+                    user_crf = 0
+            else:
+                # 步骤 4：把归一/钳制结果表达成 crf_ref，落值交给「方式 2」。
+                user_crf = user_cq = qp = crf_ref = cq_ref = None
+                crf_ref = _clamped
 
     # ── VAAPI 等"只认 -qp"的编码器：所有质量输入先归一到基准轴，再经 -qp 下发 ──
     # 此前它们不属于任何能力集 ⇒ 落到函数末尾的兜底 `return None, None, None`，
@@ -1427,11 +1600,14 @@ def _resolve_quality_params(
             if rc_mode == "constqp":
                 # constqp 的 -qp 是**基准轴**上的真实 QP，不是 CQ 轴值（V1）。
                 _qp = to_constqp_qp(codec, _val)
-                print(f"  提示：{ref_desc} → {codec} 的 -qp {_qp}（rc-mode constqp）。")
+                if not _tier_hint_mute:
+                    print(f"  提示：{ref_desc} → {codec} 的 -qp {_qp}（rc-mode constqp）。")
                 return None, None, _qp
-            print(f"  提示：{ref_desc} → {codec} 的 -cq {_val}。")
+            if not _tier_hint_mute:
+                print(f"  提示：{ref_desc} → {codec} 的 -cq {_val}。")
             return None, _val, None
-        print(f"  提示：{ref_desc} → {codec} 的 -crf {_val}。")
+        if not _tier_hint_mute:
+            print(f"  提示：{ref_desc} → {codec} 的 -crf {_val}。")
         return _val, None, None
 
     # ── 方式 1：字面量原样下发 ────────────────────────────────────────────
@@ -1782,6 +1958,7 @@ def build_encoder_options_v2(
     warn: Callable[[str], None],
     bitrate: Optional[str] = None,
     qp: Optional[int] = None,
+    tier: Optional[str] = None,
 ) -> List[str]:
     """编码器 + **质量参数**（`-c:v` 开头，到 `-cq`/`-crf`/`-b:v 0` 为止）。
 
@@ -1823,7 +2000,13 @@ def build_encoder_options_v2(
         # rav1e 不认 -crf（会被静默忽略），换算成等效 -qp。它已移出
         # CRF_SUPPORTED_CODECS，故必须独立判断（V8）。
         opts += ["-qp", str(crf_to_rav1e_qp(crf))]
-        if _RAV1E_SPEED > 0:                  # 默认 native（不下发 -speed）
+        # 速度轴（R1，§13.10R）：tier 给出时按档恒等下发（balanced=6 与 native
+        # 逐字节相同，显式只为消歧/可复现）；无 tier 时保持旧行为（native 或
+        # _RAV1E_SPEED）。
+        _rav1e_speed = tier_preset(tier, "librav1e") if tier is not None else None
+        if _rav1e_speed is not None:
+            opts += ["-speed", str(_rav1e_speed)]
+        elif _RAV1E_SPEED > 0:                # 旧默认 native（不下发 -speed）
             opts += ["-speed", str(_RAV1E_SPEED)]
     elif crf is not None and encoder_supports_crf(codec):
         if c in ("libvpx", "libvpx-vp9") and not bitrate:
@@ -1844,27 +2027,45 @@ def build_encoder_tail_options(
     preset: str,
     pix_fmt: Optional[str],
     warn: Callable[[str], None],
+    tier: Optional[str] = None,
+    extra_args: Optional[List[str]] = None,
 ) -> List[str]:
     """编码器的**速度档与像素格式**（`-cpu-used` / `-preset` / `-pix_fmt`）。
 
     与 build_encoder_options_v2() 分开、并在 rc 轴之后调用，是为了让命令顺序与
     vidcrop_hwaccel.py 逐字一致（见前者的 docstring）。
+
+    **R1（§13.10R）**：`-cpu-used` 注入改为与 hwaccel 逐字同构 —— aom 档值替换
+    按核漂移的 `auto_effort()`（§13.4 复现性陷阱）；vp9 **新增**注入（旧行为完全
+    不下发、吃 ffmpeg 默认 1，与 BASE_LOCK=2 的标定口径不符）。用户若已在
+    `--extra-args` 显式给过 `-cpu-used` 则尊重用户（不注入）。
     """
     c = codec.lower()
     opts: List[str] = []
     if c == "copy":
         return opts
 
-    # libaom-av1 的速度档位：ffmpeg 默认 -cpu-used=1 慢到不可用（实测 320x240 仅 1fps，
-    # libsvtav1 同期 35fps），按资源自动取值。--extra-args 追加在编码器选项之后，
-    # 因此用户显式指定时以其为准。
-    if c == "libaom-av1":
-        opts += ["-cpu-used", str(auto_effort()[0])]
+    _extra = extra_args or []
+    # 速度轴注入（R1，§13.10R）：libaom-av1 / libvpx-vp9 的 `-cpu-used` 都改为
+    # **按档恒等值**（用户若已在 --extra-args 显式给过同名轴则尊重用户 —— 原样保留）：
+    #   · aom：旧行为按核数 4/5/6/8 漂移（§13.4 复现性陷阱），R1 冻结 balanced=6；
+    #   · vp9：旧行为完全不下发（吃 ffmpeg 默认 1，与 BASE_LOCK=2 的标定口径不符），
+    #     R1 起显式下发档值（balanced=2）。
+    if c == "libaom-av1" and "-cpu-used" not in _extra:
+        _aom_effort = tier_preset(tier, "libaom-av1") if tier is not None else None
+        opts += ["-cpu-used",
+                 str(_aom_effort) if _aom_effort is not None else str(auto_effort()[0])]
+    if c in ("libvpx", "libvpx-vp9") and "-cpu-used" not in _extra:
+        _vp9_effort = tier_preset(tier, "libvpx-vp9") if tier is not None else None
+        if _vp9_effort is not None:
+            opts += ["-cpu-used", str(_vp9_effort)]
 
     if encoder_supports_preset(c):
         opts += ["-preset", preset]
     else:
-        if preset != default_preset_for(c):
+        # 默认档位比较也要带 tier：vp9/aom/rav1e 的"档值"在 TIER_PROFILES 里存的
+        # 是速度轴值（如上），若这里不带 tier，默认填充的档值会被误报"不支持 -preset"。
+        if preset != default_preset_for(c, tier):
             warn(f"编码器 {codec} 不支持 -preset，已忽略 --preset {preset}")
 
     if pix_fmt:
@@ -3236,6 +3437,7 @@ def build_ffmpeg_cmd(
     bitrate: Optional[str] = None,
     nvenc_tune: Optional[str] = None,
     nvenc_multipass: Optional[str] = None,
+    tier: Optional[str] = None,
 ) -> List[str]:
     if codec.lower() == "copy":
         raise ValueError("使用视频滤镜时不能使用 -c:v copy，请改用 libx264 / libx265 等编码器")
@@ -3293,7 +3495,28 @@ def build_ffmpeg_cmd(
     # 速度档(-cpu-used/-preset) → -pix_fmt → 逐流 codec(pres.post) → -threads
     # → 音频 → -x265-params → 容器收尾（两脚本同一条逻辑请求要生成逐字相同的
     # 命令，见 test/dump_cmd_full.sh）。
-    cmd += build_encoder_options_v2(codec, crf, cq, warn, bitrate=bitrate, qp=qp)
+    cmd += build_encoder_options_v2(codec, crf, cq, warn, bitrate=bitrate, qp=qp,
+                                    tier=tier)
+
+    # ── tier 基底注入（R1，§4.3 M2/M3）：lookahead / multipass / tune ──
+    # 只对 NVENC 编码器注入（CPU 行的标定口径是 BASE_LOCK，不含这四个 NVENC
+    # 专属轴）；质量归零（lossless 哨兵路径）时一律不注入：constqp 与
+    # lookahead/multipass 冲突。用户显式值优先（None 才用档值）。
+    # tune 与 hwaccel 有意不对称（§8-2）：本脚本**不派生 uhq** —— 它没有
+    # 「去掉 -tune 重试」的 fallback ladder，派生值踩雷（老驱动不认 uhq）只能
+    # 硬失败；ll 等其它档值无此风险。用户显式 --nvenc-tune 不受影响。
+    if tier is not None and codec in NVENC_CODECS \
+            and not (cq == 0 or crf == 0 or qp == 0):
+        _tprof = TIER_PROFILES.get(str(tier)) or {}
+        _t_la = _tprof.get('lookahead')
+        if lookahead is None and _t_la is not None:
+            lookahead = int(_t_la)
+        _t_mp = _tprof.get('multipass')
+        if nvenc_multipass is None and _t_mp is not None:
+            nvenc_multipass = str(_t_mp)          # 表值 'auto' 已在常量层编码为 None
+        _t_tune = _tprof.get('tune')
+        if nvenc_tune is None and _t_tune is not None and str(_t_tune) != 'uhq':
+            nvenc_tune = str(_t_tune)
 
     # 码率控制轴（--rc-mode / --qp / --lookahead）：-rc / -qp 只有 NVENC 认，
     # lookahead 按编码器分别下发；libx265 那条必须与 HDR 元数据**合并成同一条**
@@ -3307,7 +3530,8 @@ def build_ffmpeg_cmd(
 
     # 速度档与像素格式：必须在 rc 轴**之后**（与 hwaccel 同序，
     # 见 build_encoder_options_v2 的 docstring）
-    cmd += build_encoder_tail_options(codec, preset, pix_fmt, warn)
+    cmd += build_encoder_tail_options(codec, preset, pix_fmt, warn,
+                                      tier=tier, extra_args=extra_args)
 
     cmd += pres["post"]                  # 封面/字幕逐流 codec，需覆盖上面的 -c:v
     # --threads：只对**软件编码器**下发（硬件编码器不吃 ffmpeg 的帧级线程，见 _HW_ENCODERS）。
@@ -3923,6 +4147,7 @@ def prepare_job_command(
             bitrate=args.bitrate,
             nvenc_tune=args.nvenc_tune,
             nvenc_multipass=args.nvenc_multipass,
+            tier=args.quality_tier,
         )
     except Exception as exc:
         job.status = "failed"
@@ -4238,6 +4463,21 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
              "size=等体积（文件大小优先）；quality=等质量（画质优先，默认）。",
     )
     ap.add_argument(
+        "--quality-tier",
+        choices=list(QUALITY_TIERS),
+        default=DEFAULT_QUALITY_TIER,
+        help="质量档位（R1，八档，默认 balanced；最终默认 quality）。"
+             "tier = 编码策略基底（preset/tune/lookahead/multipass，"
+             "由编码器实例化——codec 是输入不是成员）× 质量锚点/窗口 × "
+             "标定指纹。 质量数值（--crf/--cq/--qp/--crf-ref/--cq-ref）"
+             "在档内：先归一到统一基准轴（libx264 CRF）、再被本档窗口"
+             "钳制（越界钳到边界并告警）。 本脚本没有 --strict-quality / "
+             "--strict-calib（§8-5：两道 tier 判定恒为告警）；也**不派生** "
+             "-tune uhq（§8-2 有意不对称：无降级 ladder）。 非 balanced 档"
+             "当前未标定 ⇒ 换算自动回退 balanced 表并告警（预期状态）。 "
+             "默认质量值轨迹：21 → 24（阶段一 balanced 锚点）→ 20（翻档后）",
+    )
+    ap.add_argument(
         "--rc-mode",
         default="auto",
         metavar="MODE",
@@ -4405,9 +4645,13 @@ def validate_and_finalize_args(args: argparse.Namespace) -> None:
         args.codec = DEFAULT_CODEC
         print(f"提示：--codec auto 已解析为 {DEFAULT_CODEC}（本脚本为纯 CPU 路径）。")
 
-    # 未指定 --preset 时按编码器类型取默认：GPU 编码器 p4，CPU 编码器 medium
+    # 未指定 --preset 时按编码器类型取默认：GPU 编码器 p4，CPU 编码器 medium。
+    # R1：默认档位来自 --quality-tier 的档值（§4.1/§13.10R）。**先快照"用户是否
+    # 显式给过 --preset"**——急切填充之后这个信息就没了，概览的标定偏离判定
+    # （§2.4 指纹）需要它。
+    args.preset_explicit = args.preset is not None
     if not args.preset:
-        args.preset = default_preset_for(args.codec)
+        args.preset = default_preset_for(args.codec, args.quality_tier)
 
     # 归一化 preset (NVENC <-> libx264 双向映射)
     args.preset = normalize_preset(args.preset, args.codec)
@@ -4635,7 +4879,7 @@ def validate_and_finalize_args(args: argparse.Namespace) -> None:
     # 解析质量参数 (crf/cq 与 -ref 换算)
     args.crf, args.cq, args.qp = _resolve_quality_params(
         args.codec, args.crf, args.cq, crf_ref=args.crf_ref, cq_ref=args.cq_ref,
-        qp=args.qp, rc_mode=args.rc_mode)
+        qp=args.qp, rc_mode=args.rc_mode, tier=args.quality_tier)
 
     if args.workers < 0:
         raise ValueError("--workers 不能为负数")
@@ -4708,6 +4952,8 @@ def main() -> int:
             args.extra_args = _extra_tail
         # 选定换算口径（等体积/等质量）；默认 volume，旧行为逐字不变。
         set_quality_mode(args.quality_mode)
+        # R1：选定质量档位（活动表按档叠加；默认 balanced）。
+        set_quality_tier(args.quality_tier)
         validate_and_finalize_args(args)
     except ValueError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
@@ -4826,6 +5072,19 @@ def main() -> int:
         + f"   pix_fmt: {args.pix_fmt_display}"
         + f"   color_range: {_cr_disp}"
     )
+    # R1：标定指纹告警（§2.4 固定文案，概览打一次）。未标定档 → 固定「未标定」句；
+    # 已标定档（阶段一 = balanced）但组合偏离标定点（显式覆盖基底轴）→ 偏离句。
+    # 本脚本无 --strict-calib ⇒ 恒为告警（§8-5）。
+    _calib_diff = None
+    if tier_is_calibrated(args.quality_tier, args.codec):
+        _calib_diff = tier_deviation_diff(
+            args.quality_tier, args.codec,
+            args.preset if args.preset_explicit else None,
+            args.lookahead, args.nvenc_tune, args.nvenc_multipass)
+    _calib_notice = tier_calib_notice(args.quality_tier, args.codec,
+                                      diff=_calib_diff)
+    if _calib_notice:
+        print("  " + _calib_notice)
     # 码率控制轴：只在用户真的点了相关参数时才出现这一行（默认全空 → 概览块与引入
     # 这四个参数之前逐字相同）。
     _rc_bits = []

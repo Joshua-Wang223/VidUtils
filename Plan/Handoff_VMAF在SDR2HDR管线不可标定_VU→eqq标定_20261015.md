@@ -155,7 +155,7 @@ x265 短编码自身吃亏 +0.24~+0.74）+ 帧集内容差（fset，−1.41~+0.8
 ⇒ 与 §3.1 是同一类教训的**时序版**：不仅 tonemap 要换域，**短切片同样引入口径偏差**——
 20 帧标定系统性高估 svtav1 相对质量（14 点均值 −0.47 dB、最坏 ~±1.7）。
 
-**处置状态**：重估路径待裁定（A 留痕 / B 全长重标定——CPU 侧、编码量 ×8~10、数小时级
-后台）。全文与证据：`memory/hdr_equal_quality_calibration_10mat_20261016.md` §10.2 +
+**处置状态（2026-10-17 裁定）**：**C+B** —— 先补 3 素材（talking_tom / dark_earth /
+molly_s03e01）全长校验至 10/10（执行中），随后进入全长重标定。全文与证据：`memory/hdr_equal_quality_calibration_10mat_20261016.md` §10.2 +
 `Accessory/calib/eqq_evidence/duration_check_full_20261017/`。本校验覆盖 svtav1 行；
 aom / rav1e / vp9 未测（同方法论、风险同源）。

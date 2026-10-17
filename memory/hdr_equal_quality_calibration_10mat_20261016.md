@@ -260,8 +260,9 @@ aom 分段中枢退化、rav1e 最坏点不降）。
   （`_final_fit.py` / `loo_equal_quality.py` 链）→ 既有「钉值双绿 + 文档/矩阵同步」流程。
   可见收益：直接消除 ctx（本次最大系统性来源，均值 −0.66、最坏 −1.63）；成本：编码量 ×8~10
   （数小时级后台 CPU，可并行）。
-- 其余 3 素材（talking_tom / dark_earth / molly_s03e01）补齐 10-map：B 立项则被其覆盖，
-  否则按需追加（~30~45 min CPU）。
+- C. 其余 3 素材（talking_tom / dark_earth / molly_s03e01）补齐全长校验（证据扩至 10/10）：
+  非终局选项（做完仍回 A/B）；B 实施时其全长母版被直接复用。
+- **裁定（2026-10-17）**：**C + B** —— 先执行 C（3 素材补测 → 10/10），随后进入 B 全长重标定。
 - 证据：`Accessory/calib/eqq_evidence/duration_check_full_20261017/`（7×duration_check.json +
   decomp_summary.json + README）；工具：`Accessory/probe/_duration_check.py`、`_duration_decomp.py`。
 

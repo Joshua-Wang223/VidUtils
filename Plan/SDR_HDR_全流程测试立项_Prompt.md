@@ -394,7 +394,7 @@ AV1 三家（libsvtav1/libaom-av1/librav1e）实测**均写不了**。
 > (libx265 1147s) 实为 **4 路并发**数据，争用把它拖慢 2.2 倍。**以 C7 为准。**
 > ⚠ C7 的 librav1e 是单样本（repeats 3 对它性价比过低，被 2h timeout 截断），非中位数。
 
-#### 4.4.1-补 HDR 域等质量重标定（2026-10-16，**方案 C 已实施**）
+#### 4.4.1-补 HDR 域等质量重标定（2026-10-16 方案 C 已实施；⚠ 2026-10-17 全长校验 4/7 FAIL → 待重估，见节末）
 
 C8 揭示「tonemap 后 VMAF 无判据分辨率」后，按修正口径（**HDR 母版锚 + HDR 域 PSNR 直比**，
 不 tonemap）对三个 AV1 软编重跑了完整标定：**10 素材**（eqq_calib 6s 全集，6 类内容）×
@@ -430,6 +430,21 @@ C8 揭示「tonemap 后 VMAF 无判据分辨率」后，按修正口径（**HDR 
   （svtav1 分段节点 = json `.codecs.libsvtav1.piecewise.knots_cuminc` 4 位舍入）。
 - 详见 `memory/hdr_equal_quality_calibration_10mat_20261016.md` §8（方案 C）、§9（svtav1 分段升级）、
   §10（精度追加执行记录：ref15 补锚已落表、6 锚点裁定；拉长片段差分见 §10.2）（+ 同名 .json 原始数据）。
+
+> ⚠ **精度追加 · 拉长片段差分校验（memory §10.2，2026-10-17 执行完毕 → 判 CHECK/需重估）**：
+> 7 素材 × 2 点（ref21 目标两侧实测 crf）做 **6s 全长 vs 20 帧**差分兑现校验
+> （diff = Δfull − Δ20，判据 |diff| ≤ 0.3 dB）⇒ **3 PASS / 4 FAIL**：
+> PASS = wordworld 0.16 / subs 0.15 / kids_play 0.09（max|diff|）；
+> FAIL = kids_seated −0.76 / grassland +0.66 / screen_ui −1.66 / molly_s01e01 −1.60
+> （每素材两点最坏值，负偏为主、14 点均值 −0.47 dB）。
+> 逐帧分解（20 帧母版 = 全长母版前段字节一致 ⇒ 同帧集对照成立）：**ctx（20 帧单独编码的
+> 上下文偏差）14/14 为负**（均值 −0.66、范围 −0.20~−1.63；x265 短编码自身吃亏
+> +0.24~+0.74 全为正）⇒ 20 帧标定**天然高估 svtav1 相对质量**；**fset（帧集内容差）
+> 符号随素材**（−1.41~+0.88），PASS 三条为两效应相消。
+> **重估路径待裁定（§10.2 决策项）**：A 维持现表 + 留痕（成本 0）/ **B 全长重标定**
+> （§10.2 推荐；直消 ctx；CPU 侧、编码量 ×8~10 数小时级后台；**不改变 T4/L40 清单**）。
+> 本校验覆盖 **svtav1 行**；aom / rav1e / vp9 的时长译移未测（同方法论、风险同源）。
+> 证据：`Accessory/calib/eqq_evidence/duration_check_full_20261017/`；工具 `_duration_check.py` / `_duration_decomp.py`。
 
 #### 4.4.2 T4 侧剩余（8 项，**执行顺序 = 下表顺序**）
 
